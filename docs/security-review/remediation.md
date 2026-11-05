@@ -25,8 +25,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `dcbdb4a`; 41 passed; replay probe green |
 | D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `f618f0e`; 47 passed; corruption probe green |
 | D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `506e8d9`; 61 passed; live SSRF probe green |
-| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | 🔄 | delegated |
-| D7 | 16 — enforcement config agent-mutable | HIGH | ⬜ | |
+| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `89d2264`; 66 passed; fabricated-record probe green |
+| D7 | 16 — enforcement config agent-mutable | HIGH | 🔄 | delegated |
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ⬜ | |
 | D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch-boundary limitation | CRITICAL (arch) | ⬜ | |
 | D10 | 8 — audit chain: honest claim + external head notarization | MEDIUM | ⬜ | |
@@ -41,6 +41,29 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D6 — findings 6 (HIGH) + 19 (HIGH): parent-chain verification ✅
+
+- **Delegated:** full local crypto verification of fetched parent records
+  (call check(), don't modify it), action_text added to the /verify record,
+  child/parent hash-equality policy with three verdicts. Subagent completed
+  in ~344s, TDD (5 new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 66 passed; diff review —
+  verify_parent_approval now requires the claim to match the record (action
+  hash AND challenge id), requires action_text/origin/rp_id for local
+  verification, runs check() against the pinned key, then applies the
+  equality policy; gate_core changes limited to the two allowed (pass child
+  sha, add action_text to the record); probe
+  (`cache/scratch/probe_d6_parentcheck.py`, live stub parent gate): the
+  finding-6 exploit — fabricated record carrying the correct pinned key with
+  no assertion — rejected; genuinely-signed record for the SAME action ->
+  'verified — the same action was signed on peer's gate'; real approval for a
+  DIFFERENT action -> 'context only', never verified; claim/record mismatch
+  and garbage-signature records -> unverified.
+- **Deviations accepted:** 3 existing tests updated (they encoded the
+  pre-fix vulnerable verdicts); challenge_id claim-matching added as an
+  in-scope hardening.
+- **Commit:** `89d2264`.
 
 ### D5 — findings 5 (HIGH) + 23 (MEDIUM): SSRF + redirect fetches ✅
 
