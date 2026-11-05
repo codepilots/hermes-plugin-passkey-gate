@@ -92,7 +92,7 @@ def _apply_config_safe():
 
 
 def _cmd_cli(ctx, args_str: str):
-    """hermes passkey-gate <serve|bootstrap|audit-verify|pin> [args]"""
+    """hermes passkey-gate <serve|bootstrap|audit-verify|pin|expose> [args]"""
     parts = args_str.strip().split()
     cmd = parts[0] if parts else ""
     data_dir = _plugin_data(ctx) if ctx is not None else Path(__file__).resolve().parent / ".gate-data"
@@ -120,7 +120,62 @@ def _cmd_cli(ctx, args_str: str):
         pem = Path(parts[1]).read_text()
         path = local_verify.pin(data_dir, pem)
         return f"pinned owner key to {path}. The agent can now verify approvals against it independently."
-    return "usage: hermes passkey-gate <serve|bootstrap|audit-verify|pin> [args]"
+    if cmd == "expose":
+        return _cmd_expose(ctx, parts[1:], data_dir)
+    return "usage: hermes passkey-gate <serve|bootstrap|audit-verify|pin|expose> [args]"
+
+
+def _cmd_expose(ctx, args, data_dir):
+    """Set up public HTTPS exposure per what the user has installed:
+    configured origin > tailscale serve --bg > cloudflared quick tunnel > help."""
+    from . import expose
+
+    backend = args[0].strip().lower() if args else "auto"
+    if backend not in ("auto", "tailscale", "cloudflare", "none"):
+        return "usage: hermes passkey-gate expose [auto|tailscale|cloudflare|none]"
+    origin_cfg = (ctx.get_config("origin", default="") or "").strip() if ctx is not None else ""
+    rp_cfg = (ctx.get_config("rp_id", default="") or "").strip() if ctx is not None else ""
+    gate_port = int(ctx.get_config("port", default=8655)) if ctx is not None else 8655
+
+    if backend == "auto":
+        result = expose.auto_expose(gate_port, origin_cfg, rp_cfg)
+    elif backend == "tailscale":
+        result = expose.tailscale_expose(gate_port)
+    elif backend == "cloudflare":
+        result = expose.cloudflare_expose(gate_port)
+    else:
+        result = {"ok": False, "backend": "none",
+                  "error": "none requested: set plugins.entries.passkey-gate.settings.origin to your HTTPS origin"}
+    if not result.get("ok"):
+        return json_dumps(result)
+
+    url, rp_id = result["url"], result["rp_id"]
+    lines = [f"exposure ready: {url} (rp_id {rp_id})", result.get("note", "")]
+    if result.get("persistent") and ctx is not None:
+        # persist so future sessions mint challenges to the same origin without
+        # re-running expose (tailscale keeps serving; config is the record)
+        ctx.set_config("origin", url)
+        ctx.set_config("rp_id", rp_id)
+        gate_core.configure(rp_id=rp_id, origin=url)
+        lines.append("saved origin + rp_id to plugin settings")
+    if backend == "cloudflare":
+        lines.append("holding the quick-tunnel process open — Ctrl+C stops the public URL")
+        proc = result.get("process")
+        if proc is not None:
+            try:
+                proc.wait()
+            except KeyboardInterrupt:
+                pass
+    return "\n".join(_nonempty(lines))
+
+
+def _nonempty(lines):
+    return [line for line in lines if line]
+
+
+def json_dumps(obj):
+    import json as _json
+    return _json.dumps(obj, indent=2)
 
 
 def register(ctx):

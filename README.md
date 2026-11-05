@@ -62,10 +62,18 @@ plugins:
 ## First run
 
 ```bash
-# 1) Serve the gate locally (terminate TLS outside: tailscale serve, nginx, ...)
+# 0) Publish a HTTPS URL — auto-detects what you have, in this order:
+#    explicit config origin > tailscale serve --bg > cloudflared quick tunnel.
+#    Detects tailscale/cloudflared themselves, picks a free HTTPS serve port,
+#    derives origin + RP id from tailscale status --json (no shell string
+#    parsing; the serve map is re-read and the new entry located), and saves
+#    both back into plugin settings so challenges mint to the right origin
+#    from the next session on.
+hermes passkey-gate expose            # or: expose tailscale / expose cloudflare
+
+# 1) Serve the gate locally (needed for the HTTP service; `expose` does NOT
+#    start it — tailscaled forwards to it from afar)
 hermes passkey-gate serve
-# with tailscale:
-tailscale serve --bg 8445:8655
 
 # 2) Register passkey -- mint the one-time registration link (prints to
 #    THIS terminal only; never send it through chat)
@@ -78,6 +86,19 @@ hermes passkey-gate pin /path/to/pinned_autumn.pem
 # 4) Audit the log at any time
 hermes passkey-gate audit-verify
 ```
+
+### Exposure backends
+
+| backend | persistence | what happens |
+|---|---|---|
+| tailscale (default pick) | survives restarts | `tailscale serve --bg --https=<port> http://127.0.0.1:<gate>`; URL is your machine's `https://<host>.ts.net[:port]`; every candidate port is VERIFIED with a real TLS `/health` probe before it's accepted (a rule being accepted isn't proof it serves — nginx on 0.0.0.0:443 can shadow it), rejected ports are un-ruled automatically |
+| cloudflare | only while running | `cloudflared tunnel --url` quick tunnel; **URL is ephemeral** — the process must stay alive and re-registering a passkey is needed after URL changes. For stability use a named tunnel (`cloudflared tunnel login` + your own domain) and set `origin` to it |
+| configured origin | yours | set `plugins.entries.passkey-gate.settings.origin` + `rp_id` directly and `expose` just validates |
+
+WebAuthn RP-ID detail: default RP is the full origin hostname — always valid.
+If you already registered a passkey credential under a broader suffix (e.g.
+your tailnet's `*.ts.net` domain), set `rp_id` to that suffix and your
+existing credential works for the plugin without re-registering.
 
 ## Tools
 
