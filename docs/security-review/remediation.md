@@ -23,8 +23,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D1 | 1 — approval page never shows the bound tool call | CRITICAL | ✅ | commit `4956b48`; 33 passed; exploit probe green |
 | D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `36a193e`; 39 passed; 8-way race probe green |
 | D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `dcbdb4a`; 41 passed; replay probe green |
-| D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | 🔄 | delegated |
-| D5 | 5+23 — SSRF: parent allowlist + strict URL parse, no redirects | HIGH+MEDIUM | ⬜ | |
+| D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `f618f0e`; 47 passed; corruption probe green |
+| D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | 🔄 | delegated |
 | D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ⬜ | |
 | D7 | 16 — enforcement config agent-mutable | HIGH | ⬜ | |
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ⬜ | |
@@ -41,6 +41,30 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D4 — findings 17 (HIGH) + 7 (MEDIUM, stale-config half): fail-closed config ✅
+
+- **Delegated:** distinguish not-configured from configuration-failed (block on
+  the latter), wire a _config_error marker through the hook and gate_challenge,
+  invalidate the cache on `set`, reload on settings mtime change. Subagent
+  completed in ~390s, TDD (6 new tests), left uncommitted.
+- **Discovery beyond the review:** Hermes's own config loader silently serves
+  DEFAULTS when config.yaml is unparseable — a naive "load succeeded" check
+  would miss the broken-config case entirely. The fix consults the runtime's
+  recorded parse-failure state (hermes_cli config_read_errors) and fails closed
+  there too.
+- **Verification (independent):** full suite re-run — 47 passed; diff review —
+  _load_config_state returns require_passkey=True + marker on failure, hook
+  blocks on the marker, gate_challenge refuses prose-only challenges while
+  patterns can't be evaluated (bound challenges still mint), cmd_set
+  invalidates, stamp = path/mtime_ns/size/ino/ctime_ns; probe
+  (`cache/scratch/probe_d4_parent.py`): simulated settings-store failure →
+  hook blocks with the reason; no-config → default-off preserved, no marker;
+  prose-only refused under error; out-of-band settings edit → reloaded on the
+  next verdict without restart.
+- **Deviations:** none material (register() now seeds via apply_config_safe —
+  fail-closed from the first moment).
+- **Commit:** `f618f0e`.
 
 ### D3 — findings 14 (HIGH) + 9 (LOW): challenge binding + never-raise ✅
 
