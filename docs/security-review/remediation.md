@@ -27,8 +27,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `506e8d9`; 61 passed; live SSRF probe green |
 | D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `89d2264`; 66 passed; fabricated-record probe green |
 | D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `a5a0cf9`; 78 passed; 19/19 exploit probe green |
-| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | 🔄 | delegated |
-| D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch-boundary limitation | CRITICAL (arch) | ⬜ | |
+| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `a763ad6`; 84 passed; pin probe green |
+| D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch limitation | CRITICAL (arch) | 🔄 | delegated |
 | D10 | 8 — audit chain: honest claim + external head notarization | MEDIUM | ⬜ | |
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ⬜ | |
 | D12 | 11 — challenge creation rate limit | LOW | ⬜ | |
@@ -41,6 +41,25 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D8 — findings 18 (HIGH) + 12 (MEDIUM): pin ceremony ✅
+
+- **Delegated:** validate P-256 public PEM before any write; create pin files
+  exclusively with O_EXCL|O_NOFOLLOW, mode 0600, fsync; refuse replacement
+  and report CLI failures clearly. Subagent completed in ~257s, TDD (6 new
+  tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 84 passed; targeted pin
+  tests — 7 passed; diff review — validation occurs before filesystem access,
+  final destination is opened directly with exclusive/no-follow flags, bytes
+  are fully written and fsynced, and CLI catches read/write/ValueError paths.
+  Probe (`cache/scratch/probe_d8_parent_unique.py`): malformed PEM, RSA, and
+  wrong-curve keys rejected with no pin; valid pin mode 0600; second pin
+  refused with original bytes preserved; symlink destination refused and
+  target untouched.
+- **Deviations:** none material. The owner-derived filename remains
+  predictable by design; collision-resistant naming is explicitly deferred to
+  D17.
+- **Commit:** `a763ad6`.
 
 ### D7 — finding 16 (HIGH): enforcement config agent-mutable ✅
 
