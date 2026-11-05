@@ -11,17 +11,25 @@
                      name the owner to pin PEER keys for parent-approval chains
   show <challenge>   print a pending challenge's URL + QR — the human-lifts-
                      her-phone path when the URL arrived in a chat she's on
-  set <key> <value>  configure a setting (typed parse + validate + persist +
-                     re-apply immediately; same namespace the Desktop form uses)
+  set <key> <value> [--approve <challenge-id>]
+                     configure a setting (typed parse + validate + persist +
+                     re-apply immediately; same namespace the Desktop form
+                     uses). Weakening a security-critical setting — turning
+                     require_passkey off, removing an authority pattern,
+                     adding a parent-gate allowlist entry — is REFUSED unless
+                     --approve names a passkey approval of the exact
+                     server-derived phrase; strengthening is free; both are
+                     audited (finding 16).
   get                show all settings
   audit-verify       check the append-only audit chain intact
 """
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
-from . import gate_core, expose, local_verify, netfetch
+from . import gate_core, expose, local_verify, netfetch, tools
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,12 @@ DEFAULTS = {
     "authority_patterns": [],
     "parent_gate_allowlist": [],
 }
+
+# finding 16: the settings that define what the gate enforces. An agent with
+# terminal access could disarm any of them with one unauthenticated `set`, so
+# weakening one requires a passkey approval of an exact server-derived
+# phrase; strengthening is free; every change is audited.
+SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist")
 
 _ctx_ref = None
 _cfg_cache = None
@@ -277,9 +291,181 @@ def time_left(row):
     return row["expires_at"] - time.time()
 
 
+# ------------------------------------------------- finding 16: gated `set`
+def _split_approve_flag(rest):
+    """Pull `--approve <challenge-id>` off a set command's args.
+    Returns (positional_args, challenge_id_or_None, error_or_None)."""
+    args = list(rest)
+    if "--approve" not in args:
+        return args, None, None
+    i = args.index("--approve")
+    if i + 1 >= len(args):
+        return (args, None,
+                "--approve needs the challenge id of the passkey approval, e.g.: "
+                "hermes passkey-gate set require_passkey false --approve <challenge-id>")
+    cid = args[i + 1].strip()
+    del args[i:i + 2]
+    return args, cid, None
+
+
+def _canonical_value(value):
+    """Canonical JSON spelling of a setting value — the exact form embedded in
+    the server-derived approval phrase, so what the human reads and signs is
+    byte-identical to what cmd_set re-derives at verification time."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def weakening_phrase(key, new_value):
+    """The EXACT server-derived action text a passkey must sign to authorize
+    this gate-weakening change (finding 16). One derivation serves both the
+    mint and the verification, so the two can never drift apart."""
+    return (f"passkey-gate: set {key}={_canonical_value(new_value)} — "
+            "confirm this gate-weakening change")
+
+
+def _normalize_typed(key, value):
+    """Coerce a stored setting to its declared type for direction comparison.
+    None means 'so malformed the direction cannot be judged' (fail closed)."""
+    typ = SETTINGS_SPEC[key]["type"]
+    if typ == "bool":
+        return bool(value)
+    if typ == "list":
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(x) for x in value]
+        return None
+    return value
+
+
+def _change_weakens(key, old, new):
+    """True when a change makes the gate easier to bypass (finding 16):
+    turning require_passkey off, removing any authority pattern (or
+    shrinking/emptying the list), or adding a parent-gate allowlist entry.
+    The reverse directions are free; a change whose direction cannot be
+    judged counts as weakening."""
+    old_n, new_n = _normalize_typed(key, old), _normalize_typed(key, new)
+    if old_n is None or new_n is None:
+        return True  # cannot judge the direction -> fail closed
+    if key == "require_passkey":
+        return bool(old_n) and not bool(new_n)
+    if key == "authority_patterns":
+        if not (isinstance(old_n, list) and isinstance(new_n, list)):
+            return True  # a non-list in a list slot cannot be judged -> fail closed
+        removed = set(old_n) - set(new_n)
+        return bool(removed) or len(new_n) < len(old_n)
+    if key == "parent_gate_allowlist":
+        if not (isinstance(old_n, list) and isinstance(new_n, list)):
+            return True
+        return bool(set(new_n) - set(old_n))
+    return False
+
+
+def _jsonable(value):
+    """Audit-safe representation: JSON values pass through, anything exotic
+    degrades to its repr instead of letting audit() raise."""
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _ensure_data_dir():
+    """gate_core.audit() assumes the data dir already exists (db() normally
+    creates it); a `set` can run before anything else has touched a fresh
+    install, so create it here — the same mkdir+chmod db() itself does."""
+    try:
+        d = gate_core.data_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+    except Exception:
+        pass
+
+
+def _verify_weakening_approval(cid, phrase):
+    """Problems list for a --approve challenge; empty == a passkey owned by
+    the pinned human signed this exact phrase. Uses gate_verify's fetch path
+    (same origin/redirect rules, same seams), then re-derives every claim
+    LOCALLY — the gate's yes/no is never trusted on its own."""
+    base = tools._base_url()
+    if not base.startswith(("http://", "https://")):
+        return ["the gate origin is not configured — set "
+                "plugins.entries.passkey-gate.settings.origin (or run "
+                "'hermes passkey-gate expose') so the approval can be checked "
+                "against the gate"]
+    sha = tools.hashlib_sha256(phrase)
+    rec = tools._fetch_verify(base, cid, sha)
+    if not isinstance(rec, dict):
+        return [f"the gate returned {rec!r} instead of an approval record"]
+    status = rec.get("status")
+    if status != "approved":
+        detail = f" ({rec['error']})" if isinstance(rec.get("error"), str) else ""
+        return [f"the approval challenge status is {status!r}, not approved{detail} — "
+                "the human has not signed this exact change (or the approval is "
+                "expired or already consumed)"]
+    if rec.get("action_sha256") != sha:
+        return ["the approval was signed for different action text than this "
+                "change requires"]
+    pinned = local_verify.pinned(gate_core.data_dir())
+    if pinned is None:
+        return ["no owner key is pinned — pin the human's public key out of band "
+                "with 'hermes passkey-gate pin <pem-file>' before any gate-weakening "
+                "change can be approved"]
+    return [f"local verification failed: {p}" for p in
+            local_verify.check(rec, phrase, tools._origin(), gate_core.rp_id(), pinned)]
+
+
+def _weakening_needs_approval(key, new_value, raw):
+    """Refusal that carries its own recovery (finding 16): mint the approval
+    challenge for the EXACT server-derived phrase and hand back the URL, the
+    challenge id, and the --approve re-run — the human decides, not the agent
+    this setting is meant to constrain."""
+    phrase = weakening_phrase(key, new_value)
+    lines = [f"REFUSED: set {key} weakens the passkey gate — enforcement settings "
+             "are operator-owned, and a gate-weakening change needs a passkey "
+             "approval signed by your human first.",
+             "",
+             "approval phrase (the human signs EXACTLY this):",
+             f"  {phrase}"]
+    try:
+        c = gate_core.create_challenge(phrase, "hermes-cli")
+    except Exception as exc:
+        c = None
+        lines.append(f"  (no approval challenge could be minted here — {type(exc).__name__}: "
+                     f"{exc}; mint one with the gate_challenge tool using the phrase above)")
+    if c:
+        if c.get("url"):
+            lines += ["", "approval URL — send it to your human; they read the page "
+                      "and sign with their passkey:", f"  {c['url']}"]
+        else:
+            lines += ["", "the gate origin is not configured, so there is no approval "
+                      "URL yet — run 'hermes passkey-gate expose' (or set origin), "
+                      "then re-run this command"]
+        lines += ["", "once they approve, re-run the same change with:",
+                  f"  hermes passkey-gate set {key} {raw} --approve {c['challenge_id']}"]
+    return "\n".join(lines)
+
+
+def _weakening_approval_failed(key, new_value, problems):
+    """Refusal for a --approve that did not verify, with the reasons."""
+    return "\n".join(
+        [f"REFUSED: set {key} weakens the passkey gate, and the supplied approval "
+         "did not verify for this exact change:"] +
+        [f"  - {p}" for p in problems] +
+        ["", "approval phrase this change requires (the human must sign exactly this):",
+         f"  {weakening_phrase(key, new_value)}",
+         "re-run without --approve to mint a fresh approval challenge, send its URL "
+         "to your human, and re-run with --approve once they have signed it."])
+
+
 def cmd_set(ctx, rest):
     if not rest:
-        return "usage: hermes passkey-gate set <key> <value> — keys: " + ", ".join(SETTINGS_SPEC)
+        return ("usage: hermes passkey-gate set <key> <value> [--approve <challenge-id>] — keys: "
+                + ", ".join(SETTINGS_SPEC))
+    rest, approve_cid, flag_err = _split_approve_flag(rest)
+    if flag_err:
+        return flag_err
     key, raw = rest[0], " ".join(rest[1:])
     if key not in SETTINGS_SPEC:
         return f"unknown setting {key!r}. Keys: " + ", ".join(SETTINGS_SPEC)
@@ -294,6 +480,43 @@ def cmd_set(ctx, rest):
             netfetch.parse_gate_origin(value)
         except ValueError as exc:
             return f"origin rejected: {exc} — WebAuthn needs https (loopback http tolerated for dev)"
+    _ensure_data_dir()  # audit() needs the data dir; db() may never have run
+    if key in SECURITY_KEYS:
+        # finding 16: enforcement policy is operator-owned, not agent-mutable.
+        # A WEAKENING change is refused unless --approve names a passkey
+        # approval of the exact server-derived phrase; strengthening applies
+        # free; both directions are audited.
+        try:
+            old = ctx.get_config(key, default=DEFAULTS.get(key))
+        except Exception as exc:
+            return (f"REFUSED: the current {key} cannot be read to tell whether this "
+                    f"change weakens the gate ({type(exc).__name__}: {exc}) — a "
+                    "security-critical setting is never changed while its current "
+                    "value is unreadable")
+        weakens = _change_weakens(key, old, value)
+        if weakens:
+            if approve_cid is None:
+                return _weakening_needs_approval(key, value, raw)
+            problems = _verify_weakening_approval(approve_cid, weakening_phrase(key, value))
+            if problems:
+                return _weakening_approval_failed(key, value, problems)
+        # audit BEFORE applying: a security-critical change that cannot be
+        # audited does not happen
+        try:
+            gate_core.audit("config_changed", key=key, old=_jsonable(old), new=_jsonable(value),
+                            weakened=weakens, approved=approve_cid if weakens else None)
+        except Exception as exc:
+            return (f"REFUSED: this change could not be recorded in the audit log "
+                    f"({type(exc).__name__}: {exc}) — a security-critical change that "
+                    f"cannot be audited does not happen. Fix the gate's data directory "
+                    f"({gate_core.data_dir()}) and re-run.")
+    else:
+        try:  # non-security keys keep today's behavior; the audit is best-effort
+            gate_core.audit("config_changed", key=key,
+                            old=_jsonable(ctx.get_config(key, default=DEFAULTS.get(key))),
+                            new=_jsonable(value), weakened=False, approved=None)
+        except Exception:
+            pass
     ctx.set_config(key, value)
     # finding 7: a running gateway must see this change on the NEXT hook
     # call — drop the cache before re-applying so no verdict serves stale state

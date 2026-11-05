@@ -15,6 +15,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import secrets
 import struct
 import sys
@@ -667,8 +668,15 @@ def test_cmd_set_takes_effect_without_restart(monkeypatch):
     assert v is not None and v["action"] == "block"
     assert "gate_challenge" in v["message"]  # an ordinary enforcement block
 
-    cli.cmd_set(ctx, ["require_passkey", "false"])
-    assert passkey_gate._on_pre_tool_call("terminal", call, "t3") is None
+    # finding 16: turning enforcement OFF is gate-weakening — refused without
+    # a passkey approval of the exact server-derived phrase, and the next
+    # verdict shows enforcement still ON (a refused change never leaks into
+    # the cache, so the finding-7 reload story is unchanged)
+    out = cli.cmd_set(ctx, ["require_passkey", "false"])
+    assert "require_passkey = false" not in out
+    assert "passkey-gate: set require_passkey=false" in out
+    v = passkey_gate._on_pre_tool_call("terminal", call, "t3")
+    assert v is not None and v["action"] == "block"
 
 
 def test_settings_source_edit_reloads_without_restart(monkeypatch):
@@ -730,3 +738,198 @@ def test_register_with_broken_config_fails_closed(monkeypatch):
     assert cfg["require_passkey"] is True and cfg["_config_error"]
     v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
     assert v is not None and v["action"] == "block" and "failed to load" in v["message"]
+
+
+# ------------------- finding 16: enforcement config is not agent-mutable
+WEAKEN_OFF_PHRASE = ("passkey-gate: set require_passkey=false — "
+                     "confirm this gate-weakening change")
+
+
+def weaken_phrase(key, canonical_value):
+    """The spec-exact server-derived phrase a passkey must sign to authorize a
+    gate-weakening `set`: 'passkey-gate: set <key>=<canonical-new-value> —
+    confirm this gate-weakening change'."""
+    return (f"passkey-gate: set {key}={canonical_value} — "
+            "confirm this gate-weakening change")
+
+
+def _set_ctx(monkeypatch, **settings):
+    """A FakeCtx wired through reset_gate_config for one cmd_set test."""
+    cli = reset_gate_config(monkeypatch)
+    ctx = FakeCtx(settings)
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    return cli, ctx
+
+
+def _audit_records(event):
+    path = Path(TMP) / "audit.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("event") == event:
+            out.append(rec)
+    return out
+
+
+def _config_audit(key):
+    return [r for r in _audit_records("config_changed") if r.get("key") == key]
+
+
+def test_set_weakening_refused_without_approval(monkeypatch, base, autumn):
+    """Finding 16 exploit: `set require_passkey false` while enforcement is ON,
+    no approval — must be refused, the setting untouched, and the refusal
+    itself must teach the recovery: the exact server-derived approval phrase,
+    a minted approval URL for the human, and the --approve re-run."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    out = cli.cmd_set(ctx, ["require_passkey", "false"])
+    assert "require_passkey = false" not in out  # not applied
+    assert ctx.settings["require_passkey"] is True  # enforcement untouched
+    assert WEAKEN_OFF_PHRASE in out  # the exact approval phrase, verbatim
+    assert "--approve" in out  # how the change gets completed
+    m = re.search(r"/a/([A-Za-z0-9_-]+)", out)
+    assert m, out  # a minted approval URL to hand the human
+    row = gate_core.db().execute("select * from challenges where id=?",
+                                 (m.group(1),)).fetchone()
+    assert row is not None and row["action_text"] == WEAKEN_OFF_PHRASE
+    assert row["status"] == "pending"
+
+
+def test_set_weakening_applied_with_passkey_approval(monkeypatch, base, autumn):
+    """The same weakening change WITH a real human passkey signature over the
+    exact phrase: fetched through gate_verify's path, verified locally against
+    the pinned owner key, applied, and audited with the challenge id."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)  # the gate_verify fetch path
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
+    assert "require_passkey = false" in out, out
+    assert ctx.settings["require_passkey"] is False
+    cc = _config_audit("require_passkey")
+    assert cc, "config_changed audit entry missing"
+    assert cc[-1]["weakened"] is True and cc[-1]["approved"] == c["challenge_id"]
+    assert cc[-1]["old"] is True and cc[-1]["new"] is False
+
+
+def test_set_strengthening_is_free_and_audited(monkeypatch):
+    """Turning enforcement ON is the direction an attacker never wants: it
+    applies immediately with no approval, and is still audited."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=False)
+    out = cli.cmd_set(ctx, ["require_passkey", "true"])
+    assert "require_passkey = true" in out
+    assert ctx.settings["require_passkey"] is True
+    cc = _config_audit("require_passkey")
+    assert cc and cc[-1]["weakened"] is False and cc[-1]["approved"] is None
+    assert cc[-1]["old"] is False and cc[-1]["new"] is True
+
+
+def test_set_authority_pattern_removal_refused_without_approval(monkeypatch):
+    """Disarming a pattern is the finding-16 exploit in list form: removing
+    'rm -rf' from authority_patterns without a passkey approval is refused."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True,
+                        authority_patterns=[r"ssh git@100", r"rm -rf"])
+    out = cli.cmd_set(ctx, ["authority_patterns", '["ssh git@100"]'])
+    assert ctx.settings["authority_patterns"] == [r"ssh git@100", r"rm -rf"]
+    assert weaken_phrase("authority_patterns", '["ssh git@100"]') in out
+    assert "--approve" in out
+
+
+def test_set_authority_patterns_emptying_refused_without_approval(monkeypatch):
+    """Emptying the pattern list disarms every pattern at once — refused."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True,
+                        authority_patterns=[r"ssh git@100"])
+    out = cli.cmd_set(ctx, ["authority_patterns", "[]"])
+    assert ctx.settings["authority_patterns"] == [r"ssh git@100"]
+    assert weaken_phrase("authority_patterns", "[]") in out
+
+
+def test_set_authority_pattern_addition_is_free(monkeypatch):
+    """Adding a pattern only tightens the gate — applied with no approval."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True,
+                        authority_patterns=[r"ssh git@100"])
+    out = cli.cmd_set(ctx, ["authority_patterns", '["ssh git@100", "curl"]'])
+    assert ctx.settings["authority_patterns"] == ["ssh git@100", "curl"]
+    cc = _config_audit("authority_patterns")
+    assert cc and cc[-1]["weakened"] is False and cc[-1]["approved"] is None
+    assert cc[-1]["new"] == ["ssh git@100", "curl"]
+
+
+def test_set_parent_allowlist_addition_refused_without_approval(monkeypatch):
+    """Adding a parent-gate allowlist entry widens who the gate will fetch —
+    gate-weakening, so it is refused without a passkey approval."""
+    cli, ctx = _set_ctx(monkeypatch,
+                        parent_gate_allowlist=["https://peer-a.example.ts.net:8445"])
+    new = '["https://peer-a.example.ts.net:8445","https://peer-b.example.ts.net:8445"]'
+    out = cli.cmd_set(ctx, ["parent_gate_allowlist", new])
+    assert ctx.settings["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445"]
+    assert weaken_phrase("parent_gate_allowlist", new) in out
+    assert "--approve" in out
+
+
+def test_set_parent_allowlist_removal_is_free(monkeypatch):
+    """Removing an allowlist entry narrows the gate — free, and the classic
+    flag-free dispatch shape keeps working for it."""
+    cli, ctx = _set_ctx(monkeypatch,
+                        parent_gate_allowlist=["https://peer-a.example.ts.net:8445",
+                                                "https://peer-b.example.ts.net:8445"])
+    out = cli.dispatch(ctx, "set parent_gate_allowlist https://peer-a.example.ts.net:8445")
+    assert ctx.settings["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445"]
+    assert "parent_gate_allowlist = " in out
+    cc = _config_audit("parent_gate_allowlist")
+    assert cc and cc[-1]["weakened"] is False and cc[-1]["approved"] is None
+
+
+def test_set_approve_with_wrong_action_text_refused(monkeypatch, base, autumn):
+    """--approve with a challenge the human signed for DIFFERENT action text
+    (an unconsumed but mismatched approval) must not authorize the change."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base)  # the classic ACTION text, genuinely human-signed
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
+    assert ctx.settings["require_passkey"] is True  # unchanged
+    assert "REFUSED" in out and "denied" in out  # mismatched sha -> denied
+
+
+def test_set_approve_rejects_unapproved_and_bogus_challenges(monkeypatch, base, autumn):
+    """--approve with a challenge nobody has signed yet, or a bogus id,
+    refuses; nothing is applied."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    pending = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", pending["challenge_id"]])
+    assert ctx.settings["require_passkey"] is True
+    assert "REFUSED" in out and "pending" in out
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", "A" * 24])
+    assert ctx.settings["require_passkey"] is True
+    assert "REFUSED" in out
+
+
+def test_set_approve_requires_a_pinned_owner_key(monkeypatch, base, autumn):
+    """Pin missing -> refuse: an approval that cannot be checked against the
+    out-of-band pinned key authorizes nothing (a self-registered rogue
+    credential must not pass --approve)."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    monkeypatch.setattr(local_verify, "pinned", lambda data_dir, owner=None: None)
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
+    assert ctx.settings["require_passkey"] is True
+    assert "REFUSED" in out and "pin" in out
+
+
+def test_set_approve_flag_needs_a_challenge_id(monkeypatch):
+    """A dangling --approve is a usage error, never a silent apply."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve"])
+    assert ctx.settings["require_passkey"] is True
+    assert "challenge id" in out

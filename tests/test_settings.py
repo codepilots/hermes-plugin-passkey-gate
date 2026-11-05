@@ -88,13 +88,22 @@ def test_set_origin_is_parsed_not_prefix_checked():
 
 def test_set_parent_gate_allowlist_roundtrip():
     """Finding 5's config key: allowed parent-gate origins, parsed as a list
-    (JSON or comma form) and persisted like every other setting."""
+    (JSON or comma form) and persisted like every other setting. Finding 16:
+    ADDING an allowlist entry is gate-weakening, so it is refused without a
+    passkey approval; REMOVING entries applies immediately."""
     ctx = FakeCtx()
-    out = _cli(ctx, "set parent_gate_allowlist https://peer-a.example.ts.net:8445,https://peer-b.example.ts.net")
-    assert ctx.store["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445",
-                                                  "https://peer-b.example.ts.net"]
-    out = _cli(ctx, 'set parent_gate_allowlist ["https://peer-c.example.ts.net"]')
-    assert ctx.store["parent_gate_allowlist"] == ["https://peer-c.example.ts.net"]
+    out = _cli(ctx, "set parent_gate_allowlist https://peer-a.example.ts.net:8445,https://peer-b.example.ts.net:8445")
+    # the comma form parses (the refusal echoes the canonical new value), but
+    # adding entries is gate-weakening -> refused, nothing persisted
+    assert ctx.store.get("parent_gate_allowlist") is None
+    assert '["https://peer-a.example.ts.net:8445","https://peer-b.example.ts.net:8445"]' in out
+    assert "confirm this gate-weakening change" in out
+    assert "--approve" in out
+    # removing an entry is strengthening: parsed, persisted, no approval needed
+    ctx.store["parent_gate_allowlist"] = ["https://peer-a.example.ts.net:8445",
+                                          "https://peer-b.example.ts.net:8445"]
+    out = _cli(ctx, "set parent_gate_allowlist https://peer-a.example.ts.net:8445")
+    assert ctx.store["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445"]
     show = _cli(ctx, "get")
     assert "parent_gate_allowlist" in show
 
