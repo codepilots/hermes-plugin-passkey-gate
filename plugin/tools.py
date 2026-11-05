@@ -93,10 +93,19 @@ def gate_status(args: dict, **kwargs) -> str:
     out["gate"] = _fetch_health(base)
     out["rp_id"] = gate_core.rp_id()
     out["origin_configured"] = bool(_origin())
+    out["backends_detected"] = _detect_backends()
     out["owner_key_pinned"] = local_verify.pinned(gate_core.data_dir()) is not None
     if args.get("audit_check", True):
         out["audit"] = gate_core.audit_verify()
     return json.dumps(out)
+
+
+def _detect_backends():
+    try:
+        from . import expose
+        return expose.detect_backends()
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------- helpers
