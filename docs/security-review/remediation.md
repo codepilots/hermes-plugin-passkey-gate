@@ -26,8 +26,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `f618f0e`; 47 passed; corruption probe green |
 | D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `506e8d9`; 61 passed; live SSRF probe green |
 | D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `89d2264`; 66 passed; fabricated-record probe green |
-| D7 | 16 — enforcement config agent-mutable | HIGH | 🔄 | delegated |
-| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ⬜ | |
+| D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `a5a0cf9`; 78 passed; 19/19 exploit probe green |
+| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | 🔄 | delegated |
 | D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch-boundary limitation | CRITICAL (arch) | ⬜ | |
 | D10 | 8 — audit chain: honest claim + external head notarization | MEDIUM | ⬜ | |
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ⬜ | |
@@ -41,6 +41,28 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D7 — finding 16 (HIGH): enforcement config agent-mutable ✅
+
+- **Delegated:** classify security-critical setting changes by direction;
+  require a passkey approval of an exact server-derived phrase for weakening
+  (`require_passkey` off, pattern removal, allowlist addition), leave
+  strengthening free, audit every critical change before applying. Subagent
+  completed in ~603s, TDD (12 new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 78 passed; static scan
+  found no hardcoded secrets, shell injection, eval/exec, or unsafe
+  deserialization in added lines; probe
+  (`cache/scratch/probe_d7_finding16.py`): 19/19 passed — unauthenticated
+  weakening refused and leaves enforcement active; exact phrase and recovery
+  URL emitted; approved weakening applies; approval cannot transfer between
+  settings; strengthening applies without approval; config_changed audit
+  entries contain old/new/approved fields; refused attempts create no audit
+  entry; audit chain remains intact.
+- **Deviations accepted:** two existing tests were updated because they
+  asserted the pre-fix unsafe behavior; one settings test was updated for the
+  new fail-closed allowlist policy. The underlying reload contract remains
+  covered.
+- **Commit:** `a5a0cf9`.
 
 ### D6 — findings 6 (HIGH) + 19 (HIGH): parent-chain verification ✅
 
