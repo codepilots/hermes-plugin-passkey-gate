@@ -1,0 +1,57 @@
+name: passkey-gate
+
+version: 0.1.0
+
+description: >
+  Passkey (WebAuthn) authorization gate for high-authority agent actions.
+  The agent mints a challenge bound bit-for-bit to the exact action text and
+  tool call; only a human passkey can approve it; the agent then verifies the
+  signed assertion locally against a pinned public key before acting.
+  No agent ever holds a private key, approvals are single-use, and an
+  append-only hash-chained audit log makes any tampering detectable.
+
+author: Autumn Thomson (codepilots)
+
+provides_tools:
+  - gate_challenge
+  - gate_verify
+  - gate_status
+
+provides_hooks:
+  - pre_tool_call
+
+config_schema:
+  origin:
+    type: str
+    default: ""
+    label: "Gate origin"
+    description: "HTTPS origin of the gate service, e.g. https://your-host.ts.net:8445. Leave empty to run the verifier in offline-check-only mode against an already-fetched record."
+  rp_id:
+    type: str
+    default: ""
+    label: "RP ID"
+    description: "WebAuthn RP ID — usually the domain name the gate origin is served on (e.g. yourhost.ts.net)."
+  port:
+    type: int
+    default: 8655
+    label: "Serve port"
+    description: "Port for 'hermes passkey-gate serve' (binds 127.0.0.1; put it behind TLS with tailscale serve, an nginx proxy, or similar)."
+  challenge_ttl:
+    type: int
+    default: 600
+    label: "Challenge TTL"
+    description: "Seconds a challenge stays pending after creation."
+  require_passkey:
+    type: bool
+    default: false
+    label: "Enforce passkey before listed tool calls"
+    description: "When true, pre_tool_call blocks tool calls matching authority_patterns unless a challenge bound to that exact tool call was approved (and binds user verification). Opt-in."
+  authority_patterns:
+    type: list
+    default: []
+    label: "Authority patterns"
+    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .* - (rm|sudo|curl |mv |dd )') that trigger passkey enforcement when require_passkey is true."
+
+python_dependencies:
+  - webauthn==1.11.*
+  - qrcode==7.*

@@ -1,0 +1,10 @@
+[project]
+name = "hermes-plugin-passkey-gate"
+version = "0.1.0"
+description = "Passkey (WebAuthn) authorization gate for high-authority Hermes agent actions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "webauthn>=1.11,<2",
+    "qrcode>=7,<9",
+]
