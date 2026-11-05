@@ -12,6 +12,7 @@ is exactly-once.
 """
 import base64
 import hashlib
+import html
 import json
 import os
 import secrets
@@ -291,3 +292,71 @@ def test_tool_handlers_json_shapes(base, autumn):
     # status handler shape
     st = json.loads(tools.gate_status({"audit_check": True}))
     assert st["ok"] is True and "gate" in st
+
+
+# ------------------------------------------- finding 1: approval confusion
+def test_approval_page_shows_bound_tool_call(base):
+    """The human signs what executes: the page must render the exact canonical
+    tool call the binding covers, in its own prominent block, and say that the
+    bound call — not the prose — is what executes."""
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    s, page = call(base, f"/a/{c['challenge_id']}")
+    assert s == 200
+    canonical = tools.canonical_for_hook(TOOL_CALL["tool"], TOOL_CALL["args"])
+    assert "THE EXACT COMMAND YOU ARE APPROVING" in page
+    assert html.escape(canonical) in page  # the byte-exact canonical JSON, escaped
+    assert "not the prose" in page and "executes" in page
+    # text-only challenge: no bound-call block, and that is stated plainly
+    c2 = new_challenge(base, requester="sorrel")
+    s, page2 = call(base, f"/a/{c2['challenge_id']}")
+    assert s == 200
+    assert "THE EXACT COMMAND YOU ARE APPROVING" not in page2
+    assert "No tool call is bound" in page2
+
+
+def test_verify_record_includes_bound_tool_call(base, autumn):
+    """The /verify record carries the canonical tool call (already public on
+    the page), byte-exact so it can be hashed straight against binding_sha256."""
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    approve(base, autumn, c["challenge_id"])
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert s == 200 and rec["status"] == "approved"
+    assert json.loads(rec["tool_call"]) == TOOL_CALL
+    assert hashlib.sha256(rec["tool_call"].encode()).hexdigest() == c["binding_sha256"]
+
+
+def test_gate_verify_reports_bound_tool_call(monkeypatch, base, autumn):
+    """gate_verify tells the calling agent exactly what it verified, so it can
+    confirm the approval covers the call it is about to make."""
+    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)  # fetch from the test gate
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
+    assert out["ok"] is True and out["verified"] is True, out
+    assert out["bound_tool_call"] == TOOL_CALL
+    assert out["binding_sha256"] == c["binding_sha256"]
+
+
+def test_gate_challenge_requires_tool_call_when_enforced(monkeypatch):
+    """With enforcement on, an action matching an authority pattern cannot be
+    minted as signable prose alone — the exact tool_call must be bound."""
+    from passkey_gate import cli
+    text = ("Delete the build scratch tree by running rm -rf /tmp/scratch-build "
+            "on the workshop host tonight.")
+    monkeypatch.setattr(cli, "_cfg_cache", {"require_passkey": True, "patterns": [r"rm -rf"]})
+    out = json.loads(tools.gate_challenge({"action_text": text, "requester": "sorrel"}))
+    assert out["ok"] is False and "tool_call" in out["error"] and "exact" in out["error"]
+    # supplying the exact call is accepted and binds it
+    call_obj = {"tool": "terminal", "args": {"command": "rm -rf /tmp/scratch-build"}}
+    out = json.loads(tools.gate_challenge({"action_text": text, "requester": "sorrel",
+                                           "tool_call": call_obj}))
+    assert out["ok"] is True and out["binding_sha256"]
+    # enforcement off -> text-only challenges stay allowed
+    monkeypatch.setattr(cli, "_cfg_cache", {"require_passkey": False, "patterns": [r"rm -rf"]})
+    out = json.loads(tools.gate_challenge({"action_text": text, "requester": "sorrel"}))
+    assert out["ok"] is True
+    # enforcement on but the action matches no pattern -> text-only stays allowed
+    monkeypatch.setattr(cli, "_cfg_cache", {"require_passkey": True, "patterns": [r"never-matches-this"]})
+    out = json.loads(tools.gate_challenge({"action_text": text, "requester": "sorrel"}))
+    assert out["ok"] is True

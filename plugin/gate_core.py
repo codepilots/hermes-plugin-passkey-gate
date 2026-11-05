@@ -128,13 +128,13 @@ def db():
     CREATE TABLE IF NOT EXISTS reg_sessions(id TEXT PRIMARY KEY, token_hash TEXT NOT NULL,
         challenge BLOB NOT NULL, expires_at REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS challenges(id TEXT PRIMARY KEY, action_text TEXT NOT NULL,
-        action_sha256 TEXT NOT NULL, binding_sha256 TEXT, requester TEXT NOT NULL,
+        action_sha256 TEXT NOT NULL, binding_sha256 TEXT, tool_call TEXT, requester TEXT NOT NULL,
         requester_owner TEXT, why TEXT, parent_approval TEXT, parent_verified TEXT,
         challenge BLOB NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
         status TEXT NOT NULL, decided_at REAL, credential_id TEXT, authenticator_data TEXT,
         client_data_json TEXT, signature TEXT, user_handle TEXT);
     """)
-    for col in ("requester_owner", "why", "parent_approval", "parent_verified"):
+    for col in ("requester_owner", "why", "parent_approval", "parent_verified", "tool_call"):
         try:
             c.execute(f"alter table challenges add column {col} TEXT")
         except sqlite3.OperationalError:
@@ -191,11 +191,17 @@ def sha256_hex(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def canonical_binding_json(tool_call: dict) -> str:
+    """Canonical JSON of a structured tool call — the byte-exact form that
+    binding_sha256 hashes, that the approval page renders, and that the
+    /verify record returns, so all three always agree bit-for-bit."""
+    return json.dumps(tool_call, sort_keys=True, separators=(",", ":"))
+
+
 def canonical_binding(tool_call: dict) -> str:
     """Canonical hash of a structured tool call — what the enforcement hook
     re-derives at execution time so a challenge covers exactly one action."""
-    body = json.dumps(tool_call, sort_keys=True, separators=(",", ":"))
-    return sha256_hex(body)
+    return sha256_hex(canonical_binding_json(tool_call))
 
 
 def specificity_problem(text):
@@ -274,17 +280,18 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
         audit("challenge_rejected", requester=requester, reason=prob)
         raise ValueError(prob)
     sha = sha256_hex(text)
-    binding = canonical_binding(tool_call) if tool_call else None
+    binding_json = canonical_binding_json(tool_call) if tool_call else None
+    binding = sha256_hex(binding_json) if binding_json else None
     cid = secrets.token_urlsafe(24)
     chal = bytes.fromhex(sha) + secrets.token_bytes(32)  # nonce = text sha256 + entropy
     now = time.time()
     parent_json = json.dumps(parent, sort_keys=True, separators=(",", ":")) if parent else None
     pv = local_verify.verify_parent_approval(parent, data_dir()) if parent else None
     db().execute(
-        "insert into challenges(id,action_text,action_sha256,binding_sha256,requester,"
+        "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
         "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"
-        " values(?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
-        (cid, text, sha, binding, requester, owner or None, why or None,
+        " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
+        (cid, text, sha, binding, binding_json, requester, owner or None, why or None,
          parent_json, pv, chal, now, now + challenge_ttl()))
     audit("challenge_created", challenge_id=cid, action_sha256=sha,
           binding_sha256=binding, requester=requester, requester_owner=owner or None,
@@ -316,7 +323,8 @@ def challenge_status(cid: str, sha: str) -> GateResult:
     cred = db().execute("select * from credentials where id=?", (row["credential_id"],)).fetchone()
     audit("verify_approved", challenge_id=cid, action_sha256=row["action_sha256"], outcome="approved")
     rec = GateResult(status="approved", challenge_id=cid, action_sha256=row["action_sha256"],
-                     binding_sha256=row["binding_sha256"], requester=row["requester"],
+                     binding_sha256=row["binding_sha256"], tool_call=row["tool_call"],
+                     requester=row["requester"],
                      created_at=row["created_at"], approved_at=row["decided_at"],
                      rp_id=rp_id(), origin=origin(),
                      challenge_b64url=bytes_to_base64url(row["challenge"]),
@@ -505,6 +513,18 @@ def approval_page(row):
     why_block = ""
     if row["why"]:
         why_block = f'<p class="why"><b>Why this ask:</b> {html.escape(row["why"])}</p>'
+    if row["tool_call"]:
+        call_block = (
+            '<div class="bound-call"><h2>THE EXACT COMMAND YOU ARE APPROVING</h2>'
+            '<p>This request is bound to the tool call below. <b>The bound tool call, '
+            'not the prose above, is what executes if you approve</b> — the prose can '
+            'say anything, so check this call character by character before signing.</p>'
+            f'<pre class="action">{html.escape(row["tool_call"])}</pre></div>')
+    else:
+        call_block = (
+            '<div class="bound-call"><b>No tool call is bound to this request.</b> '
+            'This is a text-only approval: your signature covers the action text '
+            'above, and nothing here is bound for execution.</div>')
     parent_block = ""
     if row["parent_approval"]:
         try:
@@ -530,6 +550,7 @@ You are the only one who can sign this &mdash; agents cannot, and no relay of
 "someone approved it" counts without this signature.</p>
 <pre class="action">{html.escape(row['action_text'])}</pre>
 <p class="sha">sha256 {row['action_sha256']}</p>
+{call_block}
 {parent_block}
 {actions}<p id="msg"></p>
 <div id="cid" data-id="{row['id']}"></div>"""

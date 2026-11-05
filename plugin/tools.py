@@ -41,6 +41,28 @@ def gate_challenge(args: dict, **kwargs) -> str:
                            f"you named a different owner ({owner!r}), so the signer may be a "
                            "stranger to your project: write `why` — one plain sentence for THEM "
                            "saying what signing enables and why it is safe"})
+    if not tool_call:
+        # Approval-confusion fix: with enforcement on, prose that matches an
+        # authority pattern must not be signable without the exact call it
+        # covers — the human approves the bound tool call, not the prose.
+        try:
+            from . import cli  # same config cache path the pre_tool_call hook uses
+            cfg = cli.apply_config_safe()
+        except Exception:
+            cfg = {}
+        if cfg.get("require_passkey"):
+            for pat in cfg.get("patterns") or []:
+                try:
+                    if re.search(pat, text or ""):
+                        return json.dumps({"ok": False, "error": (
+                            f"enforcement is on and this action matches an authority "
+                            f"pattern ({pat!r}), but no tool_call was supplied. Pass the "
+                            "exact tool_call you intend to run, shaped "
+                            "{'tool': <name>, 'args': <the same args object>}: the human "
+                            "approves, and the hook enforces, the bound tool call — "
+                            "not the prose.")})
+                except re.error:
+                    continue
     try:
         c = gate_core.create_challenge(text, requester, tool_call,
                                        requester_owner=owner, why=why,
@@ -103,12 +125,20 @@ def gate_verify(args: dict, **kwargs) -> str:
         binding_note = None
         if rec.get("binding_sha256"):
             binding_note = "challenge is bound to a specific canonical tool call"
-        return json.dumps({"ok": True, "verified": not problems, "problems": problems,
-                           "challenge_id": cid, "action_sha256": rec.get("action_sha256"),
-                           "approved_at": rec.get("approved_at"),
-                           "binding_sha256": rec.get("binding_sha256"),
-                           "binding_note": binding_note,
-                           "audit_head": rec.get("audit_head")})
+        out = {"ok": True, "verified": not problems, "problems": problems,
+               "challenge_id": cid, "action_sha256": rec.get("action_sha256"),
+               "approved_at": rec.get("approved_at"),
+               "binding_sha256": rec.get("binding_sha256"),
+               "binding_note": binding_note,
+               "audit_head": rec.get("audit_head")}
+        if rec.get("tool_call"):
+            # tell the caller exactly what the approval covers, so it can
+            # confirm the call it is about to make is the one that was bound
+            try:
+                out["bound_tool_call"] = json.loads(rec["tool_call"])
+            except (TypeError, ValueError):
+                out["bound_tool_call"] = rec["tool_call"]
+        return json.dumps(out)
     return json.dumps({"ok": True, "verified": False, "status": last.get("status", "error"),
                        "challenge_id": cid})
 
