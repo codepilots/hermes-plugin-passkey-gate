@@ -1,0 +1,169 @@
+"""Tool handlers + enforcement logic.
+
+Handlers follow Hermes plugin rules: (args: dict, **kwargs) -> JSON string,
+never raise, same JSON shape on error. The enforcement pieces
+(`authority_matches`, `hook_verdict`) are shared with the pre_tool_call hook
+in __init__.py and tested directly.
+"""
+import json
+import re
+import time
+import urllib.request
+
+from . import gate_core, local_verify
+
+# Where gate_core keeps its mutable module-level configuration
+
+
+def _origin() -> str:
+    return gate_core.origin()
+
+
+def _base_url() -> str:
+    return _origin().rstrip("/")
+
+
+def gate_challenge(args: dict, **kwargs) -> str:
+    text = args.get("action_text")
+    requester = args.get("requester") or "unknown"
+    tool_call = args.get("tool_call") or None
+    try:
+        c = gate_core.create_challenge(text, requester, tool_call)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)})
+    out = {"ok": True, **c}
+    out["instructions"] = (
+        "Send the human the approval URL and say exactly what it approves. "
+        "Ask them to check the page shows the action in full before signing. "
+        "Then gate_verify with challenge_id and the same action_text before acting."
+    )
+    if c.get("url") is None:
+        out["error_hint"] = "gate origin is not configured — set plugins.entries.passkey-gate.settings.origin"
+    return json.dumps(out)
+
+
+def gate_verify(args: dict, **kwargs) -> str:
+    cid = args.get("challenge_id") or ""
+    text = args.get("action_text") or ""
+    wait_s = min(max(int(args.get("wait_seconds") or 0), 0), 120)
+    max_age = args.get("max_age")
+
+    if not cid or not text:
+        return json.dumps({"ok": False, "error": "challenge_id and action_text required"})
+    if not (_base_url().startswith("https://") or _base_url().startswith("http://")):
+        return json.dumps({"ok": False,
+                           "error": "gate origin not configured — set plugins.entries.passkey-gate.settings.origin"})
+
+    base = _base_url()
+    sha = hashlib_sha256(text)
+    deadline = time.time() + wait_s
+    last: dict = {"status": "no-gate"}
+    while True:
+        rec = _fetch_verify(base, cid, sha)
+        last = rec if isinstance(rec, dict) else {"status": "error"}
+        st = last.get("status")
+        if st in ("approved", "denied", "expired") or time.time() >= deadline:
+            break
+        time.sleep(2)
+    if last.get("status") == "approved":
+        rec = last
+        pinned = local_verify.pinned(gate_core.data_dir())
+        problems = local_verify.check(rec, text, _origin(), gate_core.rp_id(), pinned, max_age)
+        if pinned is None:
+            problems.append(
+                "no owner key pinned yet — pin it out of band with "
+                "'hermes passkey-gate pin <pem-file>' before trusting approvals"
+            )
+        binding_note = None
+        if rec.get("binding_sha256"):
+            binding_note = "challenge is bound to a specific canonical tool call"
+        return json.dumps({"ok": True, "verified": not problems, "problems": problems,
+                           "challenge_id": cid, "action_sha256": rec.get("action_sha256"),
+                           "approved_at": rec.get("approved_at"),
+                           "binding_sha256": rec.get("binding_sha256"),
+                           "binding_note": binding_note,
+                           "audit_head": rec.get("audit_head")})
+    return json.dumps({"ok": True, "verified": False, "status": last.get("status", "error"),
+                       "challenge_id": cid})
+
+
+def gate_status(args: dict, **kwargs) -> str:
+    out = {"ok": True}
+    base = _base_url()
+    out["gate"] = _fetch_health(base)
+    out["rp_id"] = gate_core.rp_id()
+    out["origin_configured"] = bool(_origin())
+    out["owner_key_pinned"] = local_verify.pinned(gate_core.data_dir()) is not None
+    if args.get("audit_check", True):
+        out["audit"] = gate_core.audit_verify()
+    return json.dumps(out)
+
+
+# ---------------------------------------------------------------- helpers
+def hashlib_sha256(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _fetch_verify(base: str, cid: str, sha: str):
+    url = f"{base}/verify/{cid}?action_sha256={sha}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return json.loads(r.read())
+    except Exception as exc:
+        return {"status": "error", "error": f"gate not reachable: {type(exc).__name__}"}
+
+
+def _fetch_health(base: str):
+    try:
+        with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
+            return json.loads(r.read())
+    except Exception as exc:
+        return {"status": "unreachable", "error": f"{type(exc).__name__}"}
+
+
+# ---------------------------------------------------------------- enforcement
+def canonical_for_hook(tool_name: str, args) -> str:
+    """The exact string the challenge binding hashes. Deterministic key order,
+    compact separators — both the challenge minter and this hook call IT."""
+    return json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
+
+
+def authority_matches(patterns, tool_name: str, args) -> re.Match | None:
+    subject = tool_name + " " + canonical_for_hook(tool_name, args)
+    for pat in patterns or []:
+        try:
+            if re.search(pat, subject):
+                return pat
+        except re.error:
+            continue
+    return None
+
+
+def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict | None:
+    """pre_tool_call directive: block until this exact call is passkey-approved.
+
+    Never approves anything itself — fail closed. Returns None when no
+    pattern matches (or enforcement is off), letting Hermes's own approval
+    system do whatever it would do anyway.
+    """
+    if not require_passkey:
+        return None
+    matched = authority_matches(patterns, tool_name, args)
+    if matched is None:
+        return None
+    binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
+    row = gate_core.pending_for_binding(binding)
+    if row is None:
+        return {"action": "block", "message": (
+            "Passkey gate: this tool call matches an authority pattern, but no "
+            f"approved passkey challenge covers it (pattern: {matched}). "
+            "Call gate_challenge first with action_text describing EXACTLY this "
+            f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
+            "send the human the approval URL, wait for their passkey signature, "
+            "then retry this identical tool call verbatim. If you disagree that "
+            "this requires an approval, say so instead of trying to retry it."
+        )}
+    gate_core.consume(row["id"], binding)
+    # allow = no block directive; the challenge is consumed and audited
+    return None

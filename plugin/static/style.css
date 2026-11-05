@@ -1,0 +1,10 @@
+body{font:16px/1.5 system-ui,sans-serif;background:#10170f;color:#e8efe4;margin:0}
+main{max-width:640px;margin:0 auto;padding:24px 18px}
+h1{color:#9fd18b;font-size:1.4em}
+.meta{color:#b8c7b0}.warn{color:#f0c674}
+pre.action{white-space:pre-wrap;word-break:break-word;background:#1b2619;border:1px solid #3d5a34;border-radius:8px;padding:14px;font-size:1.05em}
+.sha{font:12px monospace;color:#7d8f76;word-break:break-all}
+.buttons{display:flex;gap:12px;margin:18px 0}
+button{flex:1;font-size:1.05em;padding:14px;border-radius:8px;border:0;cursor:pointer}
+.approve{background:#4f8a3c;color:#fff}.deny{background:#5a2b2b;color:#fff}
+.ok{color:#9fd18b}.err{color:#f08080}
