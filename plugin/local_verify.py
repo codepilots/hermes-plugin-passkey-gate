@@ -2,13 +2,17 @@
 
 Don't trust the gate endpoint's yes/no: re-derive every claim locally.
 ``check(rec, action_text, expected_origin, expected_rp_id, pinned_pem, max_age)``
-returns a problems list; empty == cryptographically verified. Needs only
+returns a problems list; empty == cryptographically verified. It NEVER
+raises: any malformed or missing field becomes a problem entry. Needs only
 ``cryptography`` (a Hermes core dep), no network.
 
 Checks, all local:
   1. sha256(action_text) == rec.action_sha256
   2. clientDataJSON: type == webauthn.get, origin == expected,
      challenge[:32] == sha256(action_text)  (approval bound to EXACT text)
+     and challenge == the record's OWN recorded challenge (finding 14:
+     a signature minted under one nonce cannot verify another record,
+     even one for the same action text)
   3. authenticatorData: rpIdHash == sha256(rp_id), UP and UV flags set
   4. signature over authenticatorData || sha256(clientDataJSON) verifies
      with the public key in the record
@@ -32,51 +36,121 @@ def b64u(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
+def _b64u_or_none(s):
+    """b64u that returns None instead of raising on garbage/non-strings —
+    check() must never raise, so malformed fields become problems (finding 9)."""
+    try:
+        return b64u(s)
+    except Exception:
+        return None
+
+
 def check(rec, action_text, expected_origin, expected_rp_id, pinned_pem=None, max_age=None):
-    errs = []
-    sha = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
+    """Problems list for an approval record; empty == cryptographically
+    verified. NEVER raises (finding 9): every malformed or missing field
+    appends a problem. The signed assertion must be bound to the EXACT
+    challenge recorded for THIS record (finding 14) — not merely to a nonce
+    whose leading bytes hash the action text, which would let a signature
+    obtained under one challenge verify another record of the same text.
+    """
+    if not isinstance(rec, dict):
+        return ["record is not a JSON object"]
+    if not isinstance(action_text, str):
+        return ["action_text must be a string"]
     if rec.get("status") != "approved":
         return [f"status is {rec.get('status')!r}, not approved"]
-    if rec["action_sha256"] != sha:
-        errs.append("action_sha256 does not match the action text")
-    if rec["origin"] != expected_origin or rec["rp_id"] != expected_rp_id:
-        errs.append("record origin/rp_id differ from expected")
-    a = rec["assertion"]
-    cdj_raw = b64u(a["client_data_json"])
-    cd = json.loads(cdj_raw)
-    if cd.get("type") != "webauthn.get":
-        errs.append("clientData type is not webauthn.get")
-    if cd.get("origin") != expected_origin:
-        errs.append(f"clientData origin {cd.get('origin')!r} != {expected_origin!r}")
-    if b64u(cd.get("challenge", ""))[:32].hex() != sha:
-        errs.append("signed challenge is not bound to this action text")
-    ad = b64u(a["authenticator_data"])
-    if ad[:32] != hashlib.sha256(expected_rp_id.encode()).digest():
-        errs.append("rpIdHash mismatch")
-    flags = ad[32]
-    if not flags & 0x01:
-        errs.append("user-presence flag not set")
-    if not flags & 0x04:
-        errs.append("user-verification flag not set")
-    pem = rec["credential_public_key"]["spki_pem"]
-    if pinned_pem is not None and pinned_pem.strip() != pem.strip():
-        errs.append("public key does not match the pinned key")
-    key = serialization.load_pem_public_key(pem.encode())
-    signed = ad + hashlib.sha256(cdj_raw).digest()
-    sig = b64u(a["signature"])
+    errs = []
     try:
-        if isinstance(key, ec.EllipticCurvePublicKey):
-            key.verify(sig, signed, ec.ECDSA(hashes.SHA256()))
-        elif isinstance(key, ed25519.Ed25519PublicKey):
-            key.verify(sig, signed)
-        elif isinstance(key, rsa.RSAPublicKey):
-            key.verify(sig, signed, padding.PKCS1v15(), hashes.SHA256())
+        sha = hashlib.sha256(action_text.encode("utf-8")).hexdigest()
+        if rec.get("action_sha256") != sha:
+            errs.append("action_sha256 does not match the action text")
+        if rec.get("origin") != expected_origin or rec.get("rp_id") != expected_rp_id:
+            errs.append("record origin/rp_id differ from expected")
+        a = rec.get("assertion")
+        if not isinstance(a, dict):
+            a = {}
+            errs.append("record has no signed assertion")
+        cdj_raw = _b64u_or_none(a.get("client_data_json"))
+        cd = {}
+        if cdj_raw is None:
+            cdj_raw = b""
+            errs.append("client_data_json is not decodable base64url")
         else:
-            errs.append("unsupported key type")
-    except InvalidSignature:
-        errs.append("SIGNATURE INVALID")
-    if max_age is not None and time.time() - rec["approved_at"] > max_age:
-        errs.append(f"approval older than {max_age}s")
+            try:
+                cd = json.loads(cdj_raw)
+            except ValueError:
+                cd = {}
+                errs.append("client_data_json is not valid JSON")
+        if not isinstance(cd, dict):
+            cd = {}
+            errs.append("client_data_json is not a JSON object")
+        if cd.get("type") != "webauthn.get":
+            errs.append("clientData type is not webauthn.get")
+        if cd.get("origin") != expected_origin:
+            errs.append(f"clientData origin {cd.get('origin')!r} != {expected_origin!r}")
+        signed_challenge = _b64u_or_none(cd.get("challenge", ""))
+        if signed_challenge is None:
+            signed_challenge = b""
+            errs.append("signed challenge is not decodable base64url")
+        # defense in depth: the recorded nonce embeds sha256(action_text)
+        if signed_challenge[:32].hex() != sha:
+            errs.append("signed challenge is not bound to this action text")
+        # finding 14: the assertion signs THIS record's exact nonce (action
+        # hash + entropy) — a mismatch (or a record with no challenge_b64url)
+        # means the signature was minted for a different gate record
+        recorded_challenge = _b64u_or_none(rec.get("challenge_b64url"))
+        if recorded_challenge is None or signed_challenge != recorded_challenge:
+            errs.append("signed challenge does not match the recorded challenge")
+        ad = _b64u_or_none(a.get("authenticator_data"))
+        if not ad or len(ad) < 33:
+            errs.append("authenticator_data is missing or malformed")
+            ad = b""
+        else:
+            if ad[:32] != hashlib.sha256(expected_rp_id.encode()).digest():
+                errs.append("rpIdHash mismatch")
+            flags = ad[32]
+            if not flags & 0x01:
+                errs.append("user-presence flag not set")
+            if not flags & 0x04:
+                errs.append("user-verification flag not set")
+        cpk = rec.get("credential_public_key")
+        pem = cpk.get("spki_pem") if isinstance(cpk, dict) else None
+        key = None
+        if not isinstance(pem, str) or not pem.strip():
+            errs.append("record has no credential_public_key.spki_pem")
+        else:
+            if pinned_pem is not None and pinned_pem.strip() != pem.strip():
+                errs.append("public key does not match the pinned key")
+            try:
+                key = serialization.load_pem_public_key(pem.encode())
+            except Exception:
+                errs.append("credential_public_key.spki_pem is not a loadable public key")
+        sig = _b64u_or_none(a.get("signature"))
+        if key is None or not cdj_raw or not ad or sig is None:
+            errs.append("signature could not be verified with this record")
+        else:
+            signed = ad + hashlib.sha256(cdj_raw).digest()
+            try:
+                if isinstance(key, ec.EllipticCurvePublicKey):
+                    key.verify(sig, signed, ec.ECDSA(hashes.SHA256()))
+                elif isinstance(key, ed25519.Ed25519PublicKey):
+                    key.verify(sig, signed)
+                elif isinstance(key, rsa.RSAPublicKey):
+                    key.verify(sig, signed, padding.PKCS1v15(), hashes.SHA256())
+                else:
+                    errs.append("unsupported key type")
+            except InvalidSignature:
+                errs.append("SIGNATURE INVALID")
+            except Exception:
+                errs.append("signature could not be verified with this record")
+        if max_age is not None:
+            approved_at = rec.get("approved_at")
+            if not isinstance(approved_at, (int, float)):
+                errs.append("record has no approved_at timestamp")
+            elif time.time() - approved_at > max_age:
+                errs.append(f"approval older than {max_age}s")
+    except Exception:  # finding 9: nothing may escape check() — malformed beats crashing
+        errs.append("record malformed (verification aborted)")
     return errs
 
 

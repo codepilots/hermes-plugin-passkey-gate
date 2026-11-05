@@ -500,3 +500,60 @@ def test_hook_fails_closed_on_error(base, autumn, monkeypatch):
     v = tools.hook_verdict(call["tool"], call["args"], patterns, True)
     assert v is not None and v["action"] == "block"
     assert gate_core.pending_for_binding(c["binding_sha256"]) is not None
+
+
+# ------------------- findings 14 + 9: record-bound challenge + never-raise
+def test_assertion_bound_to_exact_recorded_challenge(base, autumn):
+    """Finding 14: a signature obtained under one gate challenge must not
+    verify a DIFFERENT record minted for the same action text — the nonce is
+    sha256(action_text) + entropy, so the assertion is bound to the exact
+    recorded challenge, not just the action hash embedded in its prefix."""
+    c1 = new_challenge(base)
+    approve(base, autumn, c1["challenge_id"])
+    c2 = new_challenge(base)
+    approve(base, autumn, c2["challenge_id"])
+    s, rec1 = call(base, f"/verify/{c1['challenge_id']}?action_sha256={c1['action_sha256']}")
+    s, rec2 = call(base, f"/verify/{c2['challenge_id']}?action_sha256={c2['action_sha256']}")
+    assert s == 200 and rec1["status"] == "approved" and rec2["status"] == "approved"
+    assert rec1["action_sha256"] == rec2["action_sha256"]
+    assert rec1["challenge_b64url"] != rec2["challenge_b64url"]  # same text, different entropy
+    # control: each record verifies against its own recorded challenge
+    assert local_verify.check(rec1, ACTION, ORIGIN, RP_ID, autumn.pem) == []
+    assert local_verify.check(rec2, ACTION, ORIGIN, RP_ID, autumn.pem) == []
+    # exploit: rec1's valid signed assertion presented under rec2's record —
+    # same action hash, different nonce. Pre-fix this verified; it must not.
+    swapped = {**rec1, "challenge_b64url": rec2["challenge_b64url"]}
+    problems = local_verify.check(swapped, ACTION, ORIGIN, RP_ID, autumn.pem)
+    assert any("does not match the recorded challenge" in p for p in problems), problems
+    assert problems  # never verified
+
+
+def test_check_never_raises_on_malformed_records(base, autumn):
+    """Finding 9: check() must return a problems list for ANY malformed or
+    incomplete record — never raise (gate_verify's JSON handler contract)."""
+    c = new_challenge(base)
+    approve(base, autumn, c["challenge_id"])
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert s == 200 and rec["status"] == "approved"
+    variants = {
+        "missing assertion": {k: v for k, v in rec.items() if k != "assertion"},
+        "missing credential_public_key": {k: v for k, v in rec.items() if k != "credential_public_key"},
+        "missing challenge_b64url": {k: v for k, v in rec.items() if k != "challenge_b64url"},
+        "missing action_sha256": {k: v for k, v in rec.items() if k != "action_sha256"},
+        "missing approved_at, max_age set": {k: v for k, v in rec.items() if k != "approved_at"},
+        "assertion not a dict": {**rec, "assertion": "not-a-dict"},
+        "garbage base64 client data": {**rec, "assertion": {**rec["assertion"], "client_data_json": "a" * 5}},
+        "client data not JSON": {**rec, "assertion": {**rec["assertion"], "client_data_json": b64u(b"not json")}},
+        "garbage base64 signature": {**rec, "assertion": {**rec["assertion"], "signature": "###"}},
+        "authenticator data too short": {**rec, "assertion": {**rec["assertion"], "authenticator_data": b64u(b"tiny")}},
+        "garbage public key pem": {**rec, "credential_public_key": {"spki_pem": "not a pem"}},
+        "record is not an object": "approved",
+        "empty record": {},
+    }
+    for name, bad in variants.items():
+        problems = local_verify.check(bad, ACTION, ORIGIN, RP_ID, autumn.pem,
+                                       max_age=600 if name.startswith("missing approved_at") else None)
+        assert isinstance(problems, list) and problems, name  # problems, never an exception
+    # a record stripped of its recorded challenge can never verify (finding 14's other face)
+    problems = local_verify.check(variants["missing challenge_b64url"], ACTION, ORIGIN, RP_ID, autumn.pem)
+    assert any("does not match the recorded challenge" in p for p in problems), problems
