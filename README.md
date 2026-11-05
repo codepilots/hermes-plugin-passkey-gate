@@ -2,15 +2,33 @@
 
 A Hermes plugin for **cryptographically provable agent authorization**.
 
-When an agent wants to do something high-authority — grant an access grant to
-a teammate, reach the internet from a restricted host, relay a credential,
-change a security setting — it mints a **WebAuthn challenge bound bit-for-bit
-to the exact action text** (and optionally to the exact canonical tool call).
-The agent sends the approval URL to its human; the human reads the page and
-signs with **their passkey** — the agent never holds a private key, and there
-is no agent-side path to approval. Before acting, the agent verifies the
-signed assertion **locally** with real cryptography against a **pinned owner
-key**. An append-only, hash-chained audit log makes any tampering detectable.
+**The key problem it solves:** an agent teammate that sits behind a firewall
+— another machine, another network, another schedule — can obtain real
+authorization from the human *without the human ever being at that agent's
+keyboard*. Hermes's built-in approval system prompts the human in the
+session where the action runs; that works when she is present at that
+session, and gives an isolated or peer agent nothing but silence. This
+plugin gives such an agent a way to mint an approval request bound
+bit-for-bit to the exact action text and tool call, deliver it through any
+channel the human actually reads (Discord DM, push, QR), and — most
+importantly — **independently verify her passkey signature locally with
+cryptography before acting**. No agent ever holds a private key, so a relayed
+"the human said it's fine" is no longer needed and no longer can be staged:
+there is a signature an agent cannot fake from any lane it controls.
+
+The full first-hand scenario this came out of — a field agent needing
+GitLab access while its human was away from every relevant keyboard, with a
+planted fabricated authorization on the wires the same morning — is written
+up in [docs/scenario.md](docs/scenario.md).
+
+One paragraph for engineers: an agent wanting a high-authority action mints a
+**WebAuthn challenge bound bit-for-bit to the exact action text** (and
+optionally to the exact canonical tool call). The agent sends the approval
+URL to its human; the human reads the page and signs with **their passkey** —
+the agent never holds a private key, and there is no agent-side path to
+approval. Before acting, the agent verifies the signed assertion **locally**
+with real cryptography against a **pinned owner key**. An append-only,
+hash-chained audit log makes any tampering detectable.
 
 This is not prompt-gated "I promise" authorization, and not a yes/no an
 agent could fake. It is enforcement-with-proof: a gate can't lie about what
