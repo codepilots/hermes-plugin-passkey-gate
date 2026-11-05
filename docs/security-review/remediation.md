@@ -24,8 +24,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `36a193e`; 39 passed; 8-way race probe green |
 | D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `dcbdb4a`; 41 passed; replay probe green |
 | D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `f618f0e`; 47 passed; corruption probe green |
-| D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | 🔄 | delegated |
-| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ⬜ | |
+| D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `506e8d9`; 61 passed; live SSRF probe green |
+| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | 🔄 | delegated |
 | D7 | 16 — enforcement config agent-mutable | HIGH | ⬜ | |
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ⬜ | |
 | D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch-boundary limitation | CRITICAL (arch) | ⬜ | |
@@ -41,6 +41,30 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D5 — findings 5 (HIGH) + 23 (MEDIUM): SSRF + redirect fetches ✅
+
+- **Delegated:** parent-gate allowlist (fail-closed default), no-redirect
+  fetches everywhere, strict URL parsing, private-network blocking.
+  Subagent completed in ~603s, TDD (14 new tests, all RED first), left
+  uncommitted. New shared module plugin/netfetch.py.
+- **Verification (independent):** full suite re-run — 61 passed; diff review —
+  parse_gate_origin (no credentials, host required, https/loopback-http only),
+  origin_allowed exact match, private-range blocking with IPv4-mapped handling,
+  RedirectBlocked opener used by every fetch; probe
+  (`cache/scratch/probe_d5_verify.py`, live stub servers): unlisted parent
+  base rejected with ZERO fetches; dead-port base rejected on allowlist
+  grounds (no network attempt); allowlisted base fetched and pinned-key
+  verified; 302 redirect refused, canary never touched; credential-carrying /
+  hostless / ftp parent bases rejected at mint; cmd_set origin parse-validated.
+- **Deviations accepted:** tests/test_cross_human.py adapted to allowlist its
+  stub parent gate (required by the new fail-closed default); shared
+  netfetch.py module instead of duplicating helpers (netfetch is now the one
+  fetch path for the whole plugin).
+- **Bonus:** the child patched the hermes-plugin-development skill, whose
+  origin-validation example was the exact prefix-check anti-pattern finding 23
+  proved dangerous.
+- **Commit:** `506e8d9`.
 
 ### D4 — findings 17 (HIGH) + 7 (MEDIUM, stale-config half): fail-closed config ✅
 
