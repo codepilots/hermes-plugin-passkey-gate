@@ -360,3 +360,143 @@ def test_gate_challenge_requires_tool_call_when_enforced(monkeypatch):
     monkeypatch.setattr(cli, "_cfg_cache", {"require_passkey": True, "patterns": [r"never-matches-this"]})
     out = json.loads(tools.gate_challenge({"action_text": text, "requester": "sorrel"}))
     assert out["ok"] is True
+
+
+# ------------------------------- findings 3+4: consume race + approval expiry
+def _bound_call(marker):
+    """A tool call unique to one test: binding-scoped lookups (the hook,
+    pending_for_binding) must not be satisfiable by approved rows that older
+    tests legitimately leave behind for the shared canonical TOOL_CALL."""
+    return {"tool": "terminal",
+            "args": {"command": f"ssh git@100.64.0.10 -p 2222 probe-{marker}"}}
+
+
+def expire_challenge(cid):
+    """Fast-forward one challenge row past expires_at (the suite manipulates
+    the temp DB directly rather than sleeping out the 2s TTL)."""
+    gate_core.db().execute("update challenges set expires_at=? where id=?",
+                           (time.time() - 1.0, cid))
+
+
+def test_concurrent_consume_claims_exactly_once(base, autumn):
+    """Finding 3 (engine): two threads racing consume() on the same approved
+    row — the claim is one conditional UPDATE, so SQLite adjudicates it and
+    exactly one caller ever gets True."""
+    call = _bound_call("consume-race")
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    start = threading.Barrier(2, timeout=10)
+    results = []
+
+    def racer():
+        start.wait()
+        results.append(gate_core.consume(c["challenge_id"], c["binding_sha256"]))
+
+    threads = [threading.Thread(target=racer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == [False, True]  # one claim, never two
+    assert gate_core.consume(c["challenge_id"], c["binding_sha256"]) is False
+
+
+def test_concurrent_hook_race_allows_exactly_one(base, autumn, monkeypatch):
+    """Finding 3 (hook): two identical tool calls that both look up the same
+    approved challenge before either claims it — only ONE may execute; the
+    loser must be blocked, not silently allowed."""
+    call = _bound_call("hook-race")
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    patterns = [r"ssh git@100"]
+    bar = threading.Barrier(2, timeout=10)
+    real_consume = gate_core.consume
+
+    def synchronized_consume(cid, binding_sha):
+        bar.wait()  # both threads hold the looked-up row before either claims
+        return real_consume(cid, binding_sha)
+
+    monkeypatch.setattr(gate_core, "consume", synchronized_consume)
+    verdicts = []
+
+    def shoot():
+        verdicts.append(tools.hook_verdict(call["tool"], call["args"],
+                                           patterns, require_passkey=True))
+
+    threads = [threading.Thread(target=shoot) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    allowed = [v for v in verdicts if v is None]
+    blocked = [v for v in verdicts if v is not None]
+    assert len(allowed) == 1, verdicts  # pre-fix: the race allowed both
+    assert len(blocked) == 1 and blocked[0]["action"] == "block"
+    assert "already consumed or expired" in blocked[0]["message"]
+    # the approval is spent: nothing more can execute on it
+    assert gate_core.pending_for_binding(c["binding_sha256"]) is None
+
+
+def test_expired_approval_never_executes(base, autumn):
+    """Finding 4: an approval past expires_at authorises nothing — the hook
+    blocks and the engine refuses the claim (leaving the row untouched)."""
+    call = _bound_call("expiry-hook")
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    expire_challenge(c["challenge_id"])
+    assert gate_core.consume(c["challenge_id"], c["binding_sha256"]) is False
+    v = tools.hook_verdict(call["tool"], call["args"], [r"ssh git@100"],
+                           require_passkey=True)
+    assert v is not None and v["action"] == "block"
+    assert "gate_challenge" in v["message"]  # points at a fresh approval
+    row = gate_core.db().execute("select * from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["status"] == "approved"  # refused, not silently spent
+
+
+def test_expired_approval_does_not_verify(base, autumn):
+    """Finding 4: /verify reports an approved-but-expired challenge as
+    'expired' — no verifiable record for a stale signature — and stays
+    non-enumerable (wrong sha is still plain 'denied')."""
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    approve(base, autumn, c["challenge_id"])
+    expire_challenge(c["challenge_id"])
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert s == 200 and rec["status"] == "expired"
+    assert "assertion" not in rec  # no signature material for a stale approval
+    s, r = call(base, f"/verify/{c['challenge_id']}?action_sha256={'f' * 64}")
+    assert r == {"status": "denied"}  # unknown id vs wrong sha: indistinguishable
+
+
+def test_gate_verify_rejects_stale_approval(monkeypatch, base, autumn):
+    """End to end: gate_verify surfaces the expiry and refuses to vouch for a
+    stale approval even before the local checks run."""
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    approve(base, autumn, c["challenge_id"])
+    expire_challenge(c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
+                                        "action_text": ACTION}))
+    assert out["ok"] is True and out["verified"] is False
+    assert out["status"] == "expired"
+
+
+def test_hook_fails_closed_on_error(base, autumn, monkeypatch):
+    """Finding 3 (fail closed): an exception anywhere in the verdict path must
+    block — never allow, never raise — and must not spend the approval."""
+    def boom(*a, **k):
+        raise RuntimeError("gate db locked")
+    call = _bound_call("fail-closed")
+    patterns = [r"ssh git@100"]
+    real_pending = gate_core.pending_for_binding
+    monkeypatch.setattr(gate_core, "pending_for_binding", boom)
+    v = tools.hook_verdict(call["tool"], call["args"], patterns, True)
+    assert v is not None and v["action"] == "block"
+    monkeypatch.setattr(gate_core, "pending_for_binding", real_pending)
+    # approval in hand, but the claim itself explodes -> block, approval intact
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(gate_core, "consume", boom)
+    v = tools.hook_verdict(call["tool"], call["args"], patterns, True)
+    assert v is not None and v["action"] == "block"
+    assert gate_core.pending_for_binding(c["binding_sha256"]) is not None

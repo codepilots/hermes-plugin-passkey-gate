@@ -208,27 +208,44 @@ def authority_matches(patterns, tool_name: str, args) -> re.Match | None:
 def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict | None:
     """pre_tool_call directive: block until this exact call is passkey-approved.
 
-    Never approves anything itself — fail closed. Returns None when no
-    pattern matches (or enforcement is off), letting Hermes's own approval
-    system do whatever it would do anyway.
+    Never approves anything itself — fail closed: if anything in the verdict
+    path raises, the call is BLOCKED, never allowed. Returns None only when
+    enforcement is off, no pattern matches, or THIS call atomically won the
+    claim on an approved, unconsumed, unexpired challenge (single use).
     """
     if not require_passkey:
         return None
-    matched = authority_matches(patterns, tool_name, args)
-    if matched is None:
+    try:
+        matched = authority_matches(patterns, tool_name, args)
+        if matched is None:
+            return None
+        binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
+        row = gate_core.pending_for_binding(binding)
+        if row is None:
+            return {"action": "block", "message": (
+                "Passkey gate: this tool call matches an authority pattern, but no "
+                f"approved passkey challenge covers it (pattern: {matched}). "
+                "Call gate_challenge first with action_text describing EXACTLY this "
+                f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
+                "send the human the approval URL, wait for their passkey signature, "
+                "then retry this identical tool call verbatim. If you disagree that "
+                "this requires an approval, say so instead of trying to retry it."
+            )}
+        if not gate_core.consume(row["id"], binding):
+            # Lost the claim race to an identical tool call, or the approval
+            # aged past expires_at between lookup and claim. Either way this
+            # call must not execute: one signature, one execution.
+            return {"action": "block", "message": (
+                "Passkey gate: the approval covering this exact tool call was "
+                "already consumed or expired — request a fresh approval via "
+                "gate_challenge and have the human sign it before retrying. "
+                "A single signature authorises exactly one execution."
+            )}
+        # allow = no block directive; the challenge is consumed and audited
         return None
-    binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
-    row = gate_core.pending_for_binding(binding)
-    if row is None:
+    except Exception as exc:
         return {"action": "block", "message": (
-            "Passkey gate: this tool call matches an authority pattern, but no "
-            f"approved passkey challenge covers it (pattern: {matched}). "
-            "Call gate_challenge first with action_text describing EXACTLY this "
-            f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
-            "send the human the approval URL, wait for their passkey signature, "
-            "then retry this identical tool call verbatim. If you disagree that "
-            "this requires an approval, say so instead of trying to retry it."
+            f"Passkey gate: enforcement check failed ({type(exc).__name__}) — "
+            "failing closed, the call is blocked. If this action is genuinely "
+            "intended, request a fresh approval via gate_challenge."
         )}
-    gate_core.consume(row["id"], binding)
-    # allow = no block directive; the challenge is consumed and audited
-    return None

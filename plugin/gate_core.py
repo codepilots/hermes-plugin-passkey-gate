@@ -318,42 +318,55 @@ def challenge_status(cid: str, sha: str) -> GateResult:
     if st == "pending":
         return GateResult(status="expired" if time.time() > row["expires_at"] else "pending",
                           expires_at=row["expires_at"])
-    if st != "approved":
-        return denied
-    cred = db().execute("select * from credentials where id=?", (row["credential_id"],)).fetchone()
-    audit("verify_approved", challenge_id=cid, action_sha256=row["action_sha256"], outcome="approved")
-    rec = GateResult(status="approved", challenge_id=cid, action_sha256=row["action_sha256"],
-                     binding_sha256=row["binding_sha256"], tool_call=row["tool_call"],
-                     requester=row["requester"],
-                     created_at=row["created_at"], approved_at=row["decided_at"],
-                     rp_id=rp_id(), origin=origin(),
-                     challenge_b64url=bytes_to_base64url(row["challenge"]),
-                     assertion={"credential_id": row["credential_id"],
-                                "authenticator_data": row["authenticator_data"],
-                                "client_data_json": row["client_data_json"],
-                                "signature": row["signature"], "user_handle": row["user_handle"]})
-    if cred is not None:
-        rec["credential_public_key"] = {"cose_b64url": bytes_to_base64url(cred["public_key"]),
-                                        "spki_pem": pubkey_pem(cred["public_key"])}
-    rec["audit_head"] = audit_head()
-    return rec
+    if st == "approved":
+        if time.time() > row["expires_at"]:
+            # a stale approval must not verify (finding 4): no signed record is
+            # handed out once expires_at has passed, even though it was signed
+            return GateResult(status="expired", expires_at=row["expires_at"])
+        cred = db().execute("select * from credentials where id=?", (row["credential_id"],)).fetchone()
+        audit("verify_approved", challenge_id=cid, action_sha256=row["action_sha256"], outcome="approved")
+        rec = GateResult(status="approved", challenge_id=cid, action_sha256=row["action_sha256"],
+                         binding_sha256=row["binding_sha256"], tool_call=row["tool_call"],
+                         requester=row["requester"],
+                         created_at=row["created_at"], approved_at=row["decided_at"],
+                         rp_id=rp_id(), origin=origin(),
+                         challenge_b64url=bytes_to_base64url(row["challenge"]),
+                         assertion={"credential_id": row["credential_id"],
+                                    "authenticator_data": row["authenticator_data"],
+                                    "client_data_json": row["client_data_json"],
+                                    "signature": row["signature"], "user_handle": row["user_handle"]})
+        if cred is not None:
+            rec["credential_public_key"] = {"cose_b64url": bytes_to_base64url(cred["public_key"]),
+                                            "spki_pem": pubkey_pem(cred["public_key"])}
+        rec["audit_head"] = audit_head()
+        return rec
+    return denied
 
 
 def consume(cid: str, binding_sha: str) -> bool:
-    """Mark an approved, unconsumed challenge as consumed (single deliberate use).
-    Returns True exactly once — the enforcement hook treats False as fail-closed."""
-    c = db()
-    cur = c.execute("update challenges set status='consumed', decided_at=? "
-                    "where id=? and status='approved' and binding_sha256=?",
-                    (time.time(), cid, binding_sha))
+    """Atomically claim an approved, unconsumed, UNEXPIRED challenge.
+
+    The claim is one conditional UPDATE — SQLite serialises concurrent
+    writers, so of any number of racers exactly one updates the row and
+    earns True; every loser gets False and must not execute. An approval
+    past expires_at is stale and can never be claimed (finding 4).
+    """
+    now = time.time()
+    cur = db().execute("update challenges set status='consumed', decided_at=? "
+                       "where id=? and status='approved' and binding_sha256=? "
+                       "and expires_at>=?", (now, cid, binding_sha, now))
     if cur.rowcount == 1:
         audit("challenge_consumed", challenge_id=cid, binding_sha256=binding_sha)
     return cur.rowcount == 1
 
 
 def pending_for_binding(binding_sha: str) -> sqlite3.Row | None:
+    """Approved, unexpired challenge covering this binding — an approval past
+    expires_at must not satisfy the enforcement hook: stale signatures never
+    authorise execution, and only a fresh claim in consume() lets one through."""
     return db().execute(
-        "select * from challenges where binding_sha256=? and status='approved'", (binding_sha,)).fetchone()
+        "select * from challenges where binding_sha256=? and status='approved' "
+        "and expires_at>=?", (binding_sha, time.time())).fetchone()
 
 
 def approve_options(cid: str) -> str | None:
