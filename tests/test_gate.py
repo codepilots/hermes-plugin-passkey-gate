@@ -92,6 +92,8 @@ class SoftAuthenticator:
 
 @pytest.fixture(scope="module")
 def base():
+    os.environ.update(GATE_DATA=TMP, GATE_CHALLENGE_TTL="2", GATE_PORT="0",
+                      GATE_ORIGIN=ORIGIN, GATE_RP_ID=RP_ID)
     srv = gate_core.ThreadingHTTPServer(("127.0.0.1", 0), gate_core.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"

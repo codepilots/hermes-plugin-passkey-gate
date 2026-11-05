@@ -29,6 +29,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import local_verify
+
 from webauthn import (generate_authentication_options, generate_registration_options,
                       options_to_json, verify_authentication_response,
                       verify_registration_response)
@@ -127,10 +129,16 @@ def db():
         challenge BLOB NOT NULL, expires_at REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS challenges(id TEXT PRIMARY KEY, action_text TEXT NOT NULL,
         action_sha256 TEXT NOT NULL, binding_sha256 TEXT, requester TEXT NOT NULL,
+        requester_owner TEXT, why TEXT, parent_approval TEXT, parent_verified TEXT,
         challenge BLOB NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
         status TEXT NOT NULL, decided_at REAL, credential_id TEXT, authenticator_data TEXT,
         client_data_json TEXT, signature TEXT, user_handle TEXT);
     """)
+    for col in ("requester_owner", "why", "parent_approval", "parent_verified"):
+        try:
+            c.execute(f"alter table challenges add column {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column exists (fresh CREATE) or another writer just added it
     return c
 
 
@@ -212,18 +220,54 @@ class GateResult(dict):
     pass
 
 
-def create_challenge(action_text: str, requester: str, tool_call: dict | None = None) -> GateResult:
+def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
+                     requester_owner: str | None = None, why: str | None = None,
+                     parent_approval: dict | None = None) -> GateResult:
     """Mint a challenge bound to exact action text (and optionally a canonical tool call).
 
     The challenge's WebAuthn nonce embeds sha256(action_text), so the signed
     assertion is bound to this exact text — the human signs a specific action,
     not a role or a session.
+
+    Cross-human fields: `requester_owner` names the AGENT's OWN human (the
+    signer may be a different human), and `why` is ONE plain sentence for the
+    signer explaining what this enables. `parent_approval` (dict {base,
+    challenge_id, action_sha256, owner}) records a prior approval already
+    signed on another human's gate — rendered on the page with the local
+    verification verdict, so chains of sign-off stay checkable.
     """
     if not isinstance(action_text, str) or not isinstance(requester, str):
         raise ValueError("action_text and requester required")
     requester = requester.strip()
     if not requester or len(requester) > 64:
         raise ValueError("requester must be 1-64 chars")
+    owner = (requester_owner or "").strip()
+    if len(owner) > 64:
+        raise ValueError("requester_owner must be at most 64 chars")
+    why = (why or "").strip()
+    if not why and owner and owner.lower() != requester.lower():
+        raise ValueError(
+            "why is required when the requester's owner is named: the signer "
+            "may not know that agent or that human, so the page must explain "
+            "what the action enables")
+    if len(why) > 400:
+        raise ValueError("why must be at most 400 characters (one clear sentence)")
+    parent = None
+    if parent_approval is not None:
+        try:
+            parent = {
+                "base": str(parent_approval["base"]).strip().rstrip("/"),
+                "challenge_id": str(parent_approval["challenge_id"]).strip(),
+                "action_sha256": str(parent_approval["action_sha256"]).strip().lower(),
+                "owner": str(parent_approval.get("owner", "")).strip()[:64],
+            }
+            if not ID_RE.match(parent["challenge_id"]) or not SHA_RE.match(parent["action_sha256"]) \
+                    or not (parent["base"].startswith("https://")
+                            or parent["base"].startswith("http://127.0.0.1")
+                            or parent["base"].startswith("http://localhost")):
+                raise ValueError
+        except (KeyError, ValueError):
+            raise ValueError("parent_approval needs {base (https), challenge_id, action_sha256, owner}")
     text = action_text.strip()
     prob = specificity_problem(text)
     if prob:
@@ -234,12 +278,18 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     cid = secrets.token_urlsafe(24)
     chal = bytes.fromhex(sha) + secrets.token_bytes(32)  # nonce = text sha256 + entropy
     now = time.time()
+    parent_json = json.dumps(parent, sort_keys=True, separators=(",", ":")) if parent else None
+    pv = local_verify.verify_parent_approval(parent, data_dir()) if parent else None
     db().execute(
-        "insert into challenges(id,action_text,action_sha256,binding_sha256,requester,challenge,"
-        "created_at,expires_at,status) values(?,?,?,?,?,?,?,?, 'pending')",
-        (cid, text, sha, binding, requester, chal, now, now + challenge_ttl()))
+        "insert into challenges(id,action_text,action_sha256,binding_sha256,requester,"
+        "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"
+        " values(?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
+        (cid, text, sha, binding, requester, owner or None, why or None,
+         parent_json, pv, chal, now, now + challenge_ttl()))
     audit("challenge_created", challenge_id=cid, action_sha256=sha,
-          binding_sha256=binding, requester=requester, expires_at=now + challenge_ttl())
+          binding_sha256=binding, requester=requester, requester_owner=owner or None,
+          why=why or None, parent_challenge_id=(parent or {}).get("challenge_id"),
+          expires_at=now + challenge_ttl())
     url = f"{origin()}/a/{cid}" if origin() else None
     return GateResult(challenge_id=cid, url=url, action_sha256=sha,
                       binding_sha256=binding, expires_at=now + challenge_ttl())
@@ -446,14 +496,41 @@ def approval_page(row):
     actions = ""
     if state == "pending":
         actions = ('<div class="buttons"><button id="approve" class="approve">Approve with passkey</button>'
-                   '<button id="deny" class="deny">Deny</button></div>')
+                   '<button id="deny" class="deny">Deny</button></div>'
+                   '<p class="hint">Denying is always safe: it just declines, and nothing happens '
+                   'until someone signs.</p>')
+    who = html.escape(row["requester"])
+    if row["requester_owner"]:
+        who += f' <span class="owner">(agent of {html.escape(row["requester_owner"])})</span>'
+    why_block = ""
+    if row["why"]:
+        why_block = f'<p class="why"><b>Why this ask:</b> {html.escape(row["why"])}</p>'
+    parent_block = ""
+    if row["parent_approval"]:
+        try:
+            p = json.loads(row["parent_approval"])
+            verdict = row["parent_verified"] or "unverified"
+            short_sha = (p.get("action_sha256") or "")[:12]
+            parent_block = (
+                '<div class="parent"><b>Already signed by another human?</b> This request says '
+                f'{html.escape(p.get("owner") or "another owner")}&#39;s gate approved it first '
+                f'(id <code>{html.escape(str(p.get("challenge_id"))[:12])}&hellip;</code>, action sha '
+                f'<code>{html.escape(short_sha)}&hellip;</code>). Verdict checked from here, locally: '
+                f'<b>{html.escape(verdict)}</b>. If unverified, ask for their pinned key out of band '
+                'before trusting it &mdash; the claim alone is not evidence.</div>')
+        except Exception:
+            parent_block = '<div class="parent"><b>Prior approval record unreadable</b> &mdash; treat as unverified.</div>'
     body = f"""
 <h1>Approval request</h1>
-<p class="meta">From <b>{html.escape(row['requester'])}</b> &middot; status <b id="state">{state}</b>
+<p class="meta">From <b>{who}</b> &middot; status <b id="state">{state}</b>
 {'&middot; expires in ' + str(left // 60) + 'm ' + str(left % 60) + 's' if state == 'pending' else ''}</p>
-<p class="warn">Read the whole action. Approving authorises exactly this text and nothing else.</p>
+{why_block}
+<p class="warn">Read the whole action. Approving authorises exactly this text and nothing else.
+You are the only one who can sign this &mdash; agents cannot, and no relay of
+"someone approved it" counts without this signature.</p>
 <pre class="action">{html.escape(row['action_text'])}</pre>
 <p class="sha">sha256 {row['action_sha256']}</p>
+{parent_block}
 {actions}<p id="msg"></p>
 <div id="cid" data-id="{row['id']}"></div>"""
     return PAGE.format(title="Approval request", body=body)
@@ -540,7 +617,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if p == "/challenge":
                 c = create_challenge(body.get("action_text"), body.get("requester"),
-                                     body.get("tool_call") or None)
+                                     body.get("tool_call") or None,
+                                     requester_owner=body.get("requester_owner"),
+                                     why=body.get("why"),
+                                     parent_approval=body.get("parent_approval"))
                 return self._send(201, dict(c))
             if p == "/register/options":
                 out = registration_options(body.get("token"))

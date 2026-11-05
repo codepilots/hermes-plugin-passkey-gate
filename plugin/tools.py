@@ -27,16 +27,42 @@ def gate_challenge(args: dict, **kwargs) -> str:
     text = args.get("action_text")
     requester = args.get("requester") or "unknown"
     tool_call = args.get("tool_call") or None
+    owner = args.get("requester_owner")
+    why = args.get("why")
+    parent = args.get("parent_approval")
+    cross_human = bool(owner) and owner.strip().lower() != requester.strip().lower()
+    parent = parent if isinstance(parent, dict) else None
+    if parent and not str(parent.get("owner") or "").strip():
+        return json.dumps({"ok": False, "error":
+                           "parent_approval needs an `owner`: which human signed the prior "
+                           "approval — a chain without a name on each link is just a claim"})
+    if cross_human and not why:
+        return json.dumps({"ok": False, "error":
+                           f"you named a different owner ({owner!r}), so the signer may be a "
+                           "stranger to your project: write `why` — one plain sentence for THEM "
+                           "saying what signing enables and why it is safe"})
     try:
-        c = gate_core.create_challenge(text, requester, tool_call)
+        c = gate_core.create_challenge(text, requester, tool_call,
+                                       requester_owner=owner, why=why,
+                                       parent_approval=parent)
     except Exception as exc:
         return json.dumps({"ok": False, "error": str(exc)})
     out = {"ok": True, **c}
-    out["instructions"] = (
-        "Send the human the approval URL and say exactly what it approves. "
-        "Ask them to check the page shows the action in full before signing. "
-        "Then gate_verify with challenge_id and the same action_text before acting."
-    )
+    if cross_human:
+        out["instructions"] = (
+            "You are asking ANOTHER HUMAN (not your own). Send the approval URL to them "
+            "via their channel with: who you are and who your human is (" + (owner or "?") +
+            "), the plain-English `why`, and what it costs/changes. The page shows all of "
+            "this; your message adds one line, not the whole spec. If another human already "
+            "signed, say so with their name. Then gate_verify with challenge_id and the "
+            "same action_text before acting — verified:true or nothing."
+        )
+    else:
+        out["instructions"] = (
+            "Send the human the approval URL and one line saying what it approves. "
+            "They see the full action text on the page before signing. Then "
+            "gate_verify with challenge_id and the same action_text before acting."
+        )
     if c.get("url") is None:
         out["error_hint"] = "gate origin is not configured — set plugins.entries.passkey-gate.settings.origin"
     return json.dumps(out)
