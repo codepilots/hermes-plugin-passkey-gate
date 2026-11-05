@@ -187,16 +187,33 @@ def pinned(data_dir, owner: str | None = None):
 
 
 def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
-                           allowlist=None) -> str:
+                           allowlist=None, child_action_sha256: str | None = None) -> str:
     """Check a prior approval that was signed on ANOTHER human's gate.
 
     The parent gate is asked for the record by (id, action_sha256) — it
     denies wrong/mismatched pairs with the same 'denied' it gives unknown
     ids, so a bare claim 'my human approved challenge X' survives this only
-    if the parent gate itself confirms it. When the parent owner's key is
-    PINNED locally, the public key in the record must equal it; signature
-    and text-binding re-checks stay the parent gate's responsibility (the
-    parent has the action text; this side usually does not).
+    if the parent gate itself confirms it. But its yes/no is NEVER trusted:
+    finding 6 — the COMPLETE signed record is fetched and verified LOCALLY
+    with ``check()``: signature over authenticatorData||sha256(clientDataJSON)
+    against the PINNED key, clientData type webauthn.get, the signed
+    challenge bound to the record's own recorded challenge_b64url (finding
+    14), RP ID hash, UP/UV flags, and action_sha256 == the hash of the
+    record's own action_text. The expected origin/rp_id are the record's OWN
+    declared ones (the fetch target is allowlisted + pinned; the crypto
+    against the pinned key is the real barrier), so the signed material
+    must be self-consistent with them. A record without the fields check()
+    needs is unverified, with the reason.
+
+    Finding 19 — the child's action_sha256 is supplied by the caller and the
+    policy is hash equality: the fetched record's action_sha256 must equal
+    the CLAIMED one (the claim must match what was actually signed), and
+    then (b) parent hash == child hash -> 'verified — the same action was
+    signed on <owner>'s gate'; (c) parent hash != child hash -> 'context
+    only: <owner> approved a DIFFERENT action (hash mismatch) — their
+    signature does not cover this one', displayed as context, never as
+    'verified'. Without a child hash, equality is unchecked and the verdict
+    says so rather than claiming 'verified'.
 
     Finding 5: the parent base is fetched ONLY when its origin is on the
     allowlist (exact scheme+host+port match, no wildcards; an empty
@@ -206,8 +223,8 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
     network — no reachability oracle. Finding 23: the fetch never follows a
     redirect.
 
-    Returns a short verdict string for the approval page: 'verified',
-    'unverified (...)' or 'key-mismatch'.
+    Returns a short verdict string for the approval page: 'verified — ...',
+    'context only: ...' or 'unverified (...)'.
     """
     try:
         allow = [str(x) for x in allowlist] if isinstance(allowlist, (list, tuple)) else []
@@ -223,14 +240,43 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
                 "never followed)")
     except Exception as exc:
         return f"unverified (parent gate unreachable: {type(exc).__name__})"
+    if not isinstance(rec, dict):
+        return "unverified (parent answer is not a JSON approval record)"
     if rec.get("status") != "approved":
         return f"unverified (parent status {rec.get('status')!r})"
     owner = parent.get("owner") or ""
     pinned_pem = pinned(data_dir, owner) if owner else None
     if pinned_pem is None:
         return f"unverified (no pinned key for {owner!r} — ask for it out of band, then re-challenge)"
-    rec_pem = (rec.get("credential_public_key") or {}).get("spki_pem", "")
-    if rec_pem.strip() != pinned_pem.strip():
-        return "KEY MISMATCH: the parent gate's record does not match the pinned owner key"
-    return f"verified against pinned key for {owner}"
+    # the claim must match what was actually signed (finding 19): the record
+    # the parent returns must be the claimed challenge carrying the claimed
+    # action hash — anything else is a claim the record does not back
+    rec_sha = str(rec.get("action_sha256", "")).strip().lower()
+    claimed_sha = str(parent.get("action_sha256", "")).strip().lower()
+    if rec_sha != claimed_sha:
+        return ("unverified (the parent record's action_sha256 does not match the "
+                "claimed action hash — the claim is not what the parent gate signed)")
+    if str(rec.get("challenge_id", "")) != str(parent.get("challenge_id", "")):
+        return ("unverified (the parent gate returned a record for a different "
+                "challenge id than the one claimed)")
+    # check() needs the record's own action text and declared origin/rp_id;
+    # without them nothing can be verified locally
+    missing = [k for k in ("action_text", "origin", "rp_id")
+               if not isinstance((v := rec.get(k)), str) or not v.strip()]
+    if missing:
+        return (f"unverified (the parent record is missing {', '.join(missing)} — "
+                "it cannot be verified locally)")
+    errs = check(rec, rec["action_text"], rec["origin"], rec["rp_id"], pinned_pem=pinned_pem)
+    if errs:
+        return ("unverified (local verification of the parent record failed: "
+                + "; ".join(errs) + ")")
+    child_sha = str(child_action_sha256 or "").strip().lower()
+    if not child_sha:
+        return (f"context only: {owner}'s approval is fully verified on their gate, "
+                "but no child action hash was supplied, so equality with this "
+                "action was not checked")
+    if rec_sha == child_sha:
+        return f"verified — the same action was signed on {owner}'s gate"
+    return (f"context only: {owner} approved a DIFFERENT action (hash mismatch) — "
+            "their signature does not cover this one")
 

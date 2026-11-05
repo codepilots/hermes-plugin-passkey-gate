@@ -189,24 +189,31 @@ def test_unlisted_parent_verdict_is_visible_on_the_page(monkeypatch, parent_stub
     assert "not on allowlist" in gate_core.approval_page(row)
 
 
-def test_allowlisted_parent_gate_is_fetched_and_verifies(parent_stub, pinned_dir):
-    """The legitimate path survives the fix: an allowlisted stub parent gate
-    is fetched exactly as before and verifies against the pinned peer key."""
+def test_allowlisted_parent_gate_is_fetched_but_fabricated_records_do_not_verify(parent_stub, pinned_dir):
+    """Finding 6: an allowlisted parent base is still fetched, but the stub
+    record — a bare {status, action_sha256, spki_pem} echoing the pinned key —
+    no longer renders 'verified'. The record must now carry the full signed
+    assertion and survive verification LOCALLY; pre-fix this exact record
+    returned 'verified against pinned key for bob'."""
     base, srv = parent_stub
     before = len(srv.hits)
     verdict = local_verify.verify_parent_approval(_parent(base), pinned_dir, allowlist=[base])
-    assert verdict == "verified against pinned key for bob", verdict
-    assert len(srv.hits) == before + 1  # the fetch happened
-    # trailing-slash and default-port spellings name the same origin
+    assert verdict.startswith("unverified"), verdict
+    assert "cannot be verified locally" in verdict  # missing what local verification needs
+    assert len(srv.hits) == before + 1  # the fetch still happened
+    # trailing-slash spelling names the same origin — same verdict
     verdict = local_verify.verify_parent_approval(
         _parent(base + "/"), pinned_dir, allowlist=[base])
-    assert verdict == "verified against pinned key for bob", verdict
+    assert verdict.startswith("unverified"), verdict
+    assert "cannot be verified locally" in verdict
 
 
 def test_allowlisted_parent_gate_end_to_end(monkeypatch, parent_stub, pinned_dir):
     """Config plumbing end to end: the allowlist read from settings reaches
-    the verifier, so an allowlisted peer gate still verifies through the
-    normal gate_challenge path."""
+    the verifier, so an allowlisted peer gate is still fetched through the
+    normal gate_challenge path — its fabricated record then fails LOCAL
+    verification (finding 6), which is a different verdict from the
+    allowlist refusal, proving the fetch happened."""
     base, _ = parent_stub
     _reset_cli(monkeypatch)
     monkeypatch.setenv("GATE_DATA", pinned_dir)
@@ -216,7 +223,8 @@ def test_allowlisted_parent_gate_end_to_end(monkeypatch, parent_stub, pinned_dir
     assert out["ok"] is True, out
     row = gate_core.db().execute("select parent_verified from challenges where id=?",
                                  (out["challenge_id"],)).fetchone()
-    assert row["parent_verified"] == "verified against pinned key for bob"
+    assert row["parent_verified"].startswith("unverified"), row["parent_verified"]
+    assert "cannot be verified locally" in row["parent_verified"]
     # and without the env allowlist it would have refused (no fetch state leak)
     monkeypatch.setenv("GATE_PARENT_ALLOWLIST", "[]")
     out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "bramble",

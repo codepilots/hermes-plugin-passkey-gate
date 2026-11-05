@@ -308,7 +308,8 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     now = time.time()
     parent_json = json.dumps(parent, sort_keys=True, separators=(",", ":")) if parent else None
     pv = (local_verify.verify_parent_approval(parent, data_dir(),
-                                              allowlist=parent_allowlist())
+                                              allowlist=parent_allowlist(),
+                                              child_action_sha256=sha)
           if parent else None)
     db().execute(
         "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
@@ -349,6 +350,7 @@ def challenge_status(cid: str, sha: str) -> GateResult:
         cred = db().execute("select * from credentials where id=?", (row["credential_id"],)).fetchone()
         audit("verify_approved", challenge_id=cid, action_sha256=row["action_sha256"], outcome="approved")
         rec = GateResult(status="approved", challenge_id=cid, action_sha256=row["action_sha256"],
+                         action_text=row["action_text"],
                          binding_sha256=row["binding_sha256"], tool_call=row["tool_call"],
                          requester=row["requester"],
                          created_at=row["created_at"], approved_at=row["decided_at"],

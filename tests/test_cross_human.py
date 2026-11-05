@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,9 @@ from webauthn.helpers import encode_cbor  # noqa: E402
 
 ACTION = ("Grant GitLab user sorrel Developer access to project autumn/meta-hackathon "
           "on 100.64.0.10:5080, expiring 2026-11-08.")
+# an unrelated action the peer human may have signed instead (finding 19)
+OTHER_ACTION = ("Read the workshop directory access logs from 100.64.0.10 and paste "
+                "them into the team channel for everyone to review.")
 
 
 def b64u(b):
@@ -156,7 +160,9 @@ def test_parent_chain_requires_owner_and_verifies(monkeypatch, parent_gate):
     row = gate_core.db().execute("select parent_verified from challenges where id=?",
                                  (mid["challenge_id"],)).fetchone()
     assert row["parent_verified"].startswith("unverified")  # no pin yet -> said so, not claimed
-    # pin the peer key out of band -> now verifies
+    # pin the peer key out of band -> the record now verifies LOCALLY — but the
+    # child action text differs from the parent's, so finding 19's policy
+    # renders it as context only, never as 'verified'
     local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
     after = json.loads(tools.gate_challenge({
         "action_text": ACTION + " (retry with pinned peer key)", "requester": "bramble",
@@ -164,7 +170,12 @@ def test_parent_chain_requires_owner_and_verifies(monkeypatch, parent_gate):
                             "action_sha256": c["action_sha256"], "owner": "bob"}}))
     row = gate_core.db().execute("select parent_verified from challenges where id=?",
                                  (after["challenge_id"],)).fetchone()
-    assert row["parent_verified"].startswith("verified")
+    assert row["parent_verified"].startswith("context only"), row["parent_verified"]
+    assert "DIFFERENT action" in row["parent_verified"]
+    # and the page tells the signer the same honest story
+    full_row = gate_core.db().execute("select * from challenges where id=?",
+                                      (after["challenge_id"],)).fetchone()
+    assert "DIFFERENT action" in gate_core.approval_page(full_row)
 
 
 def test_page_renders_the_whole_story(parent_gate):
@@ -183,3 +194,155 @@ def test_page_renders_the_whole_story(parent_gate):
     s, r = call(parent_base, "/challenge",
                 {"action_text": ACTION, "requester": "sorrel", "requester_owner": "stranger-guy"})
     assert s == 422  # no `why` for an unknown owner
+
+
+# --------------------------------------- findings 6 + 19: local parent-record
+# verification and the child/parent action-hash equality policy
+class _RecordServer(BaseHTTPRequestHandler):
+    """A stand-in for a compromised parent gate: serves one fixed record."""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        body = json.dumps(self.server.record).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def serve_record(record):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _RecordServer)
+    srv.record = record
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _child_sha(text):
+    return gate_core.sha256_hex(text)
+
+
+def test_fabricated_parent_record_with_pinned_key_is_unverified(parent_gate):
+    """Finding 6, the exploit itself: a compromised parent gate fabricates an
+    'approved' record that carries the correct PINNED public key but no valid
+    assertion. Pre-fix that alone rendered 'verified against pinned key'; post-fix
+    the record is verified LOCALLY and fails with the reason."""
+    _, parent_auth = parent_gate
+    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    evil_sha = _child_sha(OTHER_ACTION)
+    fabricated = {
+        "status": "approved", "challenge_id": "B" * 24,
+        "action_text": OTHER_ACTION, "action_sha256": evil_sha,
+        "origin": PARENT_ORIGIN, "rp_id": PARENT_RP,
+        "challenge_b64url": b64u(bytes.fromhex(evil_sha) + b"\x00" * 32),
+        "assertion": {"authenticator_data": b64u(b"tiny"), "client_data_json": "###",
+                      "signature": "###"},
+        "credential_public_key": {"spki_pem": parent_auth.pem}}
+    srv = serve_record(fabricated)
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        verdict = local_verify.verify_parent_approval(
+            {"base": base, "challenge_id": "B" * 24, "action_sha256": evil_sha,
+             "owner": "bob"},
+            gate_core.data_dir(), allowlist=[base], child_action_sha256=evil_sha)
+        assert verdict.startswith("unverified"), verdict
+        assert "local verification of the parent record failed" in verdict
+    finally:
+        srv.shutdown()
+
+
+def test_real_parent_approval_same_action_fully_verifies(monkeypatch, parent_gate):
+    """The legitimate chain end to end: the peer human really signs THE SAME
+    action on their gate; the child re-derives every claim locally (signature,
+    challenge binding, RP/origin, UV flags, pinned key) and says so."""
+    parent_base, parent_auth = parent_gate
+    monkeypatch.setenv("GATE_PARENT_ALLOWLIST", json.dumps([parent_base]))
+    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
+    assert s == 201
+    approve_on(parent_base, parent_auth, c["challenge_id"])
+    # direct: the full local check runs on the record fetched from the peer
+    verdict = local_verify.verify_parent_approval(
+        {"base": parent_base, "challenge_id": c["challenge_id"],
+         "action_sha256": c["action_sha256"], "owner": "bob"},
+        gate_core.data_dir(), allowlist=[parent_base],
+        child_action_sha256=_child_sha(ACTION))
+    assert verdict == "verified — the same action was signed on bob's gate", verdict
+    # end to end: create_challenge passes the child's own action hash through
+    out = json.loads(tools.gate_challenge({
+        "action_text": ACTION, "requester": "bramble",
+        "parent_approval": {"base": parent_base, "challenge_id": c["challenge_id"],
+                            "action_sha256": c["action_sha256"], "owner": "bob"}}))
+    assert out["ok"] is True, out
+    row = gate_core.db().execute("select parent_verified from challenges where id=?",
+                                 (out["challenge_id"],)).fetchone()
+    assert row["parent_verified"] == "verified — the same action was signed on bob's gate"
+    # and the approval page shows that verdict to the signer
+    full_row = gate_core.db().execute("select * from challenges where id=?",
+                                      (out["challenge_id"],)).fetchone()
+    assert "the same action was signed on bob" in gate_core.approval_page(full_row)
+
+
+def test_real_parent_approval_for_a_different_action_is_context_only(parent_gate):
+    """Finding 19: the peer's signature is REAL, but it covered a DIFFERENT
+    action — the verdict must say so as context, never claim 'verified'."""
+    parent_base, parent_auth = parent_gate
+    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    s, c = call(parent_base, "/challenge", {"action_text": OTHER_ACTION, "requester": "sorrel"})
+    assert s == 201
+    approve_on(parent_base, parent_auth, c["challenge_id"])
+    verdict = local_verify.verify_parent_approval(
+        {"base": parent_base, "challenge_id": c["challenge_id"],
+         "action_sha256": c["action_sha256"], "owner": "bob"},
+        gate_core.data_dir(), allowlist=[parent_base],
+        child_action_sha256=_child_sha(ACTION))
+    assert verdict.startswith("context only"), verdict
+    assert "DIFFERENT action" in verdict and "bob" in verdict
+    assert not verdict.startswith("verified")
+
+
+def test_parent_record_replaying_another_records_challenge_is_rejected(parent_gate):
+    """The D3 replay shape through the parent path: a validly signed assertion
+    minted under ONE nonce, presented in a record claiming a DIFFERENT
+    challenge. Even with the right pinned key, the signature is not bound to
+    the record's own recorded challenge, so it is rejected."""
+    parent_base, parent_auth = parent_gate
+    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
+    assert s == 201
+    approve_on(parent_base, parent_auth, c["challenge_id"])
+    s, rec = call(parent_base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert s == 200 and rec["status"] == "approved"
+    replayed = dict(rec)
+    replayed["challenge_b64url"] = b64u(bytes.fromhex(c["action_sha256"]) + b"\x11" * 32)
+    srv = serve_record(replayed)
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        verdict = local_verify.verify_parent_approval(
+            {"base": base, "challenge_id": c["challenge_id"],
+             "action_sha256": c["action_sha256"], "owner": "bob"},
+            gate_core.data_dir(), allowlist=[base],
+            child_action_sha256=c["action_sha256"])
+        assert verdict.startswith("unverified"), verdict
+        assert "recorded challenge" in verdict
+    finally:
+        srv.shutdown()
+
+
+def test_parent_verdict_never_claims_same_action_without_a_child_hash(parent_gate):
+    """No child action hash supplied => equality with this action is unchecked,
+    so even a fully verified parent record is presented as context, never as
+    'verified'."""
+    parent_base, parent_auth = parent_gate
+    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
+    assert s == 201
+    approve_on(parent_base, parent_auth, c["challenge_id"])
+    verdict = local_verify.verify_parent_approval(
+        {"base": parent_base, "challenge_id": c["challenge_id"],
+         "action_sha256": c["action_sha256"], "owner": "bob"},
+        gate_core.data_dir(), allowlist=[parent_base])
+    assert verdict.startswith("context only"), verdict
+    assert "was not checked" in verdict
