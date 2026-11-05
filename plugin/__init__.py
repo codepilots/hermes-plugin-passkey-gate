@@ -35,14 +35,31 @@ logger = logging.getLogger(__name__)
 
 def _on_pre_tool_call(tool_name: str, args: dict, task_id: str, **kwargs):
     cfg = cli.apply_config_safe()
+    if cfg.get("_config_error"):
+        # Finding 17: a config that is PRESENT but failed to load must fail
+        # CLOSED. The authority patterns are exactly what could not be read,
+        # so no call can be judged low-authority — block until the settings
+        # load, and tell the human the config is the problem (not a missing
+        # approval, not a pattern miss).
+        return {"action": "block", "message": (
+            "Passkey gate: the gate's configuration failed to load "
+            f"({cfg['_config_error']}) — failing closed, this call is blocked. "
+            "The gate cannot tell which calls need a passkey until its settings "
+            "read, so nothing runs unenforced. Tell the human to fix the "
+            "passkey-gate settings (`hermes passkey-gate get` shows them; they "
+            "live in the Hermes config file). Once they parse, the gate reloads "
+            "them automatically and this call can be retried.")}
     return tools.hook_verdict(tool_name, args, cfg["patterns"], cfg["require_passkey"])
 
 
 def register(ctx):
     cli._ctx_ref = ctx
-    cli._cfg_cache = None
-    cfg = cli.apply_config(ctx)
-    cli._cfg_cache = cfg
+    cli.invalidate_config_cache()
+    # Fail-closed from the first moment: a config that exists but will not
+    # load yields the error marker (every call blocked with the reason) —
+    # a register() that died here would leave NO hook, the one fail-open
+    # path worse than a blocked one.
+    cfg = cli.apply_config_safe()
 
     ctx.register_tool(name="gate_challenge", toolset="passkey-gate",
                       schema=schemas.GATE_CHALLENGE, handler=tools.gate_challenge)
@@ -59,5 +76,7 @@ def register(ctx):
         creds = gate_core.credential_count()
     except Exception:
         pass
-    logger.info("passkey-gate registered; passkey credentials on file: %s; enforcement on: %s",
-                creds, cfg["require_passkey"])
+    logger.info("passkey-gate registered; passkey credentials on file: %s; enforcement on: %s%s",
+                creds, cfg["require_passkey"],
+                f" — CONFIG ERROR, failing closed: {cfg['_config_error']}"
+                if cfg.get("_config_error") else "")

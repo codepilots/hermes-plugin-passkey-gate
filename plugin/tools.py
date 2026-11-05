@@ -50,6 +50,17 @@ def gate_challenge(args: dict, **kwargs) -> str:
             cfg = cli.apply_config_safe()
         except Exception:
             cfg = {}
+        if cfg.get("_config_error"):
+            # finding 17: with the config unreadable the gate cannot judge
+            # pattern matches, so it will not mint a signable prose-only
+            # challenge that enforcement cannot evaluate
+            return json.dumps({"ok": False, "error": (
+                f"passkey-gate configuration failed to load ({cfg['_config_error']}) — "
+                "the gate cannot tell whether this action matches an authority "
+                "pattern, so it will not mint a prose-only challenge. Tell the "
+                "human to fix the passkey-gate settings; the gate reloads them "
+                "automatically once they parse. A challenge bound to an exact "
+                "tool_call can still be minted.")})
         if cfg.get("require_passkey"):
             for pat in cfg.get("patterns") or []:
                 try:

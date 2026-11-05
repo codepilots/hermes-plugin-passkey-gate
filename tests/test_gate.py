@@ -557,3 +557,176 @@ def test_check_never_raises_on_malformed_records(base, autumn):
     # a record stripped of its recorded challenge can never verify (finding 14's other face)
     problems = local_verify.check(variants["missing challenge_b64url"], ACTION, ORIGIN, RP_ID, autumn.pem)
     assert any("does not match the recorded challenge" in p for p in problems), problems
+
+
+# ---------------- findings 17 + 7: config-load failure + stale config cache
+class FakeCtx:
+    """Hermes-free plugin context: a settings dict with an optional injected
+    storage failure — the exact seams apply_config() reads through."""
+
+    def __init__(self, settings=None, fail_get=False):
+        self.settings = {
+            "origin": ORIGIN, "rp_id": RP_ID, "port": 0, "challenge_ttl": 2,
+            "require_passkey": False, "authority_patterns": [],
+            **(settings or {}),
+        }
+        self.fail_get = fail_get
+
+    def get_config(self, key, default=None):
+        if self.fail_get:
+            raise RuntimeError("settings storage unavailable")
+        return self.settings.get(key, default)
+
+    def set_config(self, key, value):
+        self.settings[key] = value
+
+
+def reset_gate_config(monkeypatch, ctx=None):
+    """Fresh config-cache state for one test, with gate_core.configure made
+    inert so config tests cannot disturb the shared gate the rest of the
+    suite talks to (apply_config still runs for real, including its typed
+    coercions — those raise before configure is ever reached)."""
+    from passkey_gate import cli
+    monkeypatch.setattr(gate_core, "configure", lambda **kw: None)
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    monkeypatch.setattr(cli, "_cfg_cache", None)
+    monkeypatch.setattr(cli, "_cfg_stamp", None, raising=False)
+    monkeypatch.setattr(cli, "_settings_source", lambda: None, raising=False)
+    return cli
+
+
+def test_config_load_failure_fails_closed(monkeypatch):
+    """Finding 17: a config that is PRESENT but fails to load (storage
+    failure, malformed setting) must fail CLOSED — require_passkey treated
+    as on for verdicts, an error marker carried, and the hook BLOCKS with a
+    message that says the config failed to load. Pre-fix it silently
+    allowed everything for the rest of the process."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    call = {"command": "ssh git@100.64.0.10 -p 2222 finding17-probe"}
+
+    # present-but-raising: the settings storage itself explodes
+    cli._ctx_ref = FakeCtx(fail_get=True)
+    cfg = cli.apply_config_safe()
+    assert cfg["require_passkey"] is True, cfg
+    assert "RuntimeError" in cfg["_config_error"]
+    v = passkey_gate._on_pre_tool_call("terminal", call, "t")
+    assert v is not None and v["action"] == "block"
+    assert "failed to load" in v["message"]
+    assert "no approved passkey challenge" not in v["message"]
+    # gate_challenge surfaces the config failure distinctly too
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "sorrel"}))
+    assert out["ok"] is False and "failed to load" in out["error"]
+    # a challenge bound to an exact tool_call needs no config and still mints
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "sorrel",
+                                           "tool_call": TOOL_CALL}))
+    assert out["ok"] is True and out["binding_sha256"]
+
+    # present-but-malformed: a setting value that cannot be typed
+    cli._ctx_ref = FakeCtx({"port": "abc", "require_passkey": True})
+    cli._cfg_cache = None
+    cfg = cli.apply_config_safe()
+    assert cfg["require_passkey"] is True and "ValueError" in cfg["_config_error"]
+    v = passkey_gate._on_pre_tool_call("terminal", call, "t")
+    assert v is not None and v["action"] == "block" and "failed to load" in v["message"]
+
+
+def test_unparseable_settings_source_fails_closed(monkeypatch):
+    """Finding 17's production face inside Hermes: a config.yaml that exists
+    but will not parse is served to readers as silent DEFAULTS by the config
+    loader. The gate must detect the recorded parse failure and fail closed
+    instead of running on defaults the admin never chose."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    monkeypatch.setattr(cli, "_ctx_ref",
+                        FakeCtx({"require_passkey": False, "authority_patterns": []}))
+    monkeypatch.setattr(cli, "_active_settings_error", raising=False,
+                        value=lambda: "config.yaml has a formatting error at line 12")
+    cfg = cli.apply_config_safe()
+    assert cfg["require_passkey"] is True, cfg
+    assert "formatting error" in cfg["_config_error"]
+    v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
+    assert v is not None and v["action"] == "block" and "failed to load" in v["message"]
+
+
+def test_cmd_set_takes_effect_without_restart(monkeypatch):
+    """Finding 7 (stale-cache half): `hermes passkey-gate set require_passkey
+    true` must be visible to the NEXT hook call in the same process — the
+    running gateway must not keep the old enforcement state until restart."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    ctx = FakeCtx({"require_passkey": False, "authority_patterns": [r"ssh git@100"]})
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    call = {"command": "ssh git@100.64.0.10 -p 2222 cmd-set-probe"}
+    assert passkey_gate._on_pre_tool_call("terminal", call, "t1") is None  # off: allowed
+
+    out = cli.cmd_set(ctx, ["require_passkey", "true"])
+    assert "require_passkey = true" in out
+
+    v = passkey_gate._on_pre_tool_call("terminal", call, "t2")  # same process, no restart
+    assert v is not None and v["action"] == "block"
+    assert "gate_challenge" in v["message"]  # an ordinary enforcement block
+
+    cli.cmd_set(ctx, ["require_passkey", "false"])
+    assert passkey_gate._on_pre_tool_call("terminal", call, "t3") is None
+
+
+def test_settings_source_edit_reloads_without_restart(monkeypatch):
+    """Finding 7 (out-of-band half): an edit to the settings source (config
+    form, a second CLI process, a plain editor) must be observed by the
+    running gate through the source's file signature — one stat per call,
+    no restart, no permanently stale cache."""
+    cli = reset_gate_config(monkeypatch)
+    src = Path(TMP) / "fake-config.yaml"
+    src.write_text("require_passkey: true\n")
+    monkeypatch.setattr(cli, "_settings_source", lambda: src)
+    ctx = FakeCtx({"require_passkey": True, "authority_patterns": []})
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    assert cli.apply_config_safe()["require_passkey"] is True
+
+    # out-of-band edit: the values change AND the file signature moves
+    ctx.settings["require_passkey"] = False
+    st = src.stat()
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    cfg = cli.apply_config_safe()
+    assert cfg["require_passkey"] is False and "_config_error" not in cfg
+
+    # no signature change -> the cache legitimately holds
+    ctx.settings["require_passkey"] = True
+    assert cli.apply_config_safe()["require_passkey"] is False
+
+
+def test_absent_config_keeps_default_off(monkeypatch):
+    """The not-configured case: with no config source at all (no Hermes
+    runtime), default-off is legitimate and unchanged — no error marker, no
+    block. Existing off-by-default behavior must survive the fix."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    assert cli.apply_config_safe() == {"require_passkey": False, "patterns": []}
+    assert passkey_gate._on_pre_tool_call("terminal", {"command": "rm -rf /tmp/x"}, "t") is None
+
+
+def test_register_with_broken_config_fails_closed(monkeypatch):
+    """A config broken from the start must not kill registration — a dead
+    register() leaves NO hook at all, the one fail-open path left. The
+    plugin registers, and every call blocks on the config-error marker."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    registered = []
+
+    class Ctx(FakeCtx):
+        def register_tool(self, **kw):
+            registered.append(kw["name"])
+
+        def register_hook(self, name, handler):
+            registered.append(name)
+
+        def register_cli_command(self, name, fn):
+            registered.append(name)
+
+    passkey_gate.register(Ctx(fail_get=True))  # must not raise
+    assert "pre_tool_call" in registered
+    cfg = cli.apply_config_safe()
+    assert cfg["require_passkey"] is True and cfg["_config_error"]
+    v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
+    assert v is not None and v["action"] == "block" and "failed to load" in v["message"]

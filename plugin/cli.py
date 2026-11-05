@@ -50,6 +50,7 @@ DEFAULTS = {
 
 _ctx_ref = None
 _cfg_cache = None
+_cfg_stamp = None  # settings-source signature the cache was built from
 
 
 # ---------------------------------------------------------------- ctx plumbing
@@ -90,16 +91,85 @@ def os_default_rp_id():
     return "localhost"
 
 
-def apply_config_safe():
+def _settings_source():
+    """The file the gate's settings are read through (the Hermes profile's
+    config.yaml); None outside a Hermes runtime."""
+    try:
+        from hermes_cli.config import get_config_path
+        return get_config_path()
+    except Exception:
+        return None
+
+
+def _settings_stamp():
+    """One cheap stat of the settings source per verdict, so out-of-band
+    edits (a config form, a second CLI process, an editor) take effect
+    without a process restart. Mirrors Hermes's own config-cache signature."""
+    path = _settings_source()
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+        return (str(path), st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+    except OSError:
+        return ("unreadable", str(path))
+
+
+def _active_settings_error():
+    """A config.yaml that exists but will not read/parse is served to
+    readers as silent DEFAULTS by the Hermes config loader; this returns the
+    loader's recorded parse failure while the file on disk is still the
+    broken one, so the gate can tell 'the admin chose this' from 'the
+    loader fell back'. None outside Hermes."""
+    try:
+        from hermes_cli.config_read_errors import get_active_config_parse_failure
+        return get_active_config_parse_failure() or None
+    except Exception:
+        return None
+
+
+def invalidate_config_cache():
+    """Drop the cached config so the next verdict reloads it (after `set`,
+    or any other change to the settings)."""
     global _cfg_cache
-    if _cfg_cache is None:
-        _cfg_cache = {"require_passkey": False, "patterns": []}
-        try:
-            if _ctx_ref is not None:
-                _cfg_cache = apply_config(_ctx_ref)
-        except Exception:
-            logger.exception(
-                "passkey-gate: config apply failed; enforcement stays off until config loads")
+    _cfg_cache = None
+
+
+def _load_config_state():
+    """Read the enforcement config once, failing CLOSED (finding 17).
+
+    Only 'no config source at all' (no Hermes runtime) keeps the legitimate
+    default-off behavior. A config that is PRESENT but fails to load — a
+    malformed setting, a storage failure, or an unparseable settings file
+    the loader silently replaced with defaults — yields require_passkey
+    True plus a ``_config_error`` marker, and the pre_tool_call hook blocks
+    on the marker instead of guessing which calls are high-authority.
+    """
+    if _ctx_ref is None:
+        # never registered: nothing has been configured, so default-off is
+        # the honest state, not a failure
+        return {"require_passkey": False, "patterns": []}
+    try:
+        cfg = apply_config(_ctx_ref)
+    except Exception as exc:
+        logger.exception("passkey-gate: config load failed; failing closed until it loads")
+        return {"require_passkey": True, "patterns": [],
+                "_config_error": f"{type(exc).__name__}: {exc}"}
+    parse_failure = _active_settings_error()
+    if parse_failure:
+        logger.error("passkey-gate: settings source unreadable (%s); failing closed",
+                     parse_failure)
+        return {"require_passkey": True, "patterns": [],
+                "_config_error": f"settings source unreadable: {parse_failure}"}
+    return cfg
+
+
+def apply_config_safe():
+    global _cfg_cache, _cfg_stamp
+    stamp = _settings_stamp()
+    if _cfg_cache is None or stamp != _cfg_stamp:
+        _cfg_cache = _load_config_state()
+        _cfg_stamp = stamp
     return _cfg_cache
 
 
@@ -217,6 +287,9 @@ def cmd_set(ctx, rest):
                 or value.startswith("http://localhost")):
             return "origin must be https:// (loopback http tolerated for dev) — webauthn requirement"
     ctx.set_config(key, value)
+    # finding 7: a running gateway must see this change on the NEXT hook
+    # call — drop the cache before re-applying so no verdict serves stale state
+    invalidate_config_cache()
     apply_config(ctx)
     return f"{key} = {json.dumps(value)}\n" + cmd_show_settings(ctx)
 
