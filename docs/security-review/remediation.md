@@ -21,7 +21,7 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | # | Findings | Severity | Status | Evidence |
 |---|----------|----------|--------|----------|
 | D1 | 1 — approval page never shows the bound tool call | CRITICAL | ✅ | commit `4956b48`; 33 passed; exploit probe green |
-| D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | 🔄 | delegated |
+| D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `36a193e`; 39 passed; 8-way race probe green |
 | D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ⬜ | |
 | D4 | 17+7 — block on config failure; wrap verdict fail-closed; config reload | HIGH+MEDIUM | ⬜ | |
 | D5 | 5+23 — SSRF: parent allowlist + strict URL parse, no redirects | HIGH+MEDIUM | ⬜ | |
@@ -41,6 +41,27 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D2 — findings 3 (CRITICAL) + 4 (HIGH): atomic claim-and-consume ✅
+
+- **Delegated:** make consume() the atomic adjudicator (one conditional
+  UPDATE with expiry), block on False in hook_verdict, enforce expires_at at
+  lookup/consume/verify, fail-closed exception wrapping. Subagent completed
+  in ~231s, TDD (6 new tests first), left uncommitted.
+- **Verification (independent):** full suite re-run by parent — 39 passed;
+  diff review — consume() claim is a single UPDATE (rowcount==1 wins),
+  challenge_status returns bare 'expired' (no signed payload) for stale
+  approvals, hook_verdict try/except blocks on any failure; probe
+  (`cache/scratch/probe_d2_independent.py`): 8-way consume race → exactly
+  one winner; sequential re-use blocked; stale approval dead at lookup,
+  consume, hook, and verify; injected exception → block, never allow.
+- **Deviations:** none material. The fail-closed wrap also landed part of
+  finding 7's fix here — D4's scope narrowed to config-load caching +
+  config reload (no re-wrap needed).
+- **Commit:** `36a193e`. **Follow-up outside this repo:** Autumn's personal
+  `verify_local.py` (the proved original the plugin's local_verify was
+  ported from) shares the finding-14 gap fixed next in D3 — flag for a
+  matching patch once D3 lands.
 
 ### D1 — finding 1 (CRITICAL): bound tool call now rendered ✅
 
