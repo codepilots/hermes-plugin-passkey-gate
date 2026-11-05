@@ -9,14 +9,19 @@ GATE_CHALLENGE = {
     "name": "gate_challenge",
     "description": (
         "Mint a passkey approval request for a high-authority action, BEFORE "
-        "performing it. action_text must be a specific, self-contained authority "
-        "document the human will read and sign (who grants what, on which system, "
-        "what limits, when it expires) — minimum 40 characters and 6 words, vague "
-        "text is rejected. The returned URL is the ONLY way the human can approve: "
-        "send it to them and clearly say what it approves. Optionally pass "
-        "tool_call (same tool name and exact args) so the enforced flow can bind "
-        "this approval to that one deliberate execution. Challenge expires (default "
-        "10 min) and approvals are single-use."
+        "performing it. The signer reads the page you link them to — write for "
+        "THEM. action_text must be a specific, self-contained authority "
+        "document (what changes, on which system, what limits, when it "
+        "expires; minimum 40 chars and 6 words; vagueness is rejected). The "
+        "signer may be YOUR OWN human or, in cross-agent collaboration, ANOTHER "
+        "HUMAN you have never met: then set requester_owner to name your human, "
+        "write `why` in one plain sentence (required then — no jargon, explain "
+        "what signing enables and why it is safe), never assume they know your "
+        "project. The returned URL is the only way a human can approve: send it "
+        "via a channel they actually read, with one line of context. If another "
+        "human already approved on their own gate, pass parent_approval so the "
+        "page shows that checked, not claimed. Challenge expires (default 10 "
+        "min); approvals are single-use and consumed on use."
     ),
     "parameters": {
         "type": "object",
@@ -32,16 +37,48 @@ GATE_CHALLENGE = {
             },
             "requester": {
                 "type": "string",
-                "description": "Who is asking (agent profile name, session id, or peer lane label). Max 64 chars.",
+                "description": "The asking AGENT's name (you). Max 64 chars.",
+            },
+            "requester_owner": {
+                "type": "string",
+                "description": (
+                    "Name of YOUR OWN human (the operator responsible for you). "
+                    "Set it whenever the signer might not be your own human — "
+                    "it lets them judge the ask. Max 64 chars."
+                ),
+            },
+            "why": {
+                "type": "string",
+                "description": (
+                    "ONE plain sentence for the SIGNER (may be a stranger): what "
+                    "signing enables, and why it is safe/needed. Required when "
+                    "requester_owner is set and differs from the requester name. Max 400 chars."
+                ),
+            },
+            "parent_approval": {
+                "type": "object",
+                "description": (
+                    "When a prior approval exists on the peer agent's own gate "
+                    "(that human signed there): {base: https URL of THEIR gate, "
+                    "challenge_id, action_sha256, owner}. The page will show the "
+                    "parent record re-checked locally before rendering."
+                ),
+                "properties": {
+                    "base": {"type": "string"},
+                    "challenge_id": {"type": "string"},
+                    "action_sha256": {"type": "string"},
+                    "owner": {"type": "string"},
+                },
             },
             "tool_call": {
                 "type": "object",
                 "description": (
-                    "Optional structured binding of the exact tool call this approval "
-                    "should cover, shaped as {tool: <name>, args: <same args object>}. "
-                    "When enforcement is on, the pre_tool_call hook re-derives this "
-                    "binding and only lets the call through if it matches an approved, "
-                    "unconsumed challenge."
+                    "Optional structured binding of the exact tool call this "
+                    "approval should cover, shaped as {tool: <name>, args: <the "
+                    "same args object>}. When enforcement is on, the "
+                    "pre_tool_call hook re-derives this binding and only lets "
+                    "the call through if it matches an approved, unconsumed "
+                    "challenge."
                 ),
             },
         },

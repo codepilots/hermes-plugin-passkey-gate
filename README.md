@@ -129,16 +129,57 @@ existing credential works for the plugin without re-registering.
 
 | Tool | What the model reads |
 |---|---|
-| `gate_challenge` | Mint an approval request; returns URL the agent must send its human + sha256. The action text must read like an authority document (40 chars / 6 word floor, max 4000). |
+| `gate_challenge` | Mint an approval request; returns URL + sha256. action_text must read like an authority document (40 chars / 6 word floor, max 4000). Refuses cross-human asks without `why`, and refuses parent chains without an owner named per link — both are etiquette floors, and the error text teaches the correct next move. |
 | `gate_verify` | Poll (optional wait) then LOCALLY verify: binding, signature, UV/UP flags, origin, pinned key, max-age. `verified: true` and no problems = safe to act. |
-| `gate_status` | Gate reachable? credentials registered? key pinned? audit chain intact? |
+| `gate_status` | Gate reachable? credentials registered? owner key pinned? peer keys pinned? audit chain intact? Which exposure backends exist? |
+
+## When agents owned by different humans collaborate
+
+This is the case the plugin was originally built for. Sorrel's agent (field
+laptop, behind a firewall) needs a resource that lives on Autumn's machine —
+and the signer may be a human who has never met that agent. So the ask is a
+document, not a favour:
+
+**For the agent** — when you may be asking someone else's human:
+
+- `requester`: your agent name. `requester_owner`: *your* human's name — the
+  signer judges whose agent this is. `why`: ONE plain sentence for them:
+  what signing enables and why it is safe/needed. Required when the signer
+  isn't plausibly your own human; the tool refuses without it — that floor
+  is deliberate. Never copy a command line into `why`; explain to a person.
+- If a human already approved on the agent's own gate, pass
+  `parent_approval` ({base, challenge_id, action_sha256, owner}) — the page
+  re-checks the parent record locally before rendering, and the verifier
+  says 'unverified' rather than pretending, until you pin that peer's key:
+  `hermes passkey-gate pin peer-key.pem <owner>`.
+- Your message to them should be one line: who's asking, what it does, the
+  link. The page carries the rest.
+
+**For the human signing** — what you see on the page, in one place:
+
+- **From**: the agent + a named `(agent of <owner>)` — check that owner is
+  who you expect; that plus the page's TLS origin and your passkey is the
+  whole trust story.
+- **Why this ask**: one sentence in their words.
+- **Already signed...**: if the request was pre-approved on someone else's
+  gate, its locally-checked verdict shows here (verified / unverified /
+  key-mismatch). Unverified = a claim, ask for their pinned key first.
+- The **full action text** and its sha256, and an expiry. Approving
+  authorises exactly that text and nothing else; **denying is always
+  safe**, and doing nothing just lets it expire.
+- Arrived by chat link but prefer your phone? `hermes passkey-gate show
+  <challenge-id>` prints a QR.
+
+Fun fact for the signer: the agents in this story named themselves Bramble
+and Sorrel. The gate stays impartial — it only knows whose read the page,
+whose key verifies, and whether both match.
 
 ## Enforcement hook (opt-in)
 
 ```yaml
         require_passkey: true
         authority_patterns:
-          - "^terminal .*- (rm|sudo|curl|scp|dd|mv /)"
+          - "^terminal .*- (rm|curl|scp|dd|mv /)"
           - "^\\w+ .*credential"       # tools whose args mention credentials
 ```
 

@@ -8,3 +8,13 @@ pre.action{white-space:pre-wrap;word-break:break-word;background:#1b2619;border:
 button{flex:1;font-size:1.05em;padding:14px;border-radius:8px;border:0;cursor:pointer}
 .approve{background:#4f8a3c;color:#fff}.deny{background:#5a2b2b;color:#fff}
 .ok{color:#9fd18b}.err{color:#f08080}
+
+/* ---- v0.4: cross-human collaboration blocks ---- */
+p.why { margin: 1.1em 0; padding: .7em .9em; border-left: 3px solid #7a9e7e;
+  background: #f0f5ef; border-radius: 0 6px 6px 0; }
+div.parent { margin: 1.2em 0; padding: .8em 1em; border: 1px solid #d0d0d0;
+  border-radius: 8px; background: #fafafa; font-size: .95em; }
+div.parent b { display: block; margin-bottom: .3em; }
+span.owner { color: #556; }
+p.hint { color: #556; font-size: .9em; margin-top: .7em; }
+p.why b, div.parent b { font-weight: 600; }
