@@ -22,8 +22,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 |---|----------|----------|--------|----------|
 | D1 | 1 — approval page never shows the bound tool call | CRITICAL | ✅ | commit `4956b48`; 33 passed; exploit probe green |
 | D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `36a193e`; 39 passed; 8-way race probe green |
-| D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ⬜ | |
-| D4 | 17+7 — block on config failure; wrap verdict fail-closed; config reload | HIGH+MEDIUM | ⬜ | |
+| D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `dcbdb4a`; 41 passed; replay probe green |
+| D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | 🔄 | delegated |
 | D5 | 5+23 — SSRF: parent allowlist + strict URL parse, no redirects | HIGH+MEDIUM | ⬜ | |
 | D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ⬜ | |
 | D7 | 16 — enforcement config agent-mutable | HIGH | ⬜ | |
@@ -41,6 +41,27 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D3 — findings 14 (HIGH) + 9 (LOW): challenge binding + never-raise ✅
+
+- **Delegated:** bind local verification to the exact recorded challenge
+  (finding 14) and make local_verify.check() exception-free (finding 9).
+  Subagent completed in ~219s, TDD (2 new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 41 passed; diff review —
+  signed challenge must equal rec.challenge_b64url as decoded bytes with the
+  prefix check kept, per-field guards plus a last-resort blanket; probe
+  (`cache/scratch/probe_d3_independent.py`): legit same-nonce record still
+  verifies clean; the exploit — same valid signature replayed against a
+  different record's nonce with identical action text — rejected with
+  'signed challenge does not match the recorded challenge'; 7 hostile record
+  shapes (missing assertion, garbage b64, non-dict, int, None, list client
+  data) all return problem lists, never raise.
+- **Deviations accepted:** non-string action_text gets its own guard message;
+  a last-resort except appends 'record malformed' rather than letting
+  anything escape. Both strengthen the never-raise contract.
+- **Commit:** `dcbdb4a`. **Standing follow-up:** Autumn's personal
+  `verify_local.py` (the proved original, outside this repo) needs the same
+  two fixes — offer to patch after the campaign.
 
 ### D2 — findings 3 (CRITICAL) + 4 (HIGH): atomic claim-and-consume ✅
 
