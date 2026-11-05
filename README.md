@@ -103,6 +103,13 @@ hermes passkey-gate pin /path/to/pinned_autumn.pem
 
 # 4) Audit the log at any time
 hermes passkey-gate audit-verify
+
+# 5) Every setting has a CLI command too — typed parse, validate, persist,
+#    and immediately re-applied to the running configuration:
+#      hermes passkey-gate set require_passkey true
+#      hermes passkey-gate set authority_patterns ^terminal .*(rm |curl )
+#      hermes passkey-gate set origin https://your-host.ts.net:8447
+#      hermes passkey-gate get
 ```
 
 ### Exposure backends
