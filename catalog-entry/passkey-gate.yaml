@@ -3,7 +3,7 @@
 
 name: passkey-gate
 repo: https://github.com/codepilots/hermes-plugin-passkey-gate
-sha: d7aed66167a2722632159e2a18fb499498ef221d   # full 40-char pin; validate ran against THIS commit   # full 40-char pin; validate ran against THIS commit
+sha: b6527923579a624cd62bbf17f26068c63501e4ff   # full 40-char pin; validate ran against THIS commit   # full 40-char pin; validate ran against THIS commit   # full 40-char pin; validate ran against THIS commit
 subdir: plugin
 description: "Passkey (WebAuthn) authorization gate for high-authority agent actions: the agent mints a challenge bound bit-for-bit to exact action text (and optionally to a canonical tool-call binding) and sends the human the approval URL; only a human passkey signature can approve (UV enforced, agents hold no private key); gate_verify then re-derives the proof locally (sha256 binding, signature over authenticatorData||sha256(clientDataJSON), UP/UV flags, origin/RP match, max age) against a PINNED owner public key. Approvals are single-use; enforced mode (require_passkey + authority_patterns) makes pre_tool_call block matching calls until an approved-but-unconsumed challenge covers that exact binding, then consumes it. Append-only hash-chained audit log (hermes passkey-gate audit-verify) detects any edit or deletion. CLI: serve, bootstrap (one-time registration link, terminal-only), audit-verify, pin."
 maintainer: codepilots
