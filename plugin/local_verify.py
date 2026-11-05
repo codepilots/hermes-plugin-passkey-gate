@@ -25,11 +25,12 @@ import hashlib
 import json
 import re
 import time
-import urllib.request
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+
+from . import netfetch
 
 
 def b64u(s):
@@ -185,7 +186,8 @@ def pinned(data_dir, owner: str | None = None):
     return path.read_text().strip() if path.exists() else None
 
 
-def verify_parent_approval(parent: dict, data_dir, timeout: int = 10) -> str:
+def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
+                           allowlist=None) -> str:
     """Check a prior approval that was signed on ANOTHER human's gate.
 
     The parent gate is asked for the record by (id, action_sha256) — it
@@ -196,13 +198,29 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10) -> str:
     and text-binding re-checks stay the parent gate's responsibility (the
     parent has the action text; this side usually does not).
 
+    Finding 5: the parent base is fetched ONLY when its origin is on the
+    allowlist (exact scheme+host+port match, no wildcards; an empty
+    allowlist — the default — means NO parent fetch at all) and it resolves
+    outside private/loopback space. Both are checked BEFORE any network
+    I/O, so an unlisted base yields its verdict without ever touching the
+    network — no reachability oracle. Finding 23: the fetch never follows a
+    redirect.
+
     Returns a short verdict string for the approval page: 'verified',
     'unverified (...)' or 'key-mismatch'.
     """
     try:
-        url = f"{parent['base']}/verify/{parent['challenge_id']}?action_sha256={parent['action_sha256']}"
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        allow = [str(x) for x in allowlist] if isinstance(allowlist, (list, tuple)) else []
+        base = str(parent["base"]).strip().rstrip("/")
+        problem = netfetch.base_not_fetchable(base, allow)
+        if problem:
+            return f"unverified ({problem})"
+        url = f"{base}/verify/{parent['challenge_id']}?action_sha256={parent['action_sha256']}"
+        with netfetch.open_no_redirect(url, timeout=timeout) as r:
             rec = json.loads(r.read())
+    except netfetch.RedirectBlocked as exc:
+        return (f"unverified (parent gate answered with a redirect ({exc.code}) — "
+                "never followed)")
     except Exception as exc:
         return f"unverified (parent gate unreachable: {type(exc).__name__})"
     if rec.get("status") != "approved":

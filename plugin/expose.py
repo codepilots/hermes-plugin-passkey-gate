@@ -26,8 +26,8 @@ import json
 import shutil
 import subprocess
 import time
-import urllib.error
-import urllib.request
+
+from . import netfetch
 
 # Ports tried, in order, for tailscale HTTPS serving (443 = clean URL)
 TAILSCALE_PORTS = [443, 8443, 8445, 8446, 8447, 8448, 8480, 8500, 8600, 8661]
@@ -154,7 +154,7 @@ def tailscale_expose(gate_port: int, target_port: int | None = None) -> dict:
 
 def _tls_probe(url: str, timeout: int = 12) -> tuple[bool, str]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with netfetch.open_no_redirect(url, timeout=timeout) as r:
             body = r.read(4096)
             ok = r.status == 200 and b'"status": "ok"' in body
             if ok:

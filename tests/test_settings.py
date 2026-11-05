@@ -63,6 +63,42 @@ def test_set_loopback_http_is_tolerated():
     assert ctx.store["origin"] == "http://127.0.0.1:8655"
 
 
+def test_set_origin_is_parsed_not_prefix_checked():
+    """Finding 23: `set origin` must PARSE the URL — the old prefix check let
+    credential-carrying, hostless, and unparseable-port origins through."""
+    ctx = FakeCtx()
+    rejected = [
+        "https://user:secret@host.ts.net",   # credentials ride along
+        "https://",                          # no host at all
+        "https://:8445",                     # port without a host
+        "https://host.ts.net:notaport",      # unparseable port
+        "http://192.168.1.9:8655",           # plain http off loopback (private is NOT the dev exception)
+        "ftp://host.ts.net",
+    ]
+    for bad in rejected:
+        out = _cli(ctx, f"set origin {bad}")
+        assert "origin rejected" in out, bad
+        assert ctx.store.get("origin") is None, bad  # rejected before persisting
+    accepted = ["https://fine.example.ts.net", "https://real.example.ts.net:8445",
+                "http://localhost:8655", "http://127.0.0.1:8655"]
+    for good in accepted:
+        out = _cli(ctx, f"set origin {good}")
+        assert ctx.store["origin"] == good, out
+
+
+def test_set_parent_gate_allowlist_roundtrip():
+    """Finding 5's config key: allowed parent-gate origins, parsed as a list
+    (JSON or comma form) and persisted like every other setting."""
+    ctx = FakeCtx()
+    out = _cli(ctx, "set parent_gate_allowlist https://peer-a.example.ts.net:8445,https://peer-b.example.ts.net")
+    assert ctx.store["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445",
+                                                  "https://peer-b.example.ts.net"]
+    out = _cli(ctx, 'set parent_gate_allowlist ["https://peer-c.example.ts.net"]')
+    assert ctx.store["parent_gate_allowlist"] == ["https://peer-c.example.ts.net"]
+    show = _cli(ctx, "get")
+    assert "parent_gate_allowlist" in show
+
+
 def test_settings_spec_matches_manifest():
     """Keys must be exactly the plugin.yaml config_schema keys — drift surfaces here."""
     from pathlib import Path

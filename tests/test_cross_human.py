@@ -135,6 +135,9 @@ def test_cross_human_requires_owner_and_why(monkeypatch):
 
 def test_parent_chain_requires_owner_and_verifies(monkeypatch, parent_gate):
     parent_base, parent_auth = parent_gate
+    # finding 5: parent fetches happen only for allowlisted peer origins —
+    # this test's stub parent gate is deliberately on the allowlist
+    monkeypatch.setenv("GATE_PARENT_ALLOWLIST", json.dumps([parent_base]))
     # the peer human approves the sibling challenge on THEIR gate
     s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
     assert s == 201

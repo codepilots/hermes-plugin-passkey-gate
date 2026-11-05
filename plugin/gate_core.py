@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import local_verify
+from . import local_verify, netfetch
 
 from webauthn import (generate_authentication_options, generate_registration_options,
                       options_to_json, verify_authentication_response,
@@ -61,7 +61,7 @@ _settings = {}
 
 
 def configure(data_dir=None, rp_id=None, origin=None, port=None, challenge_ttl=None,
-              bootstrap_ttl=None):
+              bootstrap_ttl=None, parent_allowlist=None):
     global _plugin_data_dir, _settings
     if data_dir is not None:
         _plugin_data_dir = Path(data_dir)
@@ -73,6 +73,8 @@ def configure(data_dir=None, rp_id=None, origin=None, port=None, challenge_ttl=N
                              else os.environ.get("GATE_CHALLENGE_TTL", "600")),
         "BOOTSTRAP_TTL": int(bootstrap_ttl if bootstrap_ttl is not None
                              else os.environ.get("GATE_BOOTSTRAP_TTL", "900")),
+        "PARENT_ALLOWLIST": ([str(x).strip() for x in parent_allowlist]
+                             if parent_allowlist is not None else None),
     }
     _settings.update(defaults)
 
@@ -95,6 +97,22 @@ def challenge_ttl() -> int:
 
 def bootstrap_ttl() -> int:
     return int(_settings.get("BOOTSTRAP_TTL") or os.environ.get("GATE_BOOTSTRAP_TTL", "900"))
+
+
+def parent_allowlist() -> list:
+    """Allowed parent-gate ORIGINS (finding 5): exact scheme+host+port
+    strings, no wildcards. Empty (the default) means NO parent fetch at
+    all — a claimed prior approval then renders as unverified, never
+    fetched. Env form (GATE_PARENT_ALLOWLIST, a JSON list) mirrors the
+    other settings and fails closed on garbage."""
+    raw = _settings.get("PARENT_ALLOWLIST")
+    if raw is None:
+        try:
+            parsed = json.loads(os.environ.get("GATE_PARENT_ALLOWLIST", "[]"))
+        except ValueError:
+            parsed = []
+        raw = [str(x).strip() for x in parsed] if isinstance(parsed, list) else []
+    return [x for x in (raw or []) if x]
 
 
 def data_dir() -> Path:
@@ -267,13 +285,16 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                 "action_sha256": str(parent_approval["action_sha256"]).strip().lower(),
                 "owner": str(parent_approval.get("owner", "")).strip()[:64],
             }
-            if not ID_RE.match(parent["challenge_id"]) or not SHA_RE.match(parent["action_sha256"]) \
-                    or not (parent["base"].startswith("https://")
-                            or parent["base"].startswith("http://127.0.0.1")
-                            or parent["base"].startswith("http://localhost")):
-                raise ValueError
-        except (KeyError, ValueError):
-            raise ValueError("parent_approval needs {base (https), challenge_id, action_sha256, owner}")
+            if not ID_RE.match(parent["challenge_id"]) or not SHA_RE.match(parent["action_sha256"]):
+                raise ValueError("challenge_id/action_sha256 malformed")
+            # finding 23: parse the base — the old https:// prefix check let
+            # credential-carrying and hostless URLs through to a fetch
+            netfetch.parse_gate_origin(parent["base"])
+        except (KeyError, ValueError) as exc:
+            detail = f" — {exc}" if isinstance(exc, ValueError) else f" (missing {exc})"
+            raise ValueError(
+                "parent_approval needs {base (https), challenge_id, action_sha256, owner}"
+                + detail)
     text = action_text.strip()
     prob = specificity_problem(text)
     if prob:
@@ -286,7 +307,9 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     chal = bytes.fromhex(sha) + secrets.token_bytes(32)  # nonce = text sha256 + entropy
     now = time.time()
     parent_json = json.dumps(parent, sort_keys=True, separators=(",", ":")) if parent else None
-    pv = local_verify.verify_parent_approval(parent, data_dir()) if parent else None
+    pv = (local_verify.verify_parent_approval(parent, data_dir(),
+                                              allowlist=parent_allowlist())
+          if parent else None)
     db().execute(
         "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
         "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"

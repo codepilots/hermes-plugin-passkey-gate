@@ -19,10 +19,9 @@
 import json
 import logging
 import time
-import urllib.request
 from pathlib import Path
 
-from . import gate_core, expose, local_verify
+from . import gate_core, expose, local_verify, netfetch
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,7 @@ SETTINGS_SPEC = {
     "challenge_ttl": {"type": "int"},
     "require_passkey": {"type": "bool"},
     "authority_patterns": {"type": "list"},
+    "parent_gate_allowlist": {"type": "list"},
 }
 
 DEFAULTS = {
@@ -46,6 +46,7 @@ DEFAULTS = {
     "challenge_ttl": 600,
     "require_passkey": False,
     "authority_patterns": [],
+    "parent_gate_allowlist": [],
 }
 
 _ctx_ref = None
@@ -68,11 +69,15 @@ def apply_config(ctx):
     rp_id_c = (ctx.get_config("rp_id", default="") or "").strip()
     port = ctx.get_config("port", default=8655)
     ttl = ctx.get_config("challenge_ttl", default=600)
+    allow = ctx.get_config("parent_gate_allowlist", default=[]) or []
+    if not isinstance(allow, list):  # fail closed on unexpected typing
+        allow = []
     gate_core.configure(data_dir=str(plugin_data(ctx)),
                         rp_id=rp_id_c or os_default_rp_id(),
                         origin=origin or None,
                         port=int(port),
-                        challenge_ttl=int(ttl))
+                        challenge_ttl=int(ttl),
+                        parent_allowlist=allow)
     return {"require_passkey": bool(ctx.get_config("require_passkey", default=False)),
             "patterns": ctx.get_config("authority_patterns", default=[]) or []}
 
@@ -282,10 +287,13 @@ def cmd_set(ctx, rest):
     if err:
         return err
     if key == "origin" and value:
-        # WebAuthn: https everywhere except loopback dev origins
-        if not (value.startswith("https://") or value.startswith("http://127.0.0.1")
-                or value.startswith("http://localhost")):
-            return "origin must be https:// (loopback http tolerated for dev) — webauthn requirement"
+        # WebAuthn: https everywhere except loopback dev origins. PARSE the
+        # URL (finding 23): a prefix check accepts credential-carrying,
+        # hostless, and unparseable origins.
+        try:
+            netfetch.parse_gate_origin(value)
+        except ValueError as exc:
+            return f"origin rejected: {exc} — WebAuthn needs https (loopback http tolerated for dev)"
     ctx.set_config(key, value)
     # finding 7: a running gateway must see this change on the NEXT hook
     # call — drop the cache before re-applying so no verdict serves stale state
@@ -335,7 +343,7 @@ def cmd_status(ctx, rest):
     out = {"gate": {"reachable": False}}
     base = ((ctx.get_config("origin", default="") or "").strip()).rstrip("/") if ctx is not None else ""
     try:
-        with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
+        with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
             out["gate"] = {**json.loads(r.read()), "reachable": r.status == 200}
     except Exception as exc:
         out["gate"] = {"reachable": False, "error": f"{type(exc).__name__}"}

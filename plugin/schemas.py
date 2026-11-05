@@ -59,9 +59,11 @@ GATE_CHALLENGE = {
                 "type": "object",
                 "description": (
                     "When a prior approval exists on the peer agent's own gate "
-                    "(that human signed there): {base: https URL of THEIR gate, "
-                    "challenge_id, action_sha256, owner}. The page will show the "
-                    "parent record re-checked locally before rendering."
+                    "(that human signed there): {base: https URL of THEIR gate "
+                    "(must be on the parent_gate_allowlist setting, otherwise it "
+                    "renders unverified and is never fetched), challenge_id, "
+                    "action_sha256, owner}. The page will show the parent record "
+                    "re-checked locally before rendering."
                 ),
                 "properties": {
                     "base": {"type": "string"},

@@ -8,9 +8,8 @@ in __init__.py and tested directly.
 import json
 import re
 import time
-import urllib.request
 
-from . import gate_core, local_verify
+from . import gate_core, local_verify, netfetch
 
 # Where gate_core keeps its mutable module-level configuration
 
@@ -184,7 +183,7 @@ def hashlib_sha256(text: str) -> str:
 def _fetch_verify(base: str, cid: str, sha: str):
     url = f"{base}/verify/{cid}?action_sha256={sha}"
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
+        with netfetch.open_no_redirect(url, timeout=10) as r:
             return json.loads(r.read())
     except Exception as exc:
         return {"status": "error", "error": f"gate not reachable: {type(exc).__name__}"}
@@ -192,7 +191,7 @@ def _fetch_verify(base: str, cid: str, sha: str):
 
 def _fetch_health(base: str):
     try:
-        with urllib.request.urlopen(f"{base}/health", timeout=8) as r:
+        with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
             return json.loads(r.read())
     except Exception as exc:
         return {"status": "unreachable", "error": f"{type(exc).__name__}"}

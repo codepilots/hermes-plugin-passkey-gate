@@ -51,6 +51,11 @@ config_schema:
     default: []
     label: "Authority patterns"
     description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .*(rm |curl |scp |dd )') that trigger passkey enforcement when require_passkey is true."
+  parent_gate_allowlist:
+    type: list
+    default: []
+    label: "Parent gate allowlist"
+    description: "Origins (scheme+host+port, exact match, no wildcards) of peer gates this gate may fetch to re-check a claimed parent approval. Empty (the default) disables ALL parent-gate fetches — a claimed prior approval then renders as 'unverified (parent gate not on allowlist)' and is never fetched."
 
 python_dependencies:
   - webauthn==1.11.*
