@@ -216,5 +216,6 @@ def auto_expose(gate_port: int, gate_origin_cfg: str = "", gate_rp_id_cfg: str =
     if b["cloudflared"]:
         return cloudflare_expose(gate_port)
     return {"ok": False, "backend": "none",
-            "error": ("no HTTPS path found: install tailscale (recommended: `curl -fsSL https://tailscale.com/install.sh | sh`)"
-                      " or cloudflared; or set plugins.entries.passkey-gate.settings.origin to an existing HTTPS origin")}
+            "error": ("no HTTPS path found: install tailscale (https://tailscale.com/download) or cloudflared "
+                      "(https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/);"
+                      " or set plugins.entries.passkey-gate.settings.origin to an existing HTTPS origin")}
