@@ -50,7 +50,7 @@ config_schema:
     type: list
     default: []
     label: "Authority patterns"
-    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .* - (rm|sudo|curl |mv |dd )') that trigger passkey enforcement when require_passkey is true."
+    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .*(rm |curl |scp |dd )') that trigger passkey enforcement when require_passkey is true."
 
 python_dependencies:
   - webauthn==1.11.*
