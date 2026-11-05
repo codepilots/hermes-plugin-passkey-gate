@@ -22,6 +22,7 @@ Checks, all local:
 """
 import base64
 import hashlib
+import os
 import json
 import re
 import time
@@ -173,11 +174,45 @@ def pin_for(data_dir, owner: str | None):
 
 
 def pin(data_dir, pem: str, owner: str | None = None) -> str:
+    """Validate and first-seen pin a P-256 EC public PEM.
+
+    The destination is created directly and exclusively: no replacement and
+    no symlink following are permitted by this ceremony.
+    """
+    if isinstance(pem, str):
+        normalized = pem.strip().encode() + b"\n"
+    elif isinstance(pem, bytes):
+        normalized = pem.strip() + b"\n"
+    else:
+        raise ValueError("PEM must be text or bytes containing an EC public key")
+    try:
+        key = serialization.load_pem_public_key(normalized)
+    except Exception as exc:
+        raise ValueError(f"PEM is not a loadable public key: {exc}") from exc
+    if not isinstance(key, ec.EllipticCurvePublicKey):
+        raise ValueError("pinned key must be an EC public key")
+    if not isinstance(key.curve, ec.SECP256R1):
+        raise ValueError("pinned EC public key must use curve secp256r1")
+
     path = pin_for(data_dir, owner)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # normalise exactly like check() compares (strip outer whitespace)
-    path.write_text(pem.strip() + "\n")
-    path.chmod(0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(str(path), flags, 0o600)
+        os.fchmod(fd, 0o600)
+        data = normalized
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+        os.fsync(fd)
+    except FileExistsError as exc:
+        raise ValueError(f"pin destination already exists: {path}; replacement is refused") from exc
+    except OSError as exc:
+        raise ValueError(f"could not create pin securely at {path}: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
     return str(path)
 
 

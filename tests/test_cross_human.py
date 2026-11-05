@@ -163,7 +163,7 @@ def test_parent_chain_requires_owner_and_verifies(monkeypatch, parent_gate):
     # pin the peer key out of band -> the record now verifies LOCALLY — but the
     # child action text differs from the parent's, so finding 19's policy
     # renders it as context only, never as 'verified'
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     after = json.loads(tools.gate_challenge({
         "action_text": ACTION + " (retry with pinned peer key)", "requester": "bramble",
         "parent_approval": {"base": parent_base, "challenge_id": c["challenge_id"],
@@ -220,6 +220,12 @@ def serve_record(record):
     return srv
 
 
+def pin_once(data_dir, pem, owner=None):
+    if local_verify.pinned(data_dir, owner) is None:
+        return local_verify.pin(data_dir, pem, owner)
+    return str(local_verify.pin_for(data_dir, owner))
+
+
 def _child_sha(text):
     return gate_core.sha256_hex(text)
 
@@ -230,7 +236,7 @@ def test_fabricated_parent_record_with_pinned_key_is_unverified(parent_gate):
     assertion. Pre-fix that alone rendered 'verified against pinned key'; post-fix
     the record is verified LOCALLY and fails with the reason."""
     _, parent_auth = parent_gate
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     evil_sha = _child_sha(OTHER_ACTION)
     fabricated = {
         "status": "approved", "challenge_id": "B" * 24,
@@ -259,7 +265,7 @@ def test_real_parent_approval_same_action_fully_verifies(monkeypatch, parent_gat
     challenge binding, RP/origin, UV flags, pinned key) and says so."""
     parent_base, parent_auth = parent_gate
     monkeypatch.setenv("GATE_PARENT_ALLOWLIST", json.dumps([parent_base]))
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
     assert s == 201
     approve_on(parent_base, parent_auth, c["challenge_id"])
@@ -289,7 +295,7 @@ def test_real_parent_approval_for_a_different_action_is_context_only(parent_gate
     """Finding 19: the peer's signature is REAL, but it covered a DIFFERENT
     action — the verdict must say so as context, never claim 'verified'."""
     parent_base, parent_auth = parent_gate
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     s, c = call(parent_base, "/challenge", {"action_text": OTHER_ACTION, "requester": "sorrel"})
     assert s == 201
     approve_on(parent_base, parent_auth, c["challenge_id"])
@@ -309,7 +315,7 @@ def test_parent_record_replaying_another_records_challenge_is_rejected(parent_ga
     challenge. Even with the right pinned key, the signature is not bound to
     the record's own recorded challenge, so it is rejected."""
     parent_base, parent_auth = parent_gate
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
     assert s == 201
     approve_on(parent_base, parent_auth, c["challenge_id"])
@@ -336,7 +342,7 @@ def test_parent_verdict_never_claims_same_action_without_a_child_hash(parent_gat
     so even a fully verified parent record is presented as context, never as
     'verified'."""
     parent_base, parent_auth = parent_gate
-    local_verify.pin(gate_core.data_dir(), parent_auth.pem, "bob")
+    pin_once(gate_core.data_dir(), parent_auth.pem, "bob")
     s, c = call(parent_base, "/challenge", {"action_text": ACTION, "requester": "sorrel"})
     assert s == 201
     approve_on(parent_base, parent_auth, c["challenge_id"])

@@ -39,7 +39,7 @@ PLUGIN_DIR = Path(__file__).resolve().parents[1]  # repo root
 # package ("passkey_gate"); plain imports from here.
 from passkey_gate import gate_core, local_verify, tools  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec, rsa  # noqa: E402
 from webauthn.helpers import encode_cbor  # noqa: E402
 
 ACTION = ("Grant GitLab user sorrel Developer access to project autumn/meta-hackathon "
@@ -295,6 +295,12 @@ def test_tool_handlers_json_shapes(base, autumn):
     assert st["ok"] is True and "gate" in st
 
 
+def pin_once(data_dir, pem, owner=None):
+    if local_verify.pinned(data_dir, owner) is None:
+        return local_verify.pin(data_dir, pem, owner)
+    return str(local_verify.pin_for(data_dir, owner))
+
+
 # ------------------------------------------- finding 1: approval confusion
 def test_approval_page_shows_bound_tool_call(base):
     """The human signs what executes: the page must render the exact canonical
@@ -329,7 +335,7 @@ def test_verify_record_includes_bound_tool_call(base, autumn):
 def test_gate_verify_reports_bound_tool_call(monkeypatch, base, autumn):
     """gate_verify tells the calling agent exactly what it verified, so it can
     confirm the approval covers the call it is about to make."""
-    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    pin_once(gate_core.data_dir(), autumn.pem)
     c = new_challenge(base, tool_call=TOOL_CALL)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)  # fetch from the test gate
@@ -804,7 +810,7 @@ def test_set_weakening_applied_with_passkey_approval(monkeypatch, base, autumn):
     exact phrase: fetched through gate_verify's path, verified locally against
     the pinned owner key, applied, and audited with the challenge id."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
-    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    pin_once(gate_core.data_dir(), autumn.pem)
     c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)  # the gate_verify fetch path
@@ -889,7 +895,7 @@ def test_set_approve_with_wrong_action_text_refused(monkeypatch, base, autumn):
     """--approve with a challenge the human signed for DIFFERENT action text
     (an unconsumed but mismatched approval) must not authorize the change."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
-    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    pin_once(gate_core.data_dir(), autumn.pem)
     c = new_challenge(base)  # the classic ACTION text, genuinely human-signed
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)
@@ -902,7 +908,7 @@ def test_set_approve_rejects_unapproved_and_bogus_challenges(monkeypatch, base, 
     """--approve with a challenge nobody has signed yet, or a bogus id,
     refuses; nothing is applied."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
-    local_verify.pin(gate_core.data_dir(), autumn.pem)
+    pin_once(gate_core.data_dir(), autumn.pem)
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     pending = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", pending["challenge_id"]])
@@ -911,6 +917,68 @@ def test_set_approve_rejects_unapproved_and_bogus_challenges(monkeypatch, base, 
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", "A" * 24])
     assert ctx.settings["require_passkey"] is True
     assert "REFUSED" in out
+
+
+# --------------------------- findings 18 + 12: pin ceremony hardening
+def _pem_private(key):
+    return key.private_bytes(serialization.Encoding.PEM,
+                             serialization.PrivateFormat.PKCS8,
+                             serialization.NoEncryption()).decode()
+
+
+def _pem_public(key):
+    return key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+
+@pytest.mark.parametrize("pem, reason", [
+    ("not a PEM", "PEM"),
+    (_pem_private(ec.generate_private_key(ec.SECP256R1())), "public key"),
+    (_pem_public(rsa.generate_private_key(public_exponent=65537, key_size=2048)), "EC"),
+    (_pem_public(ec.generate_private_key(ec.SECP384R1())), "secp256r1"),
+])
+def test_pin_rejects_non_p256_public_pem_before_write(tmp_path, pem, reason):
+    with pytest.raises(ValueError, match=reason):
+        local_verify.pin(tmp_path, pem)
+    assert not (tmp_path / "pinned_owner.pem").exists()
+
+
+def test_pin_valid_key_is_exclusive_secure_and_symlink_safe(tmp_path):
+    pem = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    path = Path(local_verify.pin(tmp_path, pem))
+    assert path.read_text() == pem.strip() + "\n"
+    assert path.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(ValueError, match="already exists"):
+        local_verify.pin(tmp_path, _pem_public(ec.generate_private_key(ec.SECP256R1())))
+    assert path.read_text() == pem.strip() + "\n"
+
+    peer_dir = tmp_path / "pins"
+    peer_dir.mkdir()
+    target = tmp_path / "untouched.pem"
+    target.write_text("original")
+    link = peer_dir / "alice.pem"
+    link.symlink_to(target)
+    replacement = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    with pytest.raises(ValueError, match="already exists"):
+        local_verify.pin(tmp_path, replacement, "alice")
+    assert target.read_text() == "original"
+
+
+def test_cmd_pin_refuses_invalid_and_existing_without_claiming_pinned(tmp_path, monkeypatch):
+    from passkey_gate import cli
+    pem_file = tmp_path / "bad.pem"
+    pem_file.write_text("not a PEM")
+    monkeypatch.setattr(gate_core, "data_dir", lambda: tmp_path / "data")
+    out = cli.cmd_pin(None, [str(pem_file)])
+    assert "REFUSED" in out and "pinned" not in out.lower()
+    assert not (tmp_path / "data" / "pinned_owner.pem").exists()
+
+    good = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    pem_file.write_text(good)
+    assert "pinned owner key" in cli.cmd_pin(None, [str(pem_file)])
+    out = cli.cmd_pin(None, [str(pem_file)])
+    assert "REFUSED" in out and "already exists" in out
+    assert "pinned owner key" not in out
 
 
 def test_set_approve_requires_a_pinned_owner_key(monkeypatch, base, autumn):

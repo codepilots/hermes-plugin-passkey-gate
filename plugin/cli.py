@@ -247,9 +247,15 @@ def cmd_expose(ctx, rest):
 def cmd_pin(ctx, rest):
     if not rest:
         return "usage: hermes passkey-gate pin <pem-file> [owner-label]"
-    pem = Path(rest[0]).read_text()
+    try:
+        pem = Path(rest[0]).read_text()
+    except OSError as exc:
+        return f"REFUSED: could not read PEM file {rest[0]!r}: {exc}"
     owner = rest[1] if len(rest) > 1 else None
-    path = local_verify.pin(gate_core.data_dir(), pem, owner)
+    try:
+        path = local_verify.pin(gate_core.data_dir(), pem, owner)
+    except (OSError, ValueError) as exc:
+        return f"REFUSED: pin ceremony failed: {exc}"
     label = f" ({owner})" if owner else ""
     return (f"pinned owner key{label} to {path}. Approvals can now be verified "
             f"independently against it locally.")
