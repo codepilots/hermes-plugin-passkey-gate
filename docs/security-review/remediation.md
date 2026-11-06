@@ -33,14 +33,37 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `ac5c577`; 107 passed; stamp/migration probe green |
 | D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `6ade254`; 114 passed; race probe green |
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `c3e6261`; 120 passed; live-ceremony probe green |
-| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | 🔄 | delegated |
-| D15 | 24 — cloudflared reader deadline | MEDIUM | ⬜ | |
+| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `1f51122`; 125 passed; fence/caps probe green |
+| D15 | 24 — cloudflared reader deadline | MEDIUM | 🔄 | delegated |
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ⬜ | |
 | D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ⬜ | |
 | D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ⬜ | |
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D14 — finding 22 (MEDIUM): pattern validation + safe display ✅
+
+- **Delegated:** validate authority_patterns whole at set time (compile
+  check, length/count caps, before the finding-16 weakening classification),
+  match-time defense in depth for smuggled patterns, block message renders
+  the pattern as escaped fenced data. Subagent completed in ~371s, TDD (5
+  new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 125 passed; diff review —
+  validate_authority_patterns runs before the D7 machinery so a bad list
+  cannot hide behind the approval flow and is refused WHOLE; authority_matches
+  returns (index, pattern) and skips unusable entries with a logged warning;
+  render_pattern caps length, escapes backticks, collapses control chars;
+  plugin.yaml description updated. Probe
+  (`cache/scratch/probe_d14_patterns.py`): broken regex refused with nothing
+  persisted; valid pattern enforced; smuggled broken/non-string patterns
+  skipped without crashing while a later good rule still matches with its
+  stable index; a pattern carrying hostile backtick + literal newline bytes
+  cannot break out of the display fence (backtick escaped, newline
+  collapsed); 201-char, 101-pattern, and non-string lists all refused whole.
+- **Deviations:** none material (no ReDoS detector invented — compile check
+  + caps per the review's ask).
+- **Commit:** `1f51122`.
 
 ### D13 — findings 21 (MEDIUM) + 13 (MEDIUM): sign-count clone detection ✅
 
