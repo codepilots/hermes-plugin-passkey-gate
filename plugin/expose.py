@@ -23,8 +23,12 @@ existing passkey credential registered under it — credentials only match
 origins sharing their RP ID suffix.
 """
 import json
+import os
+import queue
 import shutil
+import signal
 import subprocess
+import threading
 import time
 
 from . import netfetch
@@ -172,29 +176,182 @@ def _locate_url(status: dict, host: str, port: int) -> str | None:
     return None
 
 
-def cloudflare_expose(gate_port: int, watch_seconds: int = 45) -> dict:
-    """Run a quick tunnel. Blocks while the tunnel lives — quick-tunnel URLs are
-    ephemeral; when this process dies the origin dies with it."""
-    if not _which("cloudflared"):
-        return {"ok": False, "backend": "cloudflare", "error": "cloudflared not found"}
-    proc = subprocess.Popen(["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{gate_port}"],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            bufsize=1)
-    url, deadline = None, time.time() + watch_seconds
-    while time.time() < deadline:
-        line = (proc.stdout or "").readline() if proc.stdout else ""
-        if not line:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.5)
+def _drain_tunnel_lines(proc, out_q) -> None:
+    """Reader thread for cloudflared's combined output (finding 24). Puts each
+    line on out_q as ("line", s), the quick-tunnel URL as ("url", u) as soon as
+    it appears (then stops draining, as before), and ("eof", None) when the
+    stream ends. Daemon thread: even a pipe held open forever cannot wedge the
+    caller. Runs alone it would block in readline() — that is why the deadline
+    lives in _await_tunnel_url, not here."""
+    try:
+        for line in proc.stdout:
+            url = url_from_tunnel_line(line)
+            if url:
+                out_q.put(("url", url))
+                return
+            out_q.put(("line", line))
+    except Exception:
+        pass
+    finally:
+        out_q.put(("eof", None))
+
+
+def _await_tunnel_url(proc, out_q, watch_seconds: float) -> tuple[str | None, str]:
+    """Bounded wait for the quick-tunnel URL (finding 24). A silent cloudflared
+    emitting no newline can block the reader thread's readline() forever, but
+    never this wait: the main thread blocks on the queue with a hard deadline.
+    Returns (url, recent_output_tail)."""
+    deadline = time.monotonic() + watch_seconds
+    recent = ""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, recent
+        try:
+            kind, payload = out_q.get(timeout=remaining)
+        except queue.Empty:
+            return None, recent
+        if kind == "url":
+            return payload, recent
+        if kind == "eof":
+            return None, recent
+        recent = (recent + payload)[-300:]
+
+
+def _signal_group(proc, sig) -> None:
+    """Send sig to the child's ENTIRE process group (finding 24). The child is
+    spawned with start_new_session=True, so it leads its own group and every
+    descendant it forks — including pipe-inheriting grandchildren — is a
+    member. Killing the group, not just the direct child, is what closes the
+    pipe from the descendants' side too; ProcessLookupError just means the
+    group is already gone."""
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            proc.send_signal(sig)
+        except Exception:
+            pass
+
+
+def _raw_stream_of(stream):
+    """The raw FileIO layer under a (text/buffered) wrapper, or the stream
+    itself if it is already raw. Raw FileIO close takes none of the wrapper
+    locks, so it can never block on a reader mid-read."""
+    raw = getattr(stream, "buffer", None)
+    raw = getattr(raw, "raw", None)
+    return raw if raw is not None else stream
+
+
+# how long _stop_child waits on each bounded step (direct-child reap, reader
+# joins) before escalating; module constant so tests can tighten it
+_STOP_GRACE = 5.0
+
+
+def _stop_child(proc, reader=None, grace: float = _STOP_GRACE) -> None:
+    """Tear down a spawned child so nothing leaks and nothing can wedge
+    (finding 24). The child runs as its own process-group leader
+    (start_new_session), so teardown signals the GROUP: a forked descendant
+    that inherited the pipe's write end would otherwise survive the direct
+    child's death — leaking AND keeping the reader thread blocked in
+    readline() while it holds the text wrapper's buffer lock, which the main
+    thread's stream.close() then waits on forever. Group kill closes the
+    pipe from the descendants' side too. Defense in depth: if the reader is
+    STILL alive after the group kill, close the underlying RAW fd (never the
+    wrapper, whose lock the reader holds) and skip the wrapper close while
+    the reader lives — the fd, the only OS resource, is already closed, so
+    close() cannot block and cannot leak."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+    except Exception:
+        pass
+    if reader is not None:
+        # every pipe write-end is dead, so a blocked readline() sees EOF and
+        # releases the wrapper locks; give it a moment before closing them
+        reader.join(timeout=grace)
+        if reader.is_alive():
+            # a descendant survived the group TERM and still holds the pipe:
+            # force the whole group down, then wait for the EOF to land
+            _signal_group(proc, signal.SIGKILL)
+            reader.join(timeout=grace)
+        if reader.is_alive():
+            # last resort: close the raw fds. This takes no wrapper lock, so
+            # it cannot block, and it breaks the stream so the reader cannot
+            # wedge any later operation either.
+            for stream in (proc.stdout, proc.stderr):
+                if stream is None:
+                    continue
+                try:
+                    _raw_stream_of(stream).close()
+                except Exception:
+                    pass
+            reader.join(timeout=grace)
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
             continue
-        url = url_from_tunnel_line(line)
-        if url:
-            break
+        if reader is not None and reader.is_alive() and stream is proc.stdout:
+            # reader never woke: closing this wrapper would wait on the very
+            # lock it holds (the old deadlock); its raw fd is closed above,
+            # so skipping leaks no OS resource
+            continue
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def cloudflare_expose(gate_port: int, watch_seconds: int = 45,
+                      binpath: str = "cloudflared") -> dict:
+    """Run a quick tunnel. Blocks while the tunnel lives — quick-tunnel URLs are
+    ephemeral; when this process dies the origin dies with it.
+
+    The readiness wait is bounded (finding 24): a reader thread drains the
+    child's output while the main thread waits with a hard deadline, so a
+    silent/hung cloudflared ends in a clear error instead of hanging forever.
+    The child runs in its own process group (start_new_session): on timeout,
+    early exit, or exception the whole GROUP is killed and reaped — a forked
+    descendant that inherited the pipe would otherwise leak and keep the
+    reader blocked, wedging the stream close — and _stop_child closes the
+    raw fd instead of the wrapper if the reader ever stays blocked, so
+    cloudflare_expose always returns; on success the child is handed back
+    alive."""
+    resolved = _which(binpath)
+    if not resolved:
+        return {"ok": False, "backend": "cloudflare", "error": "cloudflared not found"}
+    proc = subprocess.Popen([resolved, "tunnel", "--url", f"http://127.0.0.1:{gate_port}"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            bufsize=1, start_new_session=True)
+    out_q = queue.Queue()
+    reader = threading.Thread(target=_drain_tunnel_lines, args=(proc, out_q),
+                              daemon=True)
+    reader.start()
+    try:
+        url, recent = _await_tunnel_url(proc, out_q, watch_seconds)
+    except Exception:
+        _stop_child(proc, reader, grace=_STOP_GRACE)
+        raise
     if url is None:
-        proc.kill()
-        return {"ok": False, "backend": "cloudflare",
-                "error": "no quick-tunnel URL appeared (offline or rate-limited?)"}
+        code = proc.poll()
+        _stop_child(proc, reader, grace=_STOP_GRACE)
+        if code is None:
+            error = (f"no quick-tunnel URL appeared within {watch_seconds}s — cloudflared "
+                     f"stayed silent (hung, offline, or rate-limited?) and was killed. "
+                     f"Check the network and cloudflared install and retry, or use a "
+                     f"named tunnel / tailscale")
+        else:
+            error = (f"cloudflared exited (code {code}) without printing a tunnel URL — "
+                     f"recent output: {recent!r}. Check the cloudflared install and "
+                     f"network and retry, or use a named tunnel / tailscale")
+        return {"ok": False, "backend": "cloudflare", "error": error}
     return {"ok": True, "backend": "cloudflare", "url": url.rstrip(),
             "rp_id": url.rstrip().split("//", 1)[-1].rsplit(":", 1)[0],
             "persistent": False,
