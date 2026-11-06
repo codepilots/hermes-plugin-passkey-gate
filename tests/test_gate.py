@@ -342,7 +342,54 @@ def test_gate_verify_reports_bound_tool_call(monkeypatch, base, autumn):
     out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
     assert out["ok"] is True and out["verified"] is True, out
     assert out["bound_tool_call"] == TOOL_CALL
+    assert out["approved_tool_call"] == TOOL_CALL
     assert out["binding_sha256"] == c["binding_sha256"]
+    assert out["dispatch_binding"] == {
+        "canonical_tool_call": tools.canonical_for_hook(TOOL_CALL["tool"], TOOL_CALL["args"]),
+        "binding_sha256": c["binding_sha256"],
+    }
+
+
+def test_gate_verify_refuses_different_requested_tool_call(monkeypatch, base, autumn):
+    """A caller cannot turn a verified approval into authorization for another call."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    different = {"tool": "terminal", "args": {"command": "delete everything"}}
+    out = json.loads(tools.gate_verify({
+        "challenge_id": c["challenge_id"], "action_text": ACTION,
+        "tool_call": different,
+    }))
+    assert out["ok"] is True and out["verified"] is False
+    assert any("does not match the approved tool call" in p for p in out["problems"])
+
+
+def test_hook_refuses_row_with_inconsistent_bound_tool_call(monkeypatch):
+    """The hook checks the stored call as well as its indexed binding hash."""
+    call = {"tool": "terminal", "args": {"command": "echo approved"}}
+    row = {"id": "row", "binding_sha256": gate_core.canonical_binding(call),
+           "tool_call": json.dumps({"tool": "terminal", "args": {"command": "echo altered"}},
+                                    sort_keys=True, separators=(",", ":"))}
+    monkeypatch.setattr(gate_core, "pending_for_binding", lambda binding: row)
+    verdict = tools.hook_verdict(call["tool"], call["args"], [r"echo"], True)
+    assert verdict is not None and verdict["action"] == "block"
+    assert "bound tool call" in verdict["message"]
+
+
+def test_challenge_and_verify_paths_do_not_register_or_pin(monkeypatch, base):
+    """Trust-anchor registration remains an explicit operator ceremony; these
+    paths only read credentials/pins and never create either one."""
+    before_credentials = gate_core.credential_count()
+    pins_dir = gate_core.data_dir() / "pins"
+    before_pins = sorted((p.name, p.read_bytes()) for p in pins_dir.glob("*.pem")) if pins_dir.exists() else []
+    c = new_challenge(base, tool_call=TOOL_CALL)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
+    assert out["verified"] is False
+    after_pins = sorted((p.name, p.read_bytes()) for p in pins_dir.glob("*.pem")) if pins_dir.exists() else []
+    assert gate_core.credential_count() == before_credentials
+    assert after_pins == before_pins
 
 
 def test_gate_challenge_requires_tool_call_when_enforced(monkeypatch):

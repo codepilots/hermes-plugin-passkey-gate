@@ -133,21 +133,45 @@ def gate_verify(args: dict, **kwargs) -> str:
                 "'hermes passkey-gate pin <pem-file>' before trusting approvals"
             )
         binding_note = None
+        approved_tool_call = None
+        canonical_tool_call = None
         if rec.get("binding_sha256"):
             binding_note = "challenge is bound to a specific canonical tool call"
+        if rec.get("tool_call"):
+            # Tell the caller exactly what the approval covers, so it can
+            # confirm the call it is about to make is the one that was bound.
+            try:
+                approved_tool_call = json.loads(rec["tool_call"])
+                canonical_tool_call = gate_core.canonical_binding_json(approved_tool_call)
+            except (TypeError, ValueError):
+                problems.append("approved tool call record is malformed")
+        requested_tool_call = args.get("tool_call")
+        if requested_tool_call is not None:
+            if not isinstance(requested_tool_call, dict):
+                problems.append("requested tool_call must be an object")
+            elif approved_tool_call is None:
+                problems.append("approval has no bound tool call")
+            else:
+                requested_canonical = gate_core.canonical_binding_json(requested_tool_call)
+                if (requested_canonical != canonical_tool_call or
+                        gate_core.sha256_hex(requested_canonical) != rec.get("binding_sha256")):
+                    problems.append("requested tool call does not match the approved tool call")
         out = {"ok": True, "verified": not problems, "problems": problems,
                "challenge_id": cid, "action_sha256": rec.get("action_sha256"),
                "approved_at": rec.get("approved_at"),
                "binding_sha256": rec.get("binding_sha256"),
                "binding_note": binding_note,
-               "audit_head": rec.get("audit_head")}
-        if rec.get("tool_call"):
-            # tell the caller exactly what the approval covers, so it can
-            # confirm the call it is about to make is the one that was bound
-            try:
-                out["bound_tool_call"] = json.loads(rec["tool_call"])
-            except (TypeError, ValueError):
-                out["bound_tool_call"] = rec["tool_call"]
+               "audit_head": rec.get("audit_head"),
+               # Contract for callers and for a downstream dispatcher: this is
+               # the exact canonical payload whose hash was approved. The
+               # plugin cannot enforce that a later executor uses it.
+               "approved_tool_call": approved_tool_call,
+               "dispatch_binding": ({"canonical_tool_call": canonical_tool_call,
+                                     "binding_sha256": rec.get("binding_sha256")}
+                                    if canonical_tool_call is not None else None)}
+        if approved_tool_call is not None:
+            # Keep the legacy name for compatibility with existing callers.
+            out["bound_tool_call"] = approved_tool_call
         return json.dumps(out)
     return json.dumps({"ok": True, "verified": False, "status": last.get("status", "error"),
                        "challenge_id": cid})
@@ -240,6 +264,26 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
                 "send the human the approval URL, wait for their passkey signature, "
                 "then retry this identical tool call verbatim. If you disagree that "
                 "this requires an approval, say so instead of trying to retry it."
+            )}
+        # Do not trust the indexed binding alone: the stored canonical payload
+        # must itself hash to that binding. This catches a tampered/malformed
+        # record before consumption and makes the hook's exact-call contract
+        # explicit. Final dispatch still has to enforce the same contract.
+        try:
+            stored_call = json.loads(row["tool_call"])
+            stored_canonical = gate_core.canonical_binding_json(stored_call)
+            if (stored_canonical != canonical_for_hook(tool_name, args) or
+                    gate_core.sha256_hex(stored_canonical) != binding or
+                    row["binding_sha256"] != binding):
+                return {"action": "block", "message": (
+                    "Passkey gate: the approved bound tool call does not match this "
+                    "exact call or its binding hash; refusing dispatch. Request a "
+                    "fresh approval for the exact canonical tool call."
+                )}
+        except (TypeError, ValueError, KeyError):
+            return {"action": "block", "message": (
+                "Passkey gate: the approved bound tool call is malformed; refusing "
+                "dispatch. Request a fresh approval."
             )}
         if not gate_core.consume(row["id"], binding):
             # Lost the claim race to an identical tool call, or the approval
