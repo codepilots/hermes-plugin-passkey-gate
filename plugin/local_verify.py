@@ -178,29 +178,91 @@ def pin_file_path(data_dir):
     return pathlib.Path(data_dir) / "pinned_owner.pem"
 
 
+def _canon_owner(owner: str) -> str:
+    """The exact owner label, stripped and lowercased — what pin filenames and
+    their fingerprints derive from (finding 26: the lossy slug alone conflates
+    distinct owners)."""
+    return owner.strip().lower()
+
+
 def _owner_slug(owner: str) -> str:
-    return re.sub(r"[^a-z0-9_-]", "-", owner.strip().lower())[:40]
+    return re.sub(r"[^a-z0-9_-]", "-", _canon_owner(owner))[:40]
 
 
-def pin_for(data_dir, owner: str | None):
+def _owner_fingerprint(owner: str) -> str:
+    """First 16 hex chars (UPPERCASE) of sha256 over the canonical owner
+    label. Uppercase is load-bearing: legacy pin filenames are slugs and
+    slugs are lowercase-only, so no legacy file can ever match a new-format
+    pattern — a pin for an owner whose label happens to end in 16 hex
+    characters ('Deploy key 1f2e3d4c5b6a7980') cannot masquerade as a
+    new-format pin for the shorter-slug owner ('Deploy key')."""
+    return hashlib.sha256(_canon_owner(owner).encode("utf-8")).hexdigest()[:16].upper()
+
+
+def _normalized_pem_bytes(pem) -> bytes:
+    if isinstance(pem, str):
+        return pem.strip().encode() + b"\n"
+    if isinstance(pem, bytes):
+        return pem.strip() + b"\n"
+    raise ValueError("PEM must be text or bytes containing an EC public key")
+
+
+def _pin_digest(owner: str, pem: bytes) -> str:
+    """First 16 hex chars (UPPERCASE) of sha256 over the canonical owner label
+    AND the key material (finding 26): the collision is broken by the KEY, so
+    two distinct keys pinned for one owner never share a file. The 8-byte
+    length prefix keeps the owner/PEM concatenation unambiguous."""
+    ob = _canon_owner(owner).encode("utf-8")
+    return hashlib.sha256(len(ob).to_bytes(8, "big") + ob + pem).hexdigest()[:16].upper()
+
+
+def pin_for(data_dir, owner: str | None, pem=None):
+    """Where a pin lives or would live.
+
+    Ownerless -> pinned_owner.pem. Named owner + pem -> the collision-
+    resistant destination ``pins/<slug>-<owner-fingerprint>-<pin-digest>.pem``
+    (finding 26: derived from BOTH the owner label and the key material, so
+    owners whose labels slug identically — 'Sorrel!' vs 'Sorrel-' — and
+    distinct keys for one owner never share a file, while the slug prefix
+    keeps the file human-recognizable). Named owner without pem -> the
+    pre-upgrade ``pins/<slug>.pem`` path (where a legacy pin lives); the pins
+    that actually exist for an owner are found with pinned().
+    """
     import pathlib
     if not owner:
         return pathlib.Path(data_dir) / "pinned_owner.pem"
-    return pathlib.Path(data_dir) / "pins" / f"{_owner_slug(owner)}.pem"
+    slug = _owner_slug(owner)
+    name = (f"{slug}.pem" if pem is None else
+            f"{slug}-{_owner_fingerprint(owner)}-{_pin_digest(owner, _normalized_pem_bytes(pem))}.pem")
+    return pathlib.Path(data_dir) / "pins" / name
+
+
+def _pin_candidates(data_dir, owner: str):
+    """Every pin file attributable to this owner (finding 26): the exact
+    legacy ``pins/<slug>.pem`` a committed deployment may still carry, plus
+    this owner's key-derived files — anchored full-name matches on slug AND
+    owner fingerprint, so another owner's file (even one sharing the slug)
+    can never appear here."""
+    import pathlib
+    d = pathlib.Path(data_dir) / "pins"
+    if not d.is_dir():
+        return []
+    slug = _owner_slug(owner)
+    new_fmt = re.compile(rf"^{re.escape(slug)}-{_owner_fingerprint(owner)}-[0-9A-F]{{16}}\.pem$")
+    legacy = f"{slug}.pem"
+    return sorted(p for p in d.iterdir()
+                  if p.is_file() and (p.name == legacy or new_fmt.match(p.name)))
 
 
 def pin(data_dir, pem: str, owner: str | None = None) -> str:
     """Validate and first-seen pin a P-256 EC public PEM.
 
     The destination is created directly and exclusively: no replacement and
-    no symlink following are permitted by this ceremony.
+    no symlink following are permitted by this ceremony. For a named owner
+    the destination is derived from the owner label AND the key material
+    (finding 26), so colliding slugs never share a file.
     """
-    if isinstance(pem, str):
-        normalized = pem.strip().encode() + b"\n"
-    elif isinstance(pem, bytes):
-        normalized = pem.strip() + b"\n"
-    else:
-        raise ValueError("PEM must be text or bytes containing an EC public key")
+    normalized = _normalized_pem_bytes(pem)
     try:
         key = serialization.load_pem_public_key(normalized)
     except Exception as exc:
@@ -210,7 +272,7 @@ def pin(data_dir, pem: str, owner: str | None = None) -> str:
     if not isinstance(key.curve, ec.SECP256R1):
         raise ValueError("pinned EC public key must use curve secp256r1")
 
-    path = pin_for(data_dir, owner)
+    path = pin_for(data_dir, owner, normalized)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     fd = None
@@ -233,8 +295,31 @@ def pin(data_dir, pem: str, owner: str | None = None) -> str:
 
 
 def pinned(data_dir, owner: str | None = None):
-    path = pin_for(data_dir, owner)
-    return path.read_text().strip() if path.exists() else None
+    """The pinned key for an owner, first-seen out of band then trusted
+    (or None when nothing is pinned).
+
+    Finding 26: named owners are looked up by slug AND owner fingerprint, so
+    a peer whose label merely slugs like another's is never served the other
+    human's key. When several pins exist for one owner — a second key was
+    pinned, or a legacy pins/<slug>.pem survived next to a new-format pin —
+    verification refuses to guess which key is theirs: ValueError naming the
+    files, telling the operator to keep exactly one. Never a silent pick.
+    """
+    if not owner:
+        path = pin_file_path(data_dir)
+        return path.read_text().strip() if path.exists() else None
+    files = _pin_candidates(data_dir, owner)
+    if not files:
+        return None
+    if len(files) > 1:
+        raise ValueError(
+            f"multiple pins exist for owner {owner!r}: "
+            + ", ".join(p.name for p in files)
+            + " — verification refuses to guess which key is theirs; keep "
+              "exactly one pin file for this owner (remove any stale "
+              "pre-upgrade pins/<slug>.pem once the keys are confirmed to "
+              "match) and re-verify")
+    return files[0].read_text().strip()
 
 
 def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,

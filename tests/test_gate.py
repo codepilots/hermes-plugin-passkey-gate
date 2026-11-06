@@ -1119,9 +1119,11 @@ def test_pin_valid_key_is_exclusive_secure_and_symlink_safe(tmp_path):
     peer_dir.mkdir()
     target = tmp_path / "untouched.pem"
     target.write_text("original")
-    link = peer_dir / "alice.pem"
-    link.symlink_to(target)
     replacement = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    # finding 26: alice's destination is now derived from owner + key, so the
+    # symlink must squat the exact file the ceremony will create
+    link = peer_dir / local_verify.pin_for(tmp_path, "alice", replacement).name
+    link.symlink_to(target)
     with pytest.raises(ValueError, match="already exists"):
         local_verify.pin(tmp_path, replacement, "alice")
     assert target.read_text() == "original"
@@ -1142,6 +1144,102 @@ def test_cmd_pin_refuses_invalid_and_existing_without_claiming_pinned(tmp_path, 
     out = cli.cmd_pin(None, [str(pem_file)])
     assert "REFUSED" in out and "already exists" in out
     assert "pinned owner key" not in out
+
+
+# ----------------- finding 26: collision-resistant pin filenames
+_LONG = "Autumn" + "x" * 34          # 40 chars: everything after this is truncated away
+
+
+@pytest.mark.parametrize("owner_a, owner_b", [
+    ("Sorrel!", "Sorrel-"),                 # '!' and '-' both slug to '-'
+    (_LONG + "-one", _LONG + "-two"),       # >40 chars: same truncated slug
+])
+def test_slug_colliding_owners_pin_to_distinct_files_and_stay_attributed(
+        tmp_path, owner_a, owner_b):
+    """Finding 26: owners whose labels slug identically must not share a pin
+    file (pre-fix the second pin was REFUSED as an overwrite of the first),
+    and a lookup must never be served the other human's key."""
+    pem_a = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    pem_b = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    assert local_verify._owner_slug(owner_a) == local_verify._owner_slug(owner_b)  # collision is real
+    path_a = Path(local_verify.pin(tmp_path, pem_a, owner_a))
+    path_b = Path(local_verify.pin(tmp_path, pem_b, owner_b))
+    assert path_a != path_b
+    for p, pem in ((path_a, pem_a), (path_b, pem_b)):
+        assert p.parent == tmp_path / "pins"
+        assert p.read_text() == pem.strip() + "\n"
+        assert p.stat().st_mode & 0o777 == 0o600
+        assert p.name.startswith(local_verify._owner_slug(owner_a) + "-")  # slug stays readable
+    assert local_verify.pinned(tmp_path, owner_a) == pem_a.strip()
+    assert local_verify.pinned(tmp_path, owner_b) == pem_b.strip()
+
+
+def test_unpinned_slug_peer_is_not_served_the_other_pin(tmp_path):
+    """Finding 26's core harm, one-sided: only 'Sorrel!'s key is pinned — a
+    challenge claiming the slug-colliding owner 'Sorrel-' must find NO pin
+    (so it asks for the key out of band), never silently verify against
+    Sorrel!'s key."""
+    pem_a = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    local_verify.pin(tmp_path, pem_a, "Sorrel!")
+    assert local_verify.pinned(tmp_path, "Sorrel-") is None
+    assert local_verify.pinned(tmp_path, "Sorrel!") == pem_a.strip()
+
+
+def test_second_key_for_one_owner_pins_a_new_file_and_pinned_fails_closed(tmp_path):
+    """Finding 26 + D8: a second, DIFFERENT key for one owner maps to its own
+    file — the key material breaks the collision — so D8's exclusive-create
+    refusal no longer turns 'same owner, new key' into a silent trust-anchor
+    stand-off; the SAME key is still refused as an overwrite. The price is
+    ambiguity, and pinned() pays it fail-closed: it names the files and
+    refuses to guess which key is theirs; the operator keeps exactly one."""
+    pem1 = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    pem2 = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    path1 = Path(local_verify.pin(tmp_path, pem1, "bob"))
+    path2 = Path(local_verify.pin(tmp_path, pem2, "bob"))
+    assert path1 != path2 and path1.exists() and path2.exists()
+    with pytest.raises(ValueError, match="already exists"):   # same key, same file: D8 unchanged
+        local_verify.pin(tmp_path, pem1, "bob")
+    with pytest.raises(ValueError) as exc:                    # two keys, one owner: fail closed
+        local_verify.pinned(tmp_path, "bob")
+    msg = str(exc.value)
+    assert "multiple pins" in msg
+    assert path1.name in msg and path2.name in msg            # operator is told exactly what to resolve
+    path2.unlink()                                            # resolve -> verification works again
+    assert local_verify.pinned(tmp_path, "bob") == pem1.strip()
+
+
+def test_pin_filename_derives_from_both_owner_and_key_material(tmp_path):
+    """The filename collision is broken by BOTH inputs: same key under two
+    owners -> two files (owner side), same owner with two keys -> two files
+    (key side, previous test)."""
+    pem = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    path_bob = Path(local_verify.pin(tmp_path, pem, "bob"))
+    path_alice = Path(local_verify.pin(tmp_path, pem, "alice"))
+    assert path_bob != path_alice
+    assert local_verify.pinned(tmp_path, "bob") == pem.strip()
+    assert local_verify.pinned(tmp_path, "alice") == pem.strip()
+
+
+def test_legacy_slug_pin_filename_is_still_found(tmp_path):
+    """Back-compat (finding 26): committed deployments carry pins/<slug>.pem
+    files — pinned() must still find them; and when a new-format pin joins one
+    for the same owner, the same fail-closed rule applies (keep exactly one
+    file — even byte-identical content does not un-ambiguate the store)."""
+    pem = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    pins = tmp_path / "pins"
+    pins.mkdir()
+    (pins / "bob.pem").write_text(pem)
+    assert local_verify.pinned(tmp_path, "bob") == pem.strip()
+    newer = _pem_public(ec.generate_private_key(ec.SECP256R1()))
+    local_verify.pin(tmp_path, newer, "bob")
+    with pytest.raises(ValueError, match="multiple pins") as exc:
+        local_verify.pinned(tmp_path, "bob")
+    assert "bob.pem" in str(exc.value)
+    (pins / "bob.pem").write_text(newer)          # identical content is still ambiguous
+    with pytest.raises(ValueError, match="multiple pins"):
+        local_verify.pinned(tmp_path, "bob")
+    (pins / "bob.pem").unlink()                   # keep exactly one
+    assert local_verify.pinned(tmp_path, "bob") == newer.strip()
 
 
 def test_set_approve_requires_a_pinned_owner_key(monkeypatch, base, autumn):
