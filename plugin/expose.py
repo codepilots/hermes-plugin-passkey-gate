@@ -3,11 +3,17 @@
 WebAuthn needs HTTPS, so the gate has to sit behind a TLS terminator the user
 already runs. This module auto-detects what's available and sets it up:
 
-  tailscale   — `tailscale serve --bg <port>:<gate-port>`; tailscaled keeps
-                serving after this process exits, so setup can print the URL
-                and return. Origin + RP id are derived from `tailscale status
-                --json` (Self.DNSName), parsed WITHOUT trusting the CLI: the
-                serve status map is re-read and the new entry located in it.
+  tailscale   — `tailscale serve --bg --https=<port> --set-path=/ <target>`;
+                tailscaled keeps serving after this process exits, so setup
+                can print the URL and return. Origin + RP id are derived from
+                `tailscale status --json` (Self.DNSName), parsed WITHOUT
+                trusting the CLI: the serve status map is re-read and the new
+                entry located in it. The gate's serve rule is identified by
+                an EXACT handle — (https listen port, mount path, proxy
+                target) — recorded durably per gate instance, so re-runs,
+                replacements and cleanup touch only THIS plugin's rule,
+                never other services' rules on the same tailnet host
+                (finding 25).
   cloudflare  — `cloudflared tunnel --url http://127.0.0.1:<gate-port>`
                 (quick tunnel). Quick-tunnel URLs are EPHEMERAL: they change
                 every restart, so this process must keep running to keep the
@@ -30,11 +36,21 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from . import netfetch
 
 # Ports tried, in order, for tailscale HTTPS serving (443 = clean URL)
 TAILSCALE_PORTS = [443, 8443, 8445, 8446, 8447, 8448, 8480, 8500, 8600, 8661]
+
+# Finding 25 — the EXACT handle of this gate's serve rule. Every create, check
+# and cleanup operation matches all three components: the https listen port,
+# the mount path, and the proxy target (derived from the gate port). The
+# handle is recorded durably (SERVE_RECORD_NAME in the plugin data dir) so a
+# later run can still recognize its own rule after the gate port changed —
+# and can prove a rule belongs to someone else by the same test.
+SERVE_MOUNT = "/"
+SERVE_RECORD_NAME = "tailscale-serve.json"
 
 
 def url_from_tunnel_line(line: str) -> str | None:
@@ -110,9 +126,153 @@ def origin_from_host(host: str, https_port: int) -> str:
     return base if https_port == 443 else f"{base}:{https_port}"
 
 
-def tailscale_expose(gate_port: int, target_port: int | None = None) -> dict:
+def _record_path():
+    """Durable record of our own serve rule, kept in the plugin data dir. Lazy
+    import keeps this module usable without the gate engine (then there is no
+    record, and rules are still managed exactly within a single run)."""
+    try:
+        from . import gate_core
+        return Path(gate_core.data_dir()) / SERVE_RECORD_NAME
+    except Exception:
+        return None
+
+
+def _load_record(path) -> dict | None:
+    if not path:
+        return None
+    try:
+        rec = json.loads(Path(path).read_text())
+        if isinstance(rec, dict) and "port" in rec and "target" in rec:
+            return rec
+    except Exception:
+        pass
+    return None
+
+
+def _save_record(path, record) -> None:
+    if not path:
+        return
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(record, indent=2))
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def _clear_record(path) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _handlers(status) -> dict:
+    """Flat map of every serve rule in the status map: {(host:port, mount): proxy}."""
+    flat = {}
+    for hostport, entry in ((status or {}).get("Web") or {}).items():
+        for mount, handler in ((entry or {}).get("Handlers") or {}).items():
+            proxy = (handler or {}).get("Proxy")
+            if proxy:
+                flat[(str(hostport), str(mount))] = str(proxy)
+    return flat
+
+
+def _port_of_hostport(hostport) -> int | None:
+    try:
+        return int(str(hostport).rsplit(":", 1)[-1])
+    except ValueError:
+        return None
+
+
+def _rule_matching(status, port, mount, target) -> dict | None:
+    """The live serve rule with EXACTLY this handle (https port, mount path,
+    proxy target) — the identity check behind every rule operation here."""
+    for (hostport, m), proxy in _handlers(status).items():
+        if _port_of_hostport(hostport) == port and m == mount and proxy == target:
+            return {"hostport": hostport, "port": port, "mount": mount, "target": target}
+    return None
+
+
+def _recorded_rule_live(status, record) -> dict | None:
+    """The live rule matching our recorded handle exactly — or None when the
+    rule is gone or something else now serves there. Either way it is then
+    NOT ours and must never be removed."""
+    if not record:
+        return None
+    try:
+        port = int(record["port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return _rule_matching(status, port, str(record.get("mount") or SERVE_MOUNT),
+                         str(record["target"]))
+
+
+def _unserve(binpath, port, mount=SERVE_MOUNT, timeout=30) -> None:
+    """Remove the serve rule at EXACTLY (https port, mount): the same flags
+    the create used, plus path-scoped `off` (finding 25 — the old cleanup ran
+    `--http=<port> off` against an HTTPS rule, targeting a different
+    protocol's rule; and bare `--https=<port> off` can tear down every mount
+    on the port). `off` on a mount that is not served just errors, removing
+    nothing — it cannot take someone else's rule."""
+    try:
+        subprocess.run([binpath, "serve", "--bg", f"--https={port}", f"--set-path={mount}", "off"],
+                       capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        pass
+
+
+def _drop_rule(binpath, rule, before_status) -> list[str]:
+    """Remove our rule by exact handle and — as the review requires — re-read
+    the serve map to verify that ONLY that rule disappeared. Returns warnings
+    (empty when the removal was surgical)."""
+    before = _handlers(before_status)
+    _unserve(binpath, rule["port"], rule["mount"])
+    after = _handlers(fetch_status_json(binpath=binpath) or {})
+    key = (rule["hostport"], rule["mount"])
+    warnings = [f"tailscale removed more than our rule: {k[0]} mount {k[1]} vanished"
+                for k in sorted(set(before) - set(after)) if k != key]
+    if key in after:
+        warnings.append(f"our serve rule on https port {rule['port']} could not be "
+                        f"removed and is still active")
+    return warnings
+
+
+def _refuse_foreign_port(status, port) -> dict:
+    """The zero-mutation refusal for an explicitly requested port that another
+    service already serves (finding 25): names the rule it refuses to touch.
+    One wording shared by every refusal site, so callers cannot tell which
+    check fired — only that nothing was mutated."""
+    detail = "; ".join(f"{hp} mount {mount} -> {proxy}"
+                       for (hp, mount), proxy in _handlers(status).items()
+                       if _port_of_hostport(hp) == port)
+    return {"ok": False, "backend": "tailscale",
+            "error": (f"refusing to overwrite another service's serve rule on "
+                      f"port {port} ({detail})")}
+
+
+def tailscale_expose(gate_port: int, target_port: int | None = None,
+                     binpath: str = "tailscale", record_path=None) -> dict:
     """Serve the gate under the host's tailscale HTTPS URL. tailscaled owns the
     forwarding, so after setup this process can exit.
+
+    Finding 25 — EXACT rule identity. This gate's rule is the triple (https
+    listen port, mount path, proxy target http://127.0.0.1:<gate_port>), and
+    that handle is recorded durably, so create/check/cleanup operations target
+    precisely this gate's rule and never another service's on the same
+    tailnet host: every removal is the path-scoped off of the exact handle,
+    verified against a fresh serve map afterwards. A re-run with the same
+    gate port KEEPS a working rule with zero mutations; a rule left by a
+    previous run for a DIFFERENT gate port is replaced remove-then-set and
+    the result says so; that stale port counts as free for this run, while
+    other services' ports stay claimed exactly as the serve status reports.
+    An explicit target_port that another service already holds is refused
+    with ZERO mutations even then — claimability is checked BEFORE our live
+    rule is dropped, so a refused request never destroys the working tunnel.
 
     A serve rule being ACCEPTED is not proof it WORKS: a local service bound to
     0.0.0.0:<port> (e.g. nginx on 443) can hold the port first, so tailnet
@@ -120,40 +280,129 @@ def tailscale_expose(gate_port: int, target_port: int | None = None) -> dict:
     proxy. Every candidate is therefore verified with a real TLS GET of
     /health (cert chain verified, no -k) and rejected ports are un-ruled
     before the next candidate is tried."""
-    if not _which("tailscale"):
+    if not _which(binpath):
         return {"ok": False, "backend": "tailscale", "error": "tailscale CLI not found"}
-    host = fetch_self_dnsname()
+    host = fetch_self_dnsname(binpath=binpath)
     if not host:
         return {"ok": False, "backend": "tailscale", "error": "tailscale status unavailable (tailscaled down?)"}
+    target = f"http://127.0.0.1:{gate_port}"
+    rpath = Path(record_path) if record_path is not None else _record_path()
+    record = _load_record(rpath)
+    status = fetch_status_json(binpath=binpath) or {}
+    our_rule = _recorded_rule_live(status, record)
+    warnings: list[str] = []
+    removed: list[dict] = []
+    notes: list[str] = []
+
+    if our_rule is not None:
+        keep_it = (our_rule["target"] == target
+                   and (target_port is None or target_port == our_rule["port"]))
+        if keep_it:
+            # correct rule already live: verify it works and KEEP it untouched
+            url = origin_from_host(host, our_rule["port"])
+            located = _locate_url(status, host, our_rule["port"])
+            if located:
+                url = located.replace(":443", "")
+            ok, why = _tls_probe(f"{url}/health")
+            if ok:
+                new_record = {"host": host, "port": our_rule["port"], "mount": our_rule["mount"],
+                              "target": target, "url": url}
+                _save_record(rpath, new_record)
+                return {"ok": True, "backend": "tailscale", "url": url,
+                        "rp_id": url.split("//", 1)[-1].rsplit(":", 1)[0], "persistent": True,
+                        "note": (f"existing serve rule kept: tailscaled forwards {url} -> "
+                                 f"127.0.0.1:{gate_port}; survives restarts of this process"),
+                        "serve_rule": new_record}
+            warnings += _drop_rule(binpath, our_rule, status)
+            removed.append({"port": our_rule["port"], "mount": our_rule["mount"],
+                            "target": our_rule["target"], "reason": f"unreachable ({why})"})
+            notes.append(f"removed previous serve rule on port {our_rule['port']} (unreachable: {why})")
+        else:
+            # a previous run's rule for a DIFFERENT gate port (or a different
+            # requested port): replace it — remove-then-set, exact handle.
+            # D16: an explicit target_port that another service holds must
+            # refuse BEFORE our live rule is dropped — a refusal that arrives
+            # after the drop destroys the working tunnel and dangles the
+            # record. Claimability uses the same accounting as below: every
+            # port the serve map claims minus OUR own recorded port.
+            if (target_port is not None and target_port != our_rule["port"]
+                    and target_port in _claimed_ports(status) - {our_rule["port"]}):
+                return _refuse_foreign_port(status, target_port)
+            warnings += _drop_rule(binpath, our_rule, status)
+            removed.append({"port": our_rule["port"], "mount": our_rule["mount"],
+                            "target": our_rule["target"],
+                            "reason": "superseded by this run (different gate port)"})
+            notes.append(f"replaced previous passkey-gate serve rule on port {our_rule['port']} "
+                         f"(was forwarding to {our_rule['target']})")
+        status = fetch_status_json(binpath=binpath) or {}
+    elif record is not None:
+        notes.append("previous passkey-gate serve rule no longer matches the record — left untouched")
+
+    # claimed ports: other services' rules exactly as the serve status reports
+    # them, minus THIS plugin's own rule — its port frees up because this run
+    # replaces or re-creates the rule there itself (finding 25)
+    ours_ports = {our_rule["port"]} if our_rule is not None else set()
+    claimed = _claimed_ports(status) - ours_ports
     if target_port is not None:
+        if target_port in claimed:
+            return _refuse_foreign_port(status, target_port)
         candidates = [target_port]
     else:
-        status = fetch_status_json() or {}
-        claimed = _claimed_ports(status)
         candidates = [p for p in TAILSCALE_PORTS if p not in claimed]
     last_error = None
     for port in candidates:
-        target = f"http://127.0.0.1:{gate_port}"
-        out = subprocess.run(["tailscale", "serve", "--bg", f"--https={port}", target],
+        out = subprocess.run([binpath, "serve", "--bg", f"--https={port}", f"--set-path={SERVE_MOUNT}", target],
                              capture_output=True, text=True, timeout=30)
         if out.returncode != 0:
             last_error = f"tailscale serve {target} failed: {(out.stderr or out.stdout).strip()[:300]}"
             continue
-        status_after = fetch_status_json() or {}
-        url = origin_from_host(host, port)  # canonical first
+        status_after = fetch_status_json(binpath=binpath) or {}
+        rule = _rule_matching(status_after, port, SERVE_MOUNT, target)
+        if rule is None:
+            # accepted but not identifiable as ours in the map: clean the exact
+            # slot (a no-op error if nothing is served there) and move on
+            last_error = f"port {port} accepted the rule but the exact serve rule is not in the map"
+            _unserve(binpath, port, SERVE_MOUNT)
+            continue
+        url = origin_from_host(host, port)
         located = _locate_url(status_after, host, port)
         if located:
             url = located.replace(":443", "")
         probe = _tls_probe(f"{url}/health")
         if probe[0]:
-            return {"ok": True, "backend": "tailscale", "url": url,
-                    "rp_id": url.split("//", 1)[-1].rsplit(":", 1)[0], "persistent": True,
-                    "note": f"tailscaled forwards {url} -> 127.0.0.1:{gate_port}; survives restarts of this process"}
+            new_record = {"host": host, "port": port, "mount": SERVE_MOUNT,
+                          "target": target, "url": url}
+            _save_record(rpath, new_record)
+            note = f"tailscaled forwards {url} -> 127.0.0.1:{gate_port}; survives restarts of this process"
+            if notes:
+                note = "; ".join(notes) + "; " + note
+            if warnings:
+                note += " — WARNING: " + "; ".join(warnings)
+            result = {"ok": True, "backend": "tailscale", "url": url,
+                      "rp_id": url.split("//", 1)[-1].rsplit(":", 1)[0], "persistent": True,
+                      "note": note, "serve_rule": new_record}
+            if removed:
+                result["removed"] = removed
+            return result
         last_error = f"port {port} did not serve our TLS origin ({probe[1]})"
-        # un-rule the dead port without touching anyone else's rules
-        subprocess.run(["tailscale", "serve", "--bg", f"--http={port}", "off"],
-                       capture_output=True, text=True, timeout=30)
-    return {"ok": False, "backend": "tailscale", "error": f"no working HTTPS port found. Last issue: {last_error}"}
+        # un-rule the dead candidate by its EXACT handle — never anyone else's
+        warnings += _drop_rule(binpath, rule, status_after)
+        removed.append({"port": port, "mount": SERVE_MOUNT, "target": target,
+                        "reason": f"cleaned after failed probe ({probe[1]})"})
+        notes.append(f"cleaned partial rule on port {port} after failed probe")
+    if record is not None:
+        # the rule our record pointed at is gone now (dropped above, or no
+        # longer ours) — never leave a record for a rule that does not exist
+        _clear_record(rpath)
+    error = f"no working HTTPS port found. Last issue: {last_error}"
+    if notes:
+        error += ". " + "; ".join(notes)
+    result = {"ok": False, "backend": "tailscale", "error": error}
+    if removed:
+        result["removed"] = removed
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def _tls_probe(url: str, timeout: int = 12) -> tuple[bool, str]:
