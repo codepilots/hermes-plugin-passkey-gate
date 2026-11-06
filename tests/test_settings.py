@@ -3,6 +3,8 @@ that mimics ctx.get_config / ctx.set_config (plugin namespaced settings)."""
 
 import json
 
+import pytest
+
 from passkey_gate import cli
 
 
@@ -55,6 +57,78 @@ def test_set_rejects_bad_values():
     assert "https" in out and ctx.store.get("origin") is None  # rejected before write
     out = _cli(ctx, "set origin https://fine.example.ts.net")
     assert ctx.store["origin"] == "https://fine.example.ts.net"
+
+
+def test_numeric_settings_reject_out_of_range_without_persistence():
+    ctx = FakeCtx()
+    for key, bad in (("challenge_ttl", ["0", "-1", "86401"]),
+                     ("port", ["0", "-1", "65536", "not-an-int"])):
+        for raw in bad:
+            out = _cli(ctx, f"set {key} {raw}")
+            assert "REFUSED" in out and "allowed range" in out, (key, raw, out)
+            assert key not in ctx.store
+
+
+def test_numeric_settings_accept_range_boundaries():
+    ctx = FakeCtx()
+    for key, low, high in (("challenge_ttl", 1, 86400), ("port", 1, 65535)):
+        for value in (low, high):
+            out = _cli(ctx, f"set {key} {value}")
+            assert ctx.store[key] == value, out
+
+
+def test_malformed_legacy_numeric_settings_fail_closed_without_crashing():
+    ctx = FakeCtx()
+    ctx.store.update(port=-1, challenge_ttl="not-an-int")
+    # apply_config is the runtime boundary; it must turn malformed legacy
+    # values into the existing fail-closed config marker, not crash.
+    cli._ctx_ref = ctx
+    try:
+        state = cli._load_config_state()
+    finally:
+        cli._ctx_ref = None
+    assert state["require_passkey"] is True
+    assert "_config_error" in state
+
+
+def test_runtime_numeric_boundaries_and_malformed_values_fail_closed(monkeypatch):
+    from passkey_gate import gate_core
+
+    original = gate_core._settings.copy()
+    try:
+        gate_core.configure(port=1, challenge_ttl=1, bootstrap_ttl=1)
+        assert gate_core.port() == 1
+        assert gate_core.challenge_ttl() == 1
+        assert gate_core.bootstrap_ttl() == 1
+        gate_core.configure(port=65535, challenge_ttl=86400, bootstrap_ttl=86400)
+        assert gate_core.port() == 65535
+        assert gate_core.challenge_ttl() == 86400
+        assert gate_core.bootstrap_ttl() == 86400
+        for key, value in (("PORT", 0), ("CHALLENGE_TTL", "bad"), ("BOOTSTRAP_TTL", 86401)):
+            monkeypatch.setitem(gate_core._settings, key, value)
+            with pytest.raises(ValueError, match="allowed range"):
+                {"PORT": gate_core.port, "CHALLENGE_TTL": gate_core.challenge_ttl,
+                 "BOOTSTRAP_TTL": gate_core.bootstrap_ttl}[key]()
+    finally:
+        gate_core._settings.clear()
+        gate_core._settings.update(original)
+
+
+def test_expose_refuses_invalid_legacy_port_before_backend(monkeypatch):
+    ctx = FakeCtx()
+    ctx.store["port"] = 0
+    called = []
+    monkeypatch.setattr(cli.expose, "auto_expose", lambda *args: called.append(args))
+    out = _cli(ctx, "expose auto")
+    assert "REFUSED" in out and "allowed range" in out
+    assert called == []
+
+
+def test_http_serve_refuses_invalid_port_before_bind():
+    from passkey_gate import gate_core
+
+    with pytest.raises(ValueError, match="allowed range"):
+        gate_core.serve(http_port=0)
 
 
 def test_set_loopback_http_is_tolerated():

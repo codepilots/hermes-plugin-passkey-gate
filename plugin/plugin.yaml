@@ -37,12 +37,12 @@ config_schema:
     type: int
     default: 8655
     label: "Serve port"
-    description: "Port for 'hermes passkey-gate serve' (binds 127.0.0.1; put it behind TLS with tailscale serve, an nginx proxy, or similar)."
+    description: "Port for 'hermes passkey-gate serve' (binds 127.0.0.1; must be an integer from 1 to 65535; put it behind TLS with tailscale serve, an nginx proxy, or similar)."
   challenge_ttl:
     type: int
     default: 600
     label: "Challenge TTL"
-    description: "Seconds a challenge stays pending after creation."
+    description: "Seconds a challenge stays pending after creation (must be an integer from 1 to 86400)."
   require_passkey:
     type: bool
     default: false

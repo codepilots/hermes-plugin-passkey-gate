@@ -58,8 +58,8 @@ USAGE = ("usage: hermes passkey-gate "
 SETTINGS_SPEC = {
     "origin": {"type": "str"},
     "rp_id": {"type": "str"},
-    "port": {"type": "int"},
-    "challenge_ttl": {"type": "int"},
+    "port": {"type": "int", "min": gate_core.PORT_MIN, "max": gate_core.PORT_MAX},
+    "challenge_ttl": {"type": "int", "min": gate_core.CHALLENGE_TTL_MIN, "max": gate_core.CHALLENGE_TTL_MAX},
     "require_passkey": {"type": "bool"},
     "authority_patterns": {"type": "list"},
     "parent_gate_allowlist": {"type": "list"},
@@ -237,7 +237,10 @@ def cmd_expose(ctx, rest):
         return "usage: hermes passkey-gate expose [auto|tailscale|cloudflare|none]"
     origin_cfg = (ctx.get_config("origin", default="") or "").strip() if ctx is not None else ""
     rp_cfg = (ctx.get_config("rp_id", default="") or "").strip() if ctx is not None else ""
-    gate_port = int(ctx.get_config("port", default=8655))
+    try:
+        gate_port = gate_core.validate_port(ctx.get_config("port", default=8655) if ctx is not None else 8655)
+    except ValueError as exc:
+        return f"REFUSED: {exc}; exposure was not started"
     if backend == "auto":
         result = expose.auto_expose(gate_port, origin_cfg, rp_cfg)
     elif backend == "tailscale":
@@ -577,7 +580,12 @@ def parse_setting(key, raw: str):
                 return False, None
             return None, f"{key} wants true/false, got {raw!r}"
         if typ == "int":
-            return int(raw), None
+            value = int(raw)
+            minimum, maximum = SETTINGS_SPEC[key]["min"], SETTINGS_SPEC[key]["max"]
+            if not minimum <= value <= maximum:
+                return None, (f"REFUSED: {key} must be an integer in the allowed range "
+                              f"{minimum}..{maximum}; nothing was saved")
+            return value, None
         if typ == "list":
             try:
                 val = json.loads(raw)
@@ -589,6 +597,10 @@ def parse_setting(key, raw: str):
                 return [x.strip() for x in raw.split(",") if x.strip()], None
         return raw, None
     except ValueError as exc:
+        if typ == "int":
+            minimum, maximum = SETTINGS_SPEC[key]["min"], SETTINGS_SPEC[key]["max"]
+            return None, (f"REFUSED: invalid {key}; it must be an integer in the allowed range "
+                          f"{minimum}..{maximum}; got {raw!r}; nothing was saved")
         return None, f"{key}: {exc}"
 
 

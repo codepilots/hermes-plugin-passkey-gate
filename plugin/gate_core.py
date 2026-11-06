@@ -56,23 +56,59 @@ def _default_data_dir() -> Path:
         return Path(os.environ.get("GATE_DATA", Path(__file__).resolve().parent / "data"))
 
 
-# Runtime configuration (set by configure(); env fallback keeps CLI parity)
+# Runtime configuration (set by configure(); env fallback keeps CLI parity).
+# These are deliberately explicit: a zero/negative TTL expires immediately and
+# an invalid port either crashes serve or sends exposure at the wrong target.
+PORT_MIN, PORT_MAX = 1, 65535
+CHALLENGE_TTL_MIN, CHALLENGE_TTL_MAX = 1, 86400
+BOOTSTRAP_TTL_MIN, BOOTSTRAP_TTL_MAX = 1, 86400
 _settings = {}
+
+
+def _validated_number(name, value, minimum, maximum):
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer in the allowed range {minimum}..{maximum}")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer in the allowed range {minimum}..{maximum}") from exc
+    # Do not silently accept fractional or otherwise non-integral values.
+    if isinstance(value, float) and value != number:
+        raise ValueError(f"{name} must be an integer in the allowed range {minimum}..{maximum}")
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{name} must be an integer in the allowed range {minimum}..{maximum}; got {value!r}")
+    return number
+
+
+def validate_port(value):
+    return _validated_number("port", value, PORT_MIN, PORT_MAX)
+
+
+def validate_challenge_ttl(value):
+    return _validated_number("challenge_ttl", value, CHALLENGE_TTL_MIN, CHALLENGE_TTL_MAX)
+
+
+def validate_bootstrap_ttl(value):
+    return _validated_number("bootstrap_ttl", value, BOOTSTRAP_TTL_MIN, BOOTSTRAP_TTL_MAX)
 
 
 def configure(data_dir=None, rp_id=None, origin=None, port=None, challenge_ttl=None,
               bootstrap_ttl=None, parent_allowlist=None):
     global _plugin_data_dir, _settings
+    # Validate everything before changing either data-dir or runtime settings.
+    configured_port = validate_port(port if port is not None else os.environ.get("GATE_PORT", "8655"))
+    configured_challenge_ttl = validate_challenge_ttl(
+        challenge_ttl if challenge_ttl is not None else os.environ.get("GATE_CHALLENGE_TTL", "600"))
+    configured_bootstrap_ttl = validate_bootstrap_ttl(
+        bootstrap_ttl if bootstrap_ttl is not None else os.environ.get("GATE_BOOTSTRAP_TTL", "900"))
     if data_dir is not None:
         _plugin_data_dir = Path(data_dir)
     defaults = {
         "RP_ID": rp_id or os.environ.get("GATE_RP_ID", "localhost"),
         "ORIGIN": origin or os.environ.get("GATE_ORIGIN", ""),
-        "PORT": int(port if port is not None else os.environ.get("GATE_PORT", "8655")),
-        "CHALLENGE_TTL": int(challenge_ttl if challenge_ttl is not None
-                             else os.environ.get("GATE_CHALLENGE_TTL", "600")),
-        "BOOTSTRAP_TTL": int(bootstrap_ttl if bootstrap_ttl is not None
-                             else os.environ.get("GATE_BOOTSTRAP_TTL", "900")),
+        "PORT": configured_port,
+        "CHALLENGE_TTL": configured_challenge_ttl,
+        "BOOTSTRAP_TTL": configured_bootstrap_ttl,
         "PARENT_ALLOWLIST": ([str(x).strip() for x in parent_allowlist]
                              if parent_allowlist is not None else None),
     }
@@ -88,15 +124,20 @@ def origin() -> str:
 
 
 def port() -> int:
-    return int(_settings.get("PORT") or os.environ.get("GATE_PORT", "8655"))
+    value = _settings["PORT"] if "PORT" in _settings else os.environ.get("GATE_PORT", "8655")
+    return validate_port(value)
 
 
 def challenge_ttl() -> int:
-    return int(_settings.get("CHALLENGE_TTL") or os.environ.get("GATE_CHALLENGE_TTL", "600"))
+    value = (_settings["CHALLENGE_TTL"] if "CHALLENGE_TTL" in _settings
+             else os.environ.get("GATE_CHALLENGE_TTL", "600"))
+    return validate_challenge_ttl(value)
 
 
 def bootstrap_ttl() -> int:
-    return int(_settings.get("BOOTSTRAP_TTL") or os.environ.get("GATE_BOOTSTRAP_TTL", "900"))
+    value = (_settings["BOOTSTRAP_TTL"] if "BOOTSTRAP_TTL" in _settings
+             else os.environ.get("GATE_BOOTSTRAP_TTL", "900"))
+    return validate_bootstrap_ttl(value)
 
 
 def parent_allowlist() -> list:
@@ -883,7 +924,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host="127.0.0.1", http_port=None):
+    bind_port = validate_port(http_port if http_port is not None else port())
     db()
-    srv = ThreadingHTTPServer((host, int(http_port if http_port is not None else port())), Handler)
+    srv = ThreadingHTTPServer((host, bind_port), Handler)
     print(f"passkey-gate on {host}:{srv.server_address[1]} rp_id={rp_id()} origin={origin()}", flush=True)
     srv.serve_forever()
