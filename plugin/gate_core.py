@@ -505,7 +505,20 @@ def approve_options(cid: str) -> str | None:
 
 def approve_finish(cid: str, assertion: dict):
     """Verify a WebAuthn assertion and mark approved. Enforces: known credential,
-    valid signature, UV required, challenge bound to the stored nonce, single use."""
+    valid signature, UV required, challenge bound to the stored nonce, single use.
+
+    Findings 21 + 13: the assertion's four-byte signature counter (authData
+    offset 33) must ADVANCE past the last count accepted for this credential
+    — a counter that does not advance is clone evidence (cloned authenticator
+    or replay) and is refused by name, distinctly audited. The stored
+    credentials.sign_count advances in ONE conditional UPDATE (consume()'s
+    lock discipline) BEFORE the challenge flips, so concurrent assertions
+    presenting the same counter cannot both be accepted. Counterless
+    authenticators (e.g. platform passkeys) report 0 forever: 0 after 0 is
+    allowed and is NOT regression evidence. Residual risk: a clone of a
+    counterless authenticator is undetectable by counter — inherent to
+    WebAuthn, not a gate defect (finding 13's limitation).
+    """
     row = db().execute("select * from challenges where id=?", (cid,)).fetchone()
     if row is None or row["status"] != "pending":
         audit("approve_rejected", challenge_id=cid, reason="not pending")
@@ -517,16 +530,69 @@ def approve_finish(cid: str, assertion: dict):
     if cred is None:
         audit("approve_rejected", challenge_id=cid, reason="unknown credential")
         return {"error": "unknown credential", "status": "denied"}
+    resp = assertion.get("response")
+    if not isinstance(resp, dict):
+        # malformed assertion: nothing to verify — the same clean refusal
+        # the crypto pass below gives any unparseable credential
+        audit("approve_rejected", challenge_id=cid, reason="assertion invalid: no response")
+        return {"error": "assertion invalid", "status": "denied"}
+    stored_count = cred["sign_count"]
+    # Findings 21 + 13: clone detection on the sign counter. Authenticators
+    # keep a monotonically increasing counter; an assertion that does not
+    # advance past the stored count for THIS credential is evidence of a
+    # cloned authenticator or a replay, so it is refused with a problem
+    # string that names the suspicion (the crypto verification below
+    # enforces the same rule generically — this guard gives the failure its
+    # true name first, and the conditional UPDATE below enforces it
+    # atomically under concurrency). 0 after 0 is a counterless
+    # authenticator and is allowed — see the residual risk in the docstring.
+    presented_count = None
+    try:
+        auth_data = local_verify.b64u(resp["authenticatorData"])  # counter: offset 33, 4 bytes
+        if len(auth_data) >= 37:
+            presented_count = int.from_bytes(auth_data[33:37], "big")
+    except Exception:
+        presented_count = None  # malformed authData: the verification below rejects it
+    if (presented_count is not None and presented_count <= stored_count
+            and not (presented_count == 0 and stored_count == 0)):
+        problem = (f"clone suspected: signature counter {presented_count} does not "
+                   f"advance past the stored count {stored_count} for this credential")
+        audit("approve_rejected", challenge_id=cid, reason=problem)
+        return {"error": problem, "status": "denied"}
     try:
         v = verify_authentication_response(
             credential=assertion, expected_challenge=row["challenge"], expected_rp_id=rp_id(),
             expected_origin=origin(), credential_public_key=cred["public_key"],
-            credential_current_sign_count=cred["sign_count"], require_user_verification=True)
+            credential_current_sign_count=stored_count, require_user_verification=True)
     except Exception as exc:
         audit("approve_rejected", challenge_id=cid, reason=f"assertion invalid: {type(exc).__name__}")
         return {"error": "assertion invalid", "status": "denied"}
-    resp = assertion["response"]
     c = db()
+    # Findings 21 + 13: advance the stored counter ATOMICALLY — a single
+    # conditional UPDATE with the same lock discipline as consume(). SQLite
+    # serializes writers, so of concurrent assertions only the one that
+    # really advances the count updates the row; a racer presenting the same
+    # (or an older) counter gets rowcount 0 and is refused as clone
+    # evidence, BEFORE its challenge is approved. The claim runs before the
+    # challenge flip on purpose: losing the flip only means another approval
+    # claimed THIS challenge (the assertion was fresh, so the counter it
+    # reported stands), but losing the claim means this approval must never
+    # happen. Counterless (0 after 0) has nothing to advance; its
+    # idempotent claim still confirms the stored count IS 0 — if a
+    # concurrent approval advanced it, this 0 is now the regression
+    # evidence the refusal says it is.
+    if presented_count == 0 and stored_count == 0:
+        cur = c.execute("update credentials set sign_count=0 where id=? and sign_count=0",
+                        (cred_id,))
+    else:
+        cur = c.execute("update credentials set sign_count=? where id=? and sign_count<?",
+                        (v.new_sign_count, cred_id, v.new_sign_count))
+    if cur.rowcount != 1:
+        problem = (f"clone suspected: signature counter {v.new_sign_count} did not "
+                   "atomically advance the stored count for this credential "
+                   "(a concurrent assertion already advanced it — clone or replay)")
+        audit("approve_rejected", challenge_id=cid, reason=problem)
+        return {"error": problem, "status": "denied"}
     cur = c.execute("update challenges set status='approved', decided_at=?, credential_id=?,"
                     " authenticator_data=?, client_data_json=?, signature=?, user_handle=?"
                     " where id=? and status='pending'",
@@ -535,7 +601,6 @@ def approve_finish(cid: str, assertion: dict):
     if cur.rowcount != 1:  # lost a race / replay: single use
         audit("approve_rejected", challenge_id=cid, reason="already decided")
         return {"error": "already decided", "status": "denied"}
-    c.execute("update credentials set sign_count=? where id=?", (v.new_sign_count, cred_id))
     audit("challenge_approved", challenge_id=cid, action_sha256=row["action_sha256"],
           requester=row["requester"], credential_id=cred_id, outcome="approved")
     return {"status": "approved"}
@@ -613,6 +678,9 @@ def registration_finish(token: str, session_id: str, credential: dict):
     if cur.rowcount != 1:
         return {"error": "token already used"}
     cid = bytes_to_base64url(v.credential_id)
+    # Findings 21 + 13: the attestation's sign_count is the clone-detection
+    # baseline — every later approval must advance past it, so registration
+    # stores exactly what the attestation reported, never a hardcoded 0.
     c.execute("insert into credentials values(?,?,?,?)",
               (cid, v.credential_public_key, v.sign_count, time.time()))
     c.execute("delete from reg_sessions where token_hash=?", (th,))

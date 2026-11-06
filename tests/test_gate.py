@@ -62,6 +62,7 @@ class SoftAuthenticator:
         self.key = ec.generate_private_key(ec.SECP256R1())
         self.cred_id = secrets.token_bytes(32)
         self.count = 0
+        self.pem = None  # the SPKI PEM the gate returns at registration
         self.origin, self.rp_id = origin, rp_id
 
     def _cose(self):
@@ -72,9 +73,12 @@ class SoftAuthenticator:
         return json.dumps({"type": typ, "challenge": challenge_b64u, "origin": self.origin,
                            "crossOrigin": False}).encode()
 
-    def create(self, opts):
+    def create(self, opts, initial_count=0):
+        """Registration ceremony. `initial_count` sets the attestation's
+        signature counter (findings 21+13: registration must store exactly
+        what the attestation reports, not a hardcoded 0)."""
         rp_hash = hashlib.sha256(opts["rp"]["id"].encode()).digest()
-        auth = rp_hash + bytes([0x45]) + struct.pack(">I", 0) + b"\0" * 16 \
+        auth = rp_hash + bytes([0x45]) + struct.pack(">I", initial_count) + b"\0" * 16 \
             + struct.pack(">H", len(self.cred_id)) + self.cred_id + self._cose()
         att = encode_cbor({"fmt": "none", "attStmt": {}, "authData": auth})
         return {"id": b64u(self.cred_id), "rawId": b64u(self.cred_id), "type": "public-key",
@@ -82,8 +86,12 @@ class SoftAuthenticator:
                 "response": {"clientDataJSON": b64u(self._cd("webauthn.create", opts["challenge"])),
                              "attestationObject": b64u(att), "transports": ["internal"]}}
 
-    def get(self, opts, flags=0x05):
-        self.count += 1
+    def get(self, opts, flags=0x05, count=None):
+        """Assertion ceremony. `count` presents a CHOSEN signature counter:
+        the clone/replay shapes of finding 21 replay a counter the gate has
+        already seen (or present an older one) instead of advancing to the
+        next; None advances monotonically like a genuine authenticator."""
+        self.count = self.count + 1 if count is None else count
         auth = hashlib.sha256(self.rp_id.encode()).digest() + bytes([flags]) + struct.pack(">I", self.count)
         cd = self._cd("webauthn.get", opts["challenge"])
         sig = self.key.sign(auth + hashlib.sha256(cd).digest(), ec.ECDSA(hashes.SHA256()))
@@ -1156,3 +1164,159 @@ def test_set_approve_flag_needs_a_challenge_id(monkeypatch):
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve"])
     assert ctx.settings["require_passkey"] is True
     assert "challenge id" in out
+
+
+# --------------- findings 21 + 13: signature-counter clone detection
+def _fresh_gate_credential(tmp_path, monkeypatch, initial_count=0):
+    """An isolated gate DB carrying one freshly registered SoftAuthenticator,
+    so counter tests can present chosen sign counts without disturbing the
+    shared module gate's credential bookkeeping (every approve elsewhere
+    advances its stored counter)."""
+    monkeypatch.setenv("GATE_DATA", str(tmp_path))
+    a = SoftAuthenticator()
+    tok = mint_token()
+    opts = gate_core.registration_options(tok)
+    r = gate_core.registration_finish(tok, opts["session_id"],
+                                      a.create(opts, initial_count=initial_count))
+    assert r.get("status") == "registered", r
+    a.pem = r["spki_pem"]
+    return a
+
+
+def _stored_count(a):
+    row = gate_core.db().execute("select sign_count from credentials where id=?",
+                                 (b64u(a.cred_id),)).fetchone()
+    assert row is not None
+    return row["sign_count"]
+
+
+def _approve_with_count(a, count):
+    """Mint a challenge, then approve it with an assertion presenting a
+    CHOSEN signature counter (a genuine authenticator would present its own
+    next counter; a clone replays one the gate has already accepted)."""
+    c = gate_core.create_challenge(ACTION, "sorrel")
+    opts = json.loads(gate_core.approve_options(c["challenge_id"]))
+    return c, gate_core.approve_finish(c["challenge_id"], a.get(opts, count=count))
+
+
+def test_approval_with_advancing_counter_accepted_and_stored(tmp_path, monkeypatch):
+    """Findings 21+13 (a): an approval whose counter ADVANCES past the stored
+    count is accepted, and the stored credentials.sign_count becomes exactly
+    that counter — the bookkeeping every later clone check depends on."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch)
+    c, r = _approve_with_count(a, count=5)
+    assert r == {"status": "approved"}, r
+    assert _stored_count(a) == 5
+
+
+def test_clone_replaying_counter_rejected_with_clone_suspicion(tmp_path, monkeypatch):
+    """Findings 21+13 (b): a cloned authenticator replays a counter the gate
+    has already accepted (or presents an older, forked one). The approval
+    fails with a problem string that NAMES the clone suspicion (not a
+    generic 'assertion invalid'), is audited as such, and leaves the
+    challenge pending with the stored counter untouched."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch)
+    _, r = _approve_with_count(a, count=5)
+    assert r == {"status": "approved"}, r
+    # same counter again on a fresh challenge -> clone evidence by name
+    c2, r2 = _approve_with_count(a, count=5)
+    assert r2["status"] == "denied", r2
+    assert "clone" in r2["error"] and "counter" in r2["error"], r2
+    # an older counter (a clone forked earlier) is refused the same way
+    c3, r3 = _approve_with_count(a, count=3)
+    assert r3["status"] == "denied" and "clone" in r3["error"], r3
+    # the refusals were clean: nothing approved, nothing advanced
+    assert _stored_count(a) == 5
+    for c in (c2, c3):
+        row = gate_core.db().execute("select status from challenges where id=?",
+                                     (c["challenge_id"],)).fetchone()
+        assert row["status"] == "pending"
+    audit_text = (Path(str(tmp_path)) / "audit.jsonl").read_text()
+    assert "clone suspected" in audit_text  # clone evidence is audited distinctly
+
+
+def test_counterless_authenticator_keeps_working_across_approvals(tmp_path, monkeypatch):
+    """Findings 21+13 (c): counterless authenticators (e.g. platform passkeys)
+    report 0 forever — 0 after 0 is NOT regression evidence and must never
+    break the approval flow."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch)  # attestation counter 0
+    for _ in range(3):
+        c, r = _approve_with_count(a, count=0)
+        assert r == {"status": "approved"}, r
+    assert _stored_count(a) == 0  # still counterless, still allowed
+
+
+def test_registration_stores_the_attestations_initial_counter(tmp_path, monkeypatch):
+    """Findings 21+13 (d): registration extracts the credential's INITIAL
+    signature counter from the attestation and stores it — the baseline
+    every later approval must advance past, so replaying the registration
+    counter is already clone-shaped."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch, initial_count=7)
+    assert _stored_count(a) == 7  # the attestation's counter, not a hardcoded 0
+    # the stored baseline is USED: presenting the count it registered with
+    # is refused as clone suspicion
+    _, r = _approve_with_count(a, count=7)
+    assert r["status"] == "denied" and "clone" in r["error"], r
+    # ...and one that advances past it is accepted and recorded
+    c2, r2 = _approve_with_count(a, count=8)
+    assert r2 == {"status": "approved"}, r2
+    assert _stored_count(a) == 8
+
+
+def test_concurrent_clone_claims_let_exactly_one_approval_through(tmp_path, monkeypatch):
+    """Findings 21+13 (atomicity): two assertions presenting the SAME counter
+    on two different challenges, racing the approval. The counter claim must
+    be one conditional UPDATE, so exactly one approval lands; the loser is
+    refused as clone suspicion BEFORE its challenge flips to approved.
+    Pre-fix both approvals landed and the stored counter was clobbered."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch)
+    pending = []
+    for _ in range(2):
+        c = gate_core.create_challenge(ACTION, "sorrel")
+        opts = json.loads(gate_core.approve_options(c["challenge_id"]))
+        pending.append((c, opts))
+    real_verify = gate_core.verify_authentication_response
+    bar = threading.Barrier(2, timeout=10)
+
+    def synchronized_verify(**kw):
+        bar.wait()  # both assertions have read the SAME stored counter first
+        return real_verify(**kw)
+
+    monkeypatch.setattr(gate_core, "verify_authentication_response", synchronized_verify)
+    results = []
+
+    def shoot(c, opts):
+        results.append(gate_core.approve_finish(c["challenge_id"], a.get(opts, count=9)))
+
+    threads = [threading.Thread(target=shoot, args=ch) for ch in pending]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(r["status"] for r in results) == ["approved", "denied"], results
+    denied = next(r for r in results if r["status"] == "denied")
+    assert "clone" in denied["error"], denied
+    assert _stored_count(a) == 9  # advanced exactly once, by the winner
+    statuses = [gate_core.db().execute("select status from challenges where id=?",
+                                       (c["challenge_id"],)).fetchone()["status"]
+                for c, _ in pending]
+    assert sorted(statuses) == ["approved", "pending"]  # the loser never landed
+
+
+def test_check_requires_the_assertions_counter_field(tmp_path, monkeypatch):
+    """Finding 21 (offline floor): authenticatorData's fixed header is
+    rpIdHash(32) + flags(1) + signCount(4) — an assertion truncated past the
+    flags byte carries NO signature counter. No real authenticator and no
+    gate-approved record can look like that, so check() must refuse it:
+    offline verification cannot VALIDATE the counter (no per-credential
+    state), but the assertion must at least SHOW one."""
+    a = _fresh_gate_credential(tmp_path, monkeypatch)
+    c, r = _approve_with_count(a, count=5)
+    assert r == {"status": "approved"}, r
+    rec = dict(gate_core.challenge_status(c["challenge_id"], c["action_sha256"]))
+    assert local_verify.check(rec, ACTION, ORIGIN, RP_ID, a.pem) == []  # control
+    truncated = json.loads(json.dumps(rec))
+    ad = local_verify.b64u(truncated["assertion"]["authenticator_data"])
+    truncated["assertion"]["authenticator_data"] = b64u(ad[:35])  # header + partial counter
+    problems = local_verify.check(truncated, ACTION, ORIGIN, RP_ID, a.pem)
+    assert "authenticator_data is missing or malformed" in problems, problems

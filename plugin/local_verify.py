@@ -19,6 +19,14 @@ Checks, all local:
   5. public key == the PINNED key (first seen out of band), so a compromised
      gate can't substitute its own key
   6. approval recency (optional max_age)
+  7. authenticatorData must carry its full fixed header, including the
+     four-byte signature counter at offset 33 (finding 21): the record's
+     assertion must SHOW a counter. It cannot be VALIDATED here — offline
+     verification keeps no per-credential counter state, so clone/replay
+     detection by counter is impossible offline. Offline verification is
+     NOT replay protection and must never be sole authorization; the
+     gate's approve path is where counter advancement is enforced
+     atomically against its credentials table (findings 21 + 13).
 """
 import base64
 import hashlib
@@ -104,7 +112,15 @@ def check(rec, action_text, expected_origin, expected_rp_id, pinned_pem=None, ma
         if recorded_challenge is None or signed_challenge != recorded_challenge:
             errs.append("signed challenge does not match the recorded challenge")
         ad = _b64u_or_none(a.get("authenticator_data"))
-        if not ad or len(ad) < 33:
+        # Finding 21: the fixed authenticatorData header is rpIdHash(32) +
+        # flags(1) + signCount(4) — at least 37 bytes, so a well-formed
+        # assertion always carries its four-byte signature counter at
+        # offset 33. Presence is all that can be required offline: no
+        # per-credential counter state lives here, so monotonic
+        # clone/replay detection is impossible in check() (see the module
+        # docstring — offline verification is not replay protection; the
+        # gate's approve path enforces the counter).
+        if not ad or len(ad) < 37:
             errs.append("authenticator_data is missing or malformed")
             ad = b""
         else:
@@ -301,6 +317,15 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
     if missing:
         return (f"unverified (the parent record is missing {', '.join(missing)} — "
                 "it cannot be verified locally)")
+    # Finding 21's offline limitation, stated plainly rather than papered
+    # over: the fetched parent record carries the assertion (its counter
+    # bytes included) but NOT the parent gate's stored counter for that
+    # credential, and this gate holds no counter state for a peer's
+    # credential — so no monotonic counter check is possible on this path.
+    # The pinned-key crypto in check() is the barrier; the parent gate's
+    # own approve path is where clone detection by counter actually
+    # happens. Offline verification is not replay protection and is never
+    # sole authorization.
     errs = check(rec, rec["action_text"], rec["origin"], rec["rp_id"], pinned_pem=pinned_pem)
     if errs:
         return ("unverified (local verification of the parent record failed: "
