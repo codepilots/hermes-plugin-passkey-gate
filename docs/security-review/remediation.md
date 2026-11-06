@@ -34,13 +34,41 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `6ade254`; 114 passed; race probe green |
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `c3e6261`; 120 passed; live-ceremony probe green |
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `1f51122`; 125 passed; fence/caps probe green |
-| D15 | 24 — cloudflared reader deadline | MEDIUM | 🔄 | delegated |
-| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ⬜ | |
+| D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `8d9ec70`; 130 passed; grandchild-deadlock probe green after follow-up |
+| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | 🔄 | delegated |
 | D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ⬜ | |
 | D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ⬜ | |
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D15 — finding 24 (MEDIUM): cloudflared reader deadline ✅ (after follow-up)
+
+- **Delegated (D15):** bound the cloudflared readiness wait with a
+  reader-thread + queue and hard monotonic deadline; named failure messages;
+  child killed on every failure path. Subagent reported fixed, 128 passed.
+- **Parent verification caught a real hole:** the independent probe
+  (`cache/scratch/probe_d15_deadline.py`) hung cloudflare_expose FOREVER with
+  a stub that forks a pipe-holding grandchild — killing the direct child
+  leaves the grandchild holding the pipe, the blocked reader keeps the
+  TextIOWrapper buffer lock, and the main thread deadlocks in
+  stream.close() (faulthandler stack confirmed: main at expose.py:241
+  close(), reader at readline()). The child's own stubs never forked, so its
+  suite could not see it.
+- **Follow-up delegation (D15b):** reproduce the scenario RED first (it did —
+  external timeout exit 124), then kill the process GROUP
+  (start_new_session + killpg SIGTERM→SIGKILL, ProcessLookupError-safe) and
+  make teardown deadlock-proof (close the RAW fd if the reader somehow
+  survives; never close the wrapper while a reader lives). Completed in
+  ~467s, 2 new tests, 130 passed.
+- **Verification (independent, after follow-up):** full suite re-run — 130
+  passed; original probe re-run — ALL scenarios pass: silent hang ends in
+  2.0s with the named error and the child dead (no leak), fast-fail reports
+  exit code + recent output, success path unchanged, missing binary
+  refused. One orphaned probe stub (my pkill pattern artifact, not a plugin
+  leak — the success path hands the child back alive by design) killed and
+  confirmed clean.
+- **Commits:** `8d9ec70` (both rounds, one atomic finding-24 commit).
 
 ### D14 — finding 22 (MEDIUM): pattern validation + safe display ✅
 
