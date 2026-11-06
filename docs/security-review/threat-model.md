@@ -100,6 +100,30 @@ and hash immediately before execution, consume authorization there, or the
 system must use a separate broker that owns this enforcement boundary. Do not
 claim that passkey-gate alone controls downstream execution.
 
+## Finding 27 — bearer-readable challenge pages and verification evidence (LOW/MEDIUM)
+
+The gate now minimizes an approved `/verify/<id>?action_sha256=...` response to
+only the fields needed by `verify_parent_approval()` and `local_verify.check()`:
+`status`, `challenge_id`, `action_sha256`, `action_text`, `approved_at`,
+`origin`, `rp_id`, `challenge_b64url`, the signed `assertion`, and the
+`credential_public_key`. It no longer returns `binding_sha256`, the canonical
+`tool_call`, `requester`, `created_at`, or `audit_head`. Parent verification and
+local cryptographic checking continue to use the retained action, nonce,
+assertion, key, origin/RP, and approval timestamp fields.
+
+This is minimization, not authentication. The action text and cryptographic
+evidence are still bearer-readable to anyone who obtains the high-entropy
+identifier and action hash. `/a/<id>` remains unchanged: it still exposes the
+approval ceremony to a bearer of the challenge ID. The local plugin has no
+independent authenticated operator channel from which to issue a second viewing
+token or bind browser access, and replacing the ID with an unauthenticated
+viewing token would merely create another bearer secret and could disrupt the
+human ceremony. A deployment that needs confidentiality must provide the
+missing channel outside this plugin (for example, an operator-authenticated
+broker/session or a separately issued, short-lived single-use viewing token
+whose issuance is itself authenticated). URLs must still be treated as
+sensitive and kept out of logs, history, chat, and monitoring.
+
 ## Residual risk summary
 
 D9 is **partially addressed**:

@@ -435,9 +435,7 @@ def challenge_status(cid: str, sha: str) -> GateResult:
         audit("verify_approved", challenge_id=cid, action_sha256=row["action_sha256"], outcome="approved")
         rec = GateResult(status="approved", challenge_id=cid, action_sha256=row["action_sha256"],
                          action_text=row["action_text"],
-                         binding_sha256=row["binding_sha256"], tool_call=row["tool_call"],
-                         requester=row["requester"],
-                         created_at=row["created_at"], approved_at=row["decided_at"],
+                         approved_at=row["decided_at"],
                          rp_id=rp_id(), origin=origin(),
                          challenge_b64url=bytes_to_base64url(row["challenge"]),
                          assertion={"credential_id": row["credential_id"],
@@ -447,7 +445,6 @@ def challenge_status(cid: str, sha: str) -> GateResult:
         if cred is not None:
             rec["credential_public_key"] = {"cose_b64url": bytes_to_base64url(cred["public_key"]),
                                             "spki_pem": pubkey_pem(cred["public_key"])}
-        rec["audit_head"] = audit_head()
         return rec
     if st == "consumed":
         # Finding 10: a spent approval answers with BOTH stamps — decided_at

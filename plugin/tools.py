@@ -145,16 +145,21 @@ def gate_verify(args: dict, **kwargs) -> str:
         binding_note = None
         approved_tool_call = None
         canonical_tool_call = None
-        if rec.get("binding_sha256"):
+        # /verify deliberately omits binding metadata (finding 27). For the
+        # local gate's own agent-facing helper, recover the bound call from the
+        # local DB instead of widening the public parent-record contract.
+        local_row = gate_core.db().execute(
+            "select binding_sha256, tool_call from challenges "
+            "where id=? and action_sha256=? and status='approved'",
+            (cid, rec.get("action_sha256"))).fetchone()
+        if local_row is not None and local_row["tool_call"]:
             binding_note = "challenge is bound to a specific canonical tool call"
-        if rec.get("tool_call"):
-            # Tell the caller exactly what the approval covers, so it can
-            # confirm the call it is about to make is the one that was bound.
             try:
-                approved_tool_call = json.loads(rec["tool_call"])
+                approved_tool_call = json.loads(local_row["tool_call"])
                 canonical_tool_call = gate_core.canonical_binding_json(approved_tool_call)
             except (TypeError, ValueError):
                 problems.append("approved tool call record is malformed")
+        approved_binding = local_row["binding_sha256"] if local_row is not None else None
         requested_tool_call = args.get("tool_call")
         if requested_tool_call is not None:
             if not isinstance(requested_tool_call, dict):
@@ -164,12 +169,12 @@ def gate_verify(args: dict, **kwargs) -> str:
             else:
                 requested_canonical = gate_core.canonical_binding_json(requested_tool_call)
                 if (requested_canonical != canonical_tool_call or
-                        gate_core.sha256_hex(requested_canonical) != rec.get("binding_sha256")):
+                        gate_core.sha256_hex(requested_canonical) != approved_binding):
                     problems.append("requested tool call does not match the approved tool call")
         out = {"ok": True, "verified": not problems, "problems": problems,
                "challenge_id": cid, "action_sha256": rec.get("action_sha256"),
                "approved_at": rec.get("approved_at"),
-               "binding_sha256": rec.get("binding_sha256"),
+               "binding_sha256": approved_binding,
                "binding_note": binding_note,
                "audit_head": rec.get("audit_head"),
                # Contract for callers and for a downstream dispatcher: this is
@@ -177,7 +182,7 @@ def gate_verify(args: dict, **kwargs) -> str:
                # plugin cannot enforce that a later executor uses it.
                "approved_tool_call": approved_tool_call,
                "dispatch_binding": ({"canonical_tool_call": canonical_tool_call,
-                                     "binding_sha256": rec.get("binding_sha256")}
+                                     "binding_sha256": approved_binding}
                                     if canonical_tool_call is not None else None)}
         if approved_tool_call is not None:
             # Keep the legacy name for compatibility with existing callers.

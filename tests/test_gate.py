@@ -330,15 +330,34 @@ def test_approval_page_shows_bound_tool_call(base):
     assert "No tool call is bound" in page2
 
 
-def test_verify_record_includes_bound_tool_call(base, autumn):
-    """The /verify record carries the canonical tool call (already public on
-    the page), byte-exact so it can be hashed straight against binding_sha256."""
+def test_verify_record_is_minimized_to_local_verification_fields(base, autumn):
+    """An approved /verify record contains exactly what local parent
+    verification needs, not requester/audit/binding metadata that widens the
+    bearer-readable disclosure."""
     c = new_challenge(base, tool_call=TOOL_CALL)
     approve(base, autumn, c["challenge_id"])
     s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
     assert s == 200 and rec["status"] == "approved"
-    assert json.loads(rec["tool_call"]) == TOOL_CALL
-    assert hashlib.sha256(rec["tool_call"].encode()).hexdigest() == c["binding_sha256"]
+    assert set(rec) == {
+        "status", "challenge_id", "action_sha256", "action_text", "approved_at",
+        "origin", "rp_id", "challenge_b64url", "assertion", "credential_public_key",
+    }
+    assert "requester" not in rec
+    assert "audit_head" not in rec
+    assert "binding_sha256" not in rec
+    assert "tool_call" not in rec
+    assert "created_at" not in rec
+
+
+def test_parent_verification_accepts_minimized_verify_record(base, autumn, monkeypatch):
+    """Parent verification still succeeds when /verify omits non-crypto
+    metadata, using only the minimized record contract."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base)
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
+    assert out["ok"] is True and out["verified"] is True, out
 
 
 def test_gate_verify_reports_bound_tool_call(monkeypatch, base, autumn):
