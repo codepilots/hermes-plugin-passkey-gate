@@ -38,11 +38,30 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `a7994bb`; 142 passed; 5-scenario rule probe green after follow-up |
 | D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ✅ | commit `0fe4ec7`; 148 passed; independent collision/migration probe green |
 | D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ✅ partial | commit `e924660`; 149 passed; minimized-record probe green; authenticated channel remains deployment residual |
-| D19 | 28 — numeric setting range validation | LOW | 🔄 | delegated |
+| D19 | 28 — numeric setting range validation | LOW | ✅ | commit `76f0622`; 155 passed; independent range/legacy/backend/bind probe green |
 
 ## Log
 
+### D19 — finding 28 (LOW): numeric setting range validation ✅
+
+- **Delegated:** persistence validates `port` in `1..65535` and
+  `challenge_ttl` in `1..86400`; runtime validates port, challenge TTL, and
+  bootstrap TTL (both TTLs `1..86400`), including malformed legacy/config and
+  environment values. Invalid expose and HTTP-serve ports refuse before
+  backend invocation or socket binding. Ranges are documented in
+  `plugin/plugin.yaml`; privileged ports remain allowed because deployment
+  did not require rejecting them. No rp_id/origin behavior changed. Child
+  reported 155 passed.
+- **Parent verification:** full suite independently re-run — 155 passed;
+  `git diff --check` and added-line security scans clean. Independent probe
+  (`cache/scratch/probe_d19_parent.py`) verified invalid persistence values
+  refuse without saving, exact low/high boundaries are accepted, malformed
+  runtime state fails closed with explicit range errors, invalid expose ports
+  do not invoke a backend, and HTTP serve refuses before binding.
+- **Commit:** `76f0622`.
+
 ### D18 — finding 27 (LOW/MEDIUM): minimize bearer-readable verify records ✅ partial
+
 
 - **Delegated:** public approved `/verify` records now retain only the
   action/cryptographic fields required by `verify_parent_approval()` and
