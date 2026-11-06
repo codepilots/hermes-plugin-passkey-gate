@@ -29,8 +29,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `a5a0cf9`; 78 passed; 19/19 exploit probe green |
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `a763ad6`; 84 passed; pin probe green |
 | D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `32805bc`; 87 passed; DB-tamper probe green |
-| D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | 🔄 | delegated |
-| D11 | 10 — consumed_at column, preserve decided_at | LOW | ⬜ | |
+| D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `7bfceee`; 102 passed; wholesale-rewrite probe green |
+| D11 | 10 — consumed_at column, preserve decided_at | LOW | 🔄 | delegated |
 | D12 | 11 — challenge creation rate limit | LOW | ⬜ | |
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ⬜ | |
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ⬜ | |
@@ -41,6 +41,28 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D10 — finding 8 (MEDIUM): audit chain honest claims + head notarization ✅
+
+- **Delegated:** make audit-chain claims honest everywhere; add
+  `audit-notarize` (operator-owned anchor file outside the data dir, or
+  print for out-of-band storage) and extend `audit-verify` with notary
+  comparison (INTACT / GROWN / DIVERGED). Subagent completed in ~388s, TDD
+  (15 new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 102 passed; diff review —
+  audit_checkpoints() is a read-only walk with audit_verify delegating to it
+  (chain computation unchanged, same (ok,msg) semantics); notary file parsed
+  strictly; three verdicts with distinct messages; no-notary path says plainly
+  "internal chain check only … NOT evidence against a wholesale rewrite";
+  README claims corrected; audit_notary_path added to SETTINGS_SPEC but NOT
+  SECURITY_KEYS. Probe (`cache/scratch/probe_d10_notary.py`): anchor verifies
+  INTACT; growth after anchor reports GROWN with the correct count; THE
+  finding-8 scenario — an early entry rewritten and the whole chain
+  recomputed so the internal check PASSES — is caught as DIVERGED by the
+  notarized head; truncated log DIVERGED; no-notary phrasing honest.
+- **Deviations accepted:** audit_notary_path as the default for --to/--notary;
+  one shared chain implementation instead of two.
+- **Commit:** `7bfceee`.
 
 ### D9 — findings 2 (CRITICAL arch) + 20 (MEDIUM) + 15 (HIGH): threat model ✅ (honest partial)
 
