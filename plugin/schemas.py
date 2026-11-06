@@ -95,7 +95,7 @@ GATE_VERIFY = {
         "gate server's yes/no on its own. Checks the signed assertion against the "
         "pinned owner public key: sha256 binding, signature, user-verification "
         "flags, origin/RP id, and optional max age. With wait_seconds > 0, polls "
-        "the challenge until approved/denied/expired or the wait runs out, so a "
+        "the challenge until approved/denied/expired/consumed or the wait runs out, so a "
         "just-minted challenge can be awaited before acting. ACT on an action only "
         "when verified is true."
     ),

@@ -120,7 +120,7 @@ def gate_verify(args: dict, **kwargs) -> str:
         rec = _fetch_verify(base, cid, sha)
         last = rec if isinstance(rec, dict) else {"status": "error"}
         st = last.get("status")
-        if st in ("approved", "denied", "expired") or time.time() >= deadline:
+        if st in ("approved", "consumed", "denied", "expired") or time.time() >= deadline:
             break
         time.sleep(2)
     if last.get("status") == "approved":
@@ -173,8 +173,14 @@ def gate_verify(args: dict, **kwargs) -> str:
             # Keep the legacy name for compatibility with existing callers.
             out["bound_tool_call"] = approved_tool_call
         return json.dumps(out)
-    return json.dumps({"ok": True, "verified": False, "status": last.get("status", "error"),
-                       "challenge_id": cid})
+    out = {"ok": True, "verified": False, "status": last.get("status", "error"),
+           "challenge_id": cid}
+    if last.get("status") == "consumed":
+        # finding 10: a spent approval reports BOTH stamps — when the human
+        # approved it and when the execution consumed it
+        out["approved_at"] = last.get("approved_at")
+        out["consumed_at"] = last.get("consumed_at")
+    return json.dumps(out)
 
 
 def gate_status(args: dict, **kwargs) -> str:

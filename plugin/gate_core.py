@@ -149,12 +149,13 @@ def db():
         action_sha256 TEXT NOT NULL, binding_sha256 TEXT, tool_call TEXT, requester TEXT NOT NULL,
         requester_owner TEXT, why TEXT, parent_approval TEXT, parent_verified TEXT,
         challenge BLOB NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
-        status TEXT NOT NULL, decided_at REAL, credential_id TEXT, authenticator_data TEXT,
-        client_data_json TEXT, signature TEXT, user_handle TEXT);
+        status TEXT NOT NULL, decided_at REAL, consumed_at REAL, credential_id TEXT,
+        authenticator_data TEXT, client_data_json TEXT, signature TEXT, user_handle TEXT);
     """)
-    for col in ("requester_owner", "why", "parent_approval", "parent_verified", "tool_call"):
+    for col, coltype in (("requester_owner", "TEXT"), ("why", "TEXT"), ("parent_approval", "TEXT"),
+                         ("parent_verified", "TEXT"), ("tool_call", "TEXT"), ("consumed_at", "REAL")):
         try:
-            c.execute(f"alter table challenges add column {col} TEXT")
+            c.execute(f"alter table challenges add column {col} {coltype}")
         except sqlite3.OperationalError:
             pass  # column exists (fresh CREATE) or another writer just added it
     return c
@@ -384,6 +385,12 @@ def challenge_status(cid: str, sha: str) -> GateResult:
                                             "spki_pem": pubkey_pem(cred["public_key"])}
         rec["audit_head"] = audit_head()
         return rec
+    if st == "consumed":
+        # Finding 10: a spent approval answers with BOTH stamps — decided_at
+        # stays the human's approval time, consumed_at is when the agent's
+        # claim spent it — and never with signature material (it is used up).
+        return GateResult(status="consumed", challenge_id=cid, action_sha256=row["action_sha256"],
+                          approved_at=row["decided_at"], consumed_at=row["consumed_at"])
     return denied
 
 
@@ -394,9 +401,13 @@ def consume(cid: str, binding_sha: str) -> bool:
     writers, so of any number of racers exactly one updates the row and
     earns True; every loser gets False and must not execute. An approval
     past expires_at is stale and can never be claimed (finding 4).
+
+    Finding 10: the claim stamps consumed_at and leaves decided_at exactly
+    what approve() set — the human's approval time survives consumption, so
+    the audit story can tell approval from execution apart.
     """
     now = time.time()
-    cur = db().execute("update challenges set status='consumed', decided_at=? "
+    cur = db().execute("update challenges set status='consumed', consumed_at=? "
                        "where id=? and status='approved' and binding_sha256=? "
                        "and expires_at>=?", (now, cid, binding_sha, now))
     if cur.rowcount == 1:

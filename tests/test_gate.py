@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -554,6 +555,113 @@ def test_hook_fails_closed_on_error(base, autumn, monkeypatch):
     v = tools.hook_verdict(call["tool"], call["args"], patterns, True)
     assert v is not None and v["action"] == "block"
     assert gate_core.pending_for_binding(c["binding_sha256"]) is not None
+
+
+# --------------------------------- finding 10: consumption keeps approval time
+def test_consume_preserves_approval_time(base, autumn):
+    """Finding 10: the claim stamps consumed_at and must not touch
+    decided_at — the row keeps the human's approval time, so the audit
+    story can tell WHEN the human approved from WHEN the agent executed."""
+    call = _bound_call("consumed-at")
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    row = gate_core.db().execute("select * from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    decided = row["decided_at"]
+    assert decided is not None  # what approve() recorded
+    assert gate_core.consume(c["challenge_id"], c["binding_sha256"]) is True
+    row = gate_core.db().execute("select * from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["status"] == "consumed"
+    assert row["decided_at"] == decided  # approval time survives the claim
+    assert row["consumed_at"] is not None  # consumption has its own stamp
+    assert row["consumed_at"] >= decided  # and happens at/after the approval
+
+
+def test_consumed_at_null_until_consumed(base, autumn):
+    """Finding 10: pending and approved-but-unclaimed rows carry no
+    consumption stamp."""
+    call = _bound_call("consumed-at-null")
+    c = new_challenge(base, tool_call=call)
+    row = gate_core.db().execute("select consumed_at from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["consumed_at"] is None
+    approve(base, autumn, c["challenge_id"])
+    row = gate_core.db().execute("select consumed_at from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["consumed_at"] is None  # approved, not yet consumed
+
+
+def test_verify_record_reports_both_timestamps(base, autumn):
+    """Finding 10 surfacing: /verify answers a spent approval with BOTH
+    stamps (approval time + consumption time), carries no consumed_at
+    before consumption, and stays non-enumerable for strangers."""
+    bound = _bound_call("consumed-at-verify")
+    c = new_challenge(base, tool_call=bound)
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert rec["status"] == "pending" and "consumed_at" not in rec
+    approve(base, autumn, c["challenge_id"])
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert rec["status"] == "approved" and "consumed_at" not in rec
+    assert gate_core.consume(c["challenge_id"], c["binding_sha256"]) is True
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert rec["status"] == "consumed"
+    assert rec["approved_at"] is not None
+    assert rec["consumed_at"] is not None and rec["consumed_at"] >= rec["approved_at"]
+    assert "assertion" not in rec  # a spent approval hands out no signature material
+    # a stranger with the id but the wrong sha still learns nothing
+    s, r = call(base, f"/verify/{c['challenge_id']}?action_sha256={'f' * 64}")
+    assert r == {"status": "denied"}
+
+
+def test_gate_verify_surfaces_consumed_at(monkeypatch, base, autumn):
+    """Finding 10 surfacing: gate_verify reports a spent approval as
+    'consumed' with both timestamps instead of a bare denial."""
+    call = _bound_call("consumed-at-gate-verify")
+    c = new_challenge(base, tool_call=call)
+    approve(base, autumn, c["challenge_id"])
+    assert gate_core.consume(c["challenge_id"], c["binding_sha256"]) is True
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
+                                        "action_text": ACTION}))
+    assert out["ok"] is True and out["verified"] is False
+    assert out["status"] == "consumed"
+    assert out["approved_at"] is not None
+    assert out["consumed_at"] is not None and out["consumed_at"] >= out["approved_at"]
+
+
+def test_old_schema_db_migrates_with_consumed_at(tmp_path, monkeypatch):
+    """Finding 10 migration: a pre-fix database (challenges already consumed
+    under the old overwrite-decided_at behavior, no consumed_at column) must
+    open cleanly — db() adds the column, historical rows backfill NULL."""
+    monkeypatch.setenv("GATE_DATA", str(tmp_path))
+    con = sqlite3.connect(tmp_path / "gate.db")  # the old schema shape, pre-fix
+    con.executescript("""
+        CREATE TABLE challenges(id TEXT PRIMARY KEY, action_text TEXT NOT NULL,
+        action_sha256 TEXT NOT NULL, binding_sha256 TEXT, tool_call TEXT, requester TEXT NOT NULL,
+        requester_owner TEXT, why TEXT, parent_approval TEXT, parent_verified TEXT,
+        challenge BLOB NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
+        status TEXT NOT NULL, decided_at REAL, credential_id TEXT, authenticator_data TEXT,
+        client_data_json TEXT, signature TEXT, user_handle TEXT);
+    """)
+    old_cid = "old-schema-consumed-row-0000000000000"
+    old_sha = hashlib.sha256(b"old row action text that is long enough").hexdigest()
+    con.execute("insert into challenges(id, action_text, action_sha256, requester, challenge,"
+                " created_at, expires_at, status, decided_at) values(?,?,?,?,?,?,?,?,?)",
+                (old_cid, "old row action text that is long enough", old_sha, "sorrel",
+                 b"\x00" * 64, 100.0, 200.0, "consumed", 150.0))
+    con.commit()
+    con.close()
+    c = gate_core.db()  # migration runs here; must not raise
+    cols = {r["name"]: r["type"] for r in c.execute("pragma table_info(challenges)").fetchall()}
+    assert cols.get("consumed_at", "").upper() == "REAL"  # column added
+    row = c.execute("select * from challenges where id=?", (old_cid,)).fetchone()
+    assert row["status"] == "consumed" and row["decided_at"] == 150.0  # data intact
+    assert row["consumed_at"] is None  # NULL backfill for pre-fix rows
+    # the migrated row is served like any other: state plus both timestamps
+    rec = gate_core.challenge_status(old_cid, old_sha)
+    assert rec["status"] == "consumed" and rec["approved_at"] == 150.0
+    assert rec["consumed_at"] is None
 
 
 # ------------------- findings 14 + 9: record-bound challenge + never-raise
