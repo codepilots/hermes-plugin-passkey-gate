@@ -36,11 +36,32 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `1f51122`; 125 passed; fence/caps probe green |
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `8d9ec70`; 130 passed; grandchild-deadlock probe green after follow-up |
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `a7994bb`; 142 passed; 5-scenario rule probe green after follow-up |
-| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | 🔄 | delegated |
-| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ⬜ | |
+| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ✅ | commit `0fe4ec7`; 148 passed; independent collision/migration probe green |
+| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | 🔄 | delegated |
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D17 — finding 26 (LOW/MEDIUM): collision-resistant pin filenames ✅
+
+- **Delegated:** named pin paths now derive from the canonical owner label,
+  an uppercase owner fingerprint, and normalized P-256 PEM bytes. The owner
+  fingerprint makes lookup exact despite lossy slug collisions; the key
+  digest ensures different keys for one owner never share a destination.
+  Legacy exact `<slug>.pem` files remain readable. Multiple matching pins
+  fail closed with a ValueError naming candidates and instructing the
+  operator to keep exactly one. D8's validation-first P-256 and exclusive
+  `O_EXCL|O_NOFOLLOW`, mode 0600, fsync ceremony is preserved. Six tests
+  added; child reported RED first, then 148 passed.
+- **Parent verification:** full suite independently run with the repo venv:
+  148 passed. Independent probe
+  (`cache/scratch/probe_d17_parent.py`) generated real P-256 keys and
+  verified: two slug-colliding owners get distinct files and correct
+  attribution; an unpinned slug peer gets no key; same-owner different-key
+  ambiguity fails closed naming both files; legacy lookup works and
+  legacy/new coexistence fails closed; same-key overwrite is refused.
+  `git diff --check` and added-line security scans found no issues.
+- **Commit:** `0fe4ec7`.
 
 ### D16 — finding 25 (MEDIUM): tailscale exact-rule cleanup ✅ (after follow-up)
 
