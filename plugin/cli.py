@@ -506,6 +506,19 @@ def cmd_set(ctx, rest):
             netfetch.parse_gate_origin(value)
         except ValueError as exc:
             return f"origin rejected: {exc} — WebAuthn needs https (loopback http tolerated for dev)"
+    if key == "authority_patterns":
+        # finding 22: a pattern list is validated whole BEFORE anything else
+        # — before the weakening classification, so an invalid pattern can
+        # never hide behind (or trip) the finding-16 approval machinery —
+        # and refused whole: nothing from an unsound list is persisted.
+        problems = tools.validate_authority_patterns(value)
+        if problems:
+            return ("REFUSED: authority_patterns rejected — nothing was saved. Every "
+                    f"pattern must be a string, a regex that compiles, at most "
+                    f"{tools.MAX_PATTERN_LEN} chars, with at most "
+                    f"{tools.MAX_PATTERN_COUNT} patterns in the list:\n  - "
+                    + "\n  - ".join(problems)
+                    + "\nFix the pattern(s) and re-run the same command.")
     _ensure_data_dir()  # audit() needs the data dir; db() may never have run
     if key in SECURITY_KEYS:
         # finding 16: enforcement policy is operator-owned, not agent-mutable.

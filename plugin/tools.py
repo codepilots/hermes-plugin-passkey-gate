@@ -6,10 +6,13 @@ never raise, same JSON shape on error. The enforcement pieces
 in __init__.py and tested directly.
 """
 import json
+import logging
 import re
 import time
 
 from . import gate_core, local_verify, netfetch
+
+logger = logging.getLogger(__name__)
 
 # Where gate_core keeps its mutable module-level configuration
 
@@ -71,7 +74,14 @@ def gate_challenge(args: dict, **kwargs) -> str:
                             "{'tool': <name>, 'args': <the same args object>}: the human "
                             "approves, and the hook enforces, the bound tool call — "
                             "not the prose.")})
-                except re.error:
+                except (re.error, TypeError):
+                    # finding 22: same defense in depth as authority_matches —
+                    # a pattern smuggled past cmd_set's validation is skipped
+                    # as non-matching and logged; the handler answers, never
+                    # raises, whatever sits in the pattern list
+                    logger.warning("passkey-gate: authority pattern %r is unusable "
+                                   "(out-of-band edit past cmd_set's validation?) — "
+                                   "treating it as non-matching", pat)
                     continue
     try:
         c = gate_core.create_challenge(text, requester, tool_call,
@@ -228,19 +238,82 @@ def _fetch_health(base: str):
 
 
 # ---------------------------------------------------------------- enforcement
+# Finding 22: bounds on operator authority patterns. A pattern that cannot
+# compile, is not a string, or is enormous has no business in the match path:
+# it either throws at match time (fail-closed but opaque), silently matches
+# far more than intended, or widens the catastrophic-backtracking (ReDoS)
+# surface. Per the review this is deliberately a compile check plus caps,
+# NOT a ReDoS detector: nested-quantifier shapes (e.g. `(a+)+$`) are the
+# operator's own responsibility — the caps bound what a persisted pattern
+# can cost to compile and how much of it the hook ever echoes.
+MAX_PATTERN_LEN = 200        # chars per authority pattern
+MAX_PATTERN_COUNT = 100      # patterns in the list
+PATTERN_DISPLAY_CAP = 120    # chars of a pattern echoed into a block message
+
+
+def validate_authority_patterns(patterns):
+    """Finding 22: every reason an authority_patterns value must not be
+    persisted; an empty list means the value is sound. Runs at `set` time
+    BEFORE the finding-16 weakening classification — so an invalid pattern
+    can never hide behind (or trip) the approval machinery — and a bad list
+    is refused WHOLE: a list is only ever stored complete and sound."""
+    if not isinstance(patterns, (list, tuple)):
+        return [f"authority_patterns must be a list, got {type(patterns).__name__}"]
+    problems = []
+    if len(patterns) > MAX_PATTERN_COUNT:
+        problems.append(f"the list has {len(patterns)} patterns; the cap is {MAX_PATTERN_COUNT}")
+    for i, pat in enumerate(patterns):
+        if not isinstance(pat, str):
+            problems.append(f"patterns[{i}] is not a string but {type(pat).__name__}")
+            continue
+        if len(pat) > MAX_PATTERN_LEN:
+            problems.append(f"patterns[{i}] is {len(pat)} chars; the cap is {MAX_PATTERN_LEN}")
+            continue
+        try:
+            re.compile(pat)
+        except re.error as exc:
+            problems.append(f"patterns[{i}] does not compile as a regex: {exc}")
+    return problems
+
+
+def render_pattern(pat, index: int) -> str:
+    """Finding 22: the ONLY way a matched authority pattern may appear in a
+    block message — a stable rule ID (its position in the configured list,
+    the reference `hermes passkey-gate get` shows) plus the pattern itself
+    as length-capped, backtick-fenced DATA, never free prose. The pattern is
+    operator config, but config can be edited out of band, so the fence
+    cannot be broken open: backticks are escaped and control characters
+    collapsed, so nothing in the echo can read as an instruction aimed at
+    the agent, and the cap keeps a huge pattern from flooding the message."""
+    text = str(pat)
+    if len(text) > PATTERN_DISPLAY_CAP:
+        text = text[:PATTERN_DISPLAY_CAP] + "…"
+    text = (text.replace("\\", "\\\\").replace("`", "\\`")
+            .replace("\r", " ").replace("\n", " ").replace("\t", " "))
+    return f"rule authority_patterns[{index}]: `{text}`"
+
+
 def canonical_for_hook(tool_name: str, args) -> str:
     """The exact string the challenge binding hashes. Deterministic key order,
     compact separators — both the challenge minter and this hook call IT."""
     return json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
 
 
-def authority_matches(patterns, tool_name: str, args) -> re.Match | None:
+def authority_matches(patterns, tool_name: str, args) -> tuple[int, str] | None:
+    """First authority pattern matching this exact call, as (rule_index,
+    pattern) — the index is the stable rule ID the block message shows.
+    Finding 22: a pattern that reached config without cmd_set's set-time
+    validation (an out-of-band edit) must neither crash the hook nor turn
+    into an opaque block: it is skipped as non-matching and logged."""
     subject = tool_name + " " + canonical_for_hook(tool_name, args)
-    for pat in patterns or []:
+    for i, pat in enumerate(patterns or []):
         try:
             if re.search(pat, subject):
-                return pat
-        except re.error:
+                return i, pat
+        except (re.error, TypeError):
+            logger.warning("passkey-gate: authority pattern %r (rule %d) is unusable "
+                           "(out-of-band edit past cmd_set's validation?) — "
+                           "treating it as non-matching", pat, i)
             continue
     return None
 
@@ -259,12 +332,14 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
         matched = authority_matches(patterns, tool_name, args)
         if matched is None:
             return None
+        rule_index, matched_pattern = matched
         binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
         row = gate_core.pending_for_binding(binding)
         if row is None:
             return {"action": "block", "message": (
                 "Passkey gate: this tool call matches an authority pattern, but no "
-                f"approved passkey challenge covers it (pattern: {matched}). "
+                "approved passkey challenge covers it (matched "
+                f"{render_pattern(matched_pattern, rule_index)}). "
                 "Call gate_challenge first with action_text describing EXACTLY this "
                 f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
                 "send the human the approval URL, wait for their passkey signature, "

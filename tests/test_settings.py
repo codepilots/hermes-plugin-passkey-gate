@@ -116,3 +116,46 @@ def test_settings_spec_matches_manifest():
     manifest = yaml.safe_load(manifest_path.read_text())
     schema_keys = set((manifest.get("config_schema") or {}).keys())
     assert schema_keys == set(cli.SETTINGS_SPEC.keys())
+
+
+# ---------------- finding 22: authority_patterns are validated at set time
+
+def test_set_authority_patterns_invalid_regex_refused():
+    """Finding 22: an unparseable pattern must never reach config. cmd_set
+    compiles every pattern and refuses the WHOLE list — a broken regex
+    throws at match time (fail-closed but opaque), so nothing persists
+    around it. The refusal names the offending entry; nothing is written."""
+    ctx = FakeCtx()
+    bad_lists = [
+        '["^terminal ("]',         # unbalanced group — re.error at compile
+        '["[", "ssh git@100"]',    # one broken entry poisons the whole list
+        '["*"]',                   # nothing to repeat
+        '[42]',                    # not a string — the regex engine cannot take it
+        '["ssh git@100", 7]',      # one non-string poisons the whole list
+    ]
+    for bad in bad_lists:
+        out = _cli(ctx, f"set authority_patterns {bad}")
+        assert "REFUSED" in out, bad
+        assert "patterns[" in out, bad  # the refusal names the offending entry
+        assert ctx.store.get("authority_patterns") is None, bad  # nothing persisted
+    # the pattern that shared a poisoned list is fine on its own
+    out = _cli(ctx, "set authority_patterns [\"ssh git@100\"]")
+    assert ctx.store["authority_patterns"] == ["ssh git@100"]
+
+
+def test_set_authority_patterns_length_and_count_caps():
+    """Finding 22: caps bound the ReDoS surface of operator patterns — an
+    over-long pattern or an oversized list is refused whole (nothing
+    persisted); the boundary values themselves are allowed."""
+    ctx = FakeCtx()
+    out = _cli(ctx, f'set authority_patterns ["{"a" * 201}"]')
+    assert "REFUSED" in out and "200" in out
+    assert ctx.store.get("authority_patterns") is None  # refused -> not stored
+    out = _cli(ctx, f'set authority_patterns ["{"a" * 200}"]')
+    assert ctx.store["authority_patterns"] == ["a" * 200]  # exactly at the cap
+    ctx.store.clear()
+    out = _cli(ctx, f"set authority_patterns {json.dumps(['p%d' % i for i in range(101)])}")
+    assert "REFUSED" in out and "100" in out
+    assert ctx.store.get("authority_patterns") is None
+    out = _cli(ctx, f"set authority_patterns {json.dumps(['p%d' % i for i in range(100)])}")
+    assert len(ctx.store["authority_patterns"]) == 100  # exactly at the cap

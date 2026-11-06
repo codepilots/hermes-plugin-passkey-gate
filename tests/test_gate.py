@@ -1320,3 +1320,82 @@ def test_check_requires_the_assertions_counter_field(tmp_path, monkeypatch):
     truncated["assertion"]["authenticator_data"] = b64u(ad[:35])  # header + partial counter
     problems = local_verify.check(truncated, ACTION, ORIGIN, RP_ID, a.pem)
     assert "authenticator_data is missing or malformed" in problems, problems
+
+
+# ------------------- finding 22: authority_patterns are validated at set time
+
+def test_set_valid_authority_patterns_persist_and_enforce(monkeypatch):
+    """Finding 22's other face: set-time validation must not tighten the
+    legitimate path. A sound pattern set through cmd_set persists exactly as
+    given (a pattern ADDITION stays free — validation happens before the
+    weakening classification, never instead of it) and the hook enforces the
+    stored list as today: a matching call is blocked and pointed at
+    gate_challenge; a non-matching call stays untouched."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    out = cli.cmd_set(ctx, ["authority_patterns", '["^terminal .*rm "]'])
+    assert "REFUSED" not in out
+    assert ctx.settings["authority_patterns"] == ["^terminal .*rm "]
+    v = tools.hook_verdict("terminal", {"command": "rm -rf /tmp/scratch"},
+                           ctx.settings["authority_patterns"],
+                           ctx.settings["require_passkey"])
+    assert v is not None and v["action"] == "block" and "gate_challenge" in v["message"]
+    assert tools.hook_verdict("terminal", {"command": "ls"},
+                              ctx.settings["authority_patterns"], True) is None
+
+
+def test_hook_survives_patterns_smuggled_past_cmd_set(monkeypatch, caplog):
+    """Finding 22 defense in depth: the settings file is not written only by
+    cmd_set, so a pattern can reach config WITHOUT set-time validation (an
+    out-of-band edit). Such a pattern must not crash hook_verdict or turn
+    into an opaque fail-closed block: it is skipped as non-matching and
+    logged, while the sound patterns in the same list still enforce."""
+    import logging
+    from passkey_gate import cli
+    call = {"tool": "terminal", "args": {"command": "ssh git@100.64.0.10"}}
+    with caplog.at_level(logging.WARNING, logger="passkey_gate.tools"):
+        # a list of ONLY unusable patterns: nothing can match -> verdict None
+        for smuggled in (["^terminal ("],   # does not compile
+                         ["*"],              # does not compile
+                         [123, None]):       # not even strings
+            assert tools.hook_verdict(call["tool"], call["args"], smuggled, True) is None, smuggled
+        # broken + sound in one list: the sound pattern still enforces
+        v = tools.hook_verdict(call["tool"], call["args"],
+                               ["^terminal (", r"ssh git@100"], True)
+        assert v is not None and v["action"] == "block"
+        # every skipped pattern is logged so the operator can find the dead rule
+        assert any("non-matching" in r.getMessage() for r in caplog.records)
+    # the prose-check loop in gate_challenge is equally smuggle-proof: the
+    # handler answers JSON, it never raises, with a broken pattern in config
+    monkeypatch.setattr(cli, "_cfg_cache", {"require_passkey": True, "patterns": [123]})
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "sorrel"}))
+    assert out["ok"] is True  # broken pattern skipped; the challenge mints normally
+
+
+def test_block_message_carries_the_pattern_only_as_delimited_data():
+    """Finding 22: the matched pattern reaches the agent reading the block
+    message only as clearly delimited, escaped, length-capped DATA — a
+    stable rule ID (its position in the configured list) plus a
+    backtick-fenced pattern — never as free prose an out-of-band config
+    edit could aim at the agent."""
+    v = tools.hook_verdict("terminal", {"command": "ls"}, ["^terminal"], True)
+    assert v is not None and v["action"] == "block"
+    # the exact shape: stable rule ID, then the fenced pattern
+    assert "(matched rule authority_patterns[0]: `^terminal`)" in v["message"]
+    # the rule ID is the pattern's position in the configured list
+    v = tools.hook_verdict("terminal", {"command": "ls"},
+                           ["^nope", "^other", "^terminal"], True)
+    assert "(matched rule authority_patterns[2]: `^terminal`)" in v["message"]
+    # a pattern carrying backticks cannot break out of the fence
+    v = tools.hook_verdict("terminal", {"command": "rm `whoami` /tmp"},
+                           ["rm `whoami`"], True)
+    assert v["action"] == "block"
+    assert "rule authority_patterns[0]: `rm \\`whoami\\``" in v["message"]
+    # an oversized pattern is echoed capped, never in full: this one is
+    # legal at set time (199 chars <= MAX_PATTERN_LEN) but over the echo cap
+    long_pat = "^terminal(?:" + "a" * 184 + ")? "  # the big group is optional -> still matches
+    assert len(long_pat) <= tools.MAX_PATTERN_LEN and len(long_pat) > tools.PATTERN_DISPLAY_CAP
+    v = tools.hook_verdict("terminal", {"command": "ls"}, [long_pat], True)
+    assert v["action"] == "block"
+    cap = tools.PATTERN_DISPLAY_CAP
+    assert ("rule authority_patterns[0]: `" + long_pat[:cap] + "…`") in v["message"]
+    assert "a" * (cap + 10) not in v["message"]  # the untruncated tail never reaches the agent

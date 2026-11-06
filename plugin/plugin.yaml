@@ -52,7 +52,7 @@ config_schema:
     type: list
     default: []
     label: "Authority patterns"
-    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .*(rm |curl |scp |dd )') that trigger passkey enforcement when require_passkey is true."
+    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .*(rm |curl |scp |dd )') that trigger passkey enforcement when require_passkey is true. Validated when set: every pattern must be a string that compiles as a regex, at most 200 chars, at most 100 patterns; a list with any bad entry is refused whole."
   parent_gate_allowlist:
     type: list
     default: []
