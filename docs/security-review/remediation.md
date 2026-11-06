@@ -31,8 +31,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `32805bc`; 87 passed; DB-tamper probe green |
 | D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `7bfceee`; 102 passed; wholesale-rewrite probe green |
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `ac5c577`; 107 passed; stamp/migration probe green |
-| D12 | 11 — challenge creation rate limit | LOW | 🔄 | delegated |
-| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ⬜ | |
+| D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `6ade254`; 114 passed; race probe green |
+| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | 🔄 | delegated |
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ⬜ | |
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ⬜ | |
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ⬜ | |
@@ -41,6 +41,24 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D12 — finding 11 (LOW): challenge rate limiting ✅
+
+- **Delegated:** per-requester pending cap + global backstop, TOCTOU-safe via
+  the existing SQLite write serialization, quota freed by expiry/resolution.
+  Subagent completed in ~406s, TDD (7 new tests), left uncommitted.
+- **Verification (independent):** full suite re-run — 114 passed; diff review —
+  BEGIN IMMEDIATE makes the quota check and the insert one write transaction
+  (no overshoot window); only PENDING+unexpired rows hold quota;
+  ChallengeLimitError subclasses ValueError so every refusal path surfaces it;
+  rejections audited (challenge_rejected); HTTP handler answers 429. Probe
+  (`cache/scratch/probe_d12_caps.py`): 11th challenge for the same requester
+  refused; different requester unaffected; expired and decided challenges
+  each free a slot; 14-way concurrent mint race → exactly 10 succeed, DB
+  holds 10, no overshoot; global backstop trips with exactly 100 pending.
+- **Deviations accepted:** review named no numbers, so the suggested defaults
+  (10 / 100) landed as module constants.
+- **Commit:** `6ade254`.
 
 ### D11 — finding 10 (LOW): consumed_at column ✅
 
