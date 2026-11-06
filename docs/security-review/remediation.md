@@ -35,12 +35,41 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `c3e6261`; 120 passed; live-ceremony probe green |
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `1f51122`; 125 passed; fence/caps probe green |
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `8d9ec70`; 130 passed; grandchild-deadlock probe green after follow-up |
-| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | 🔄 | delegated |
-| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ⬜ | |
+| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `a7994bb`; 142 passed; 5-scenario rule probe green after follow-up |
+| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | 🔄 | delegated |
 | D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ⬜ | |
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D16 — finding 25 (MEDIUM): tailscale exact-rule cleanup ✅ (after follow-up)
+
+- **Delegated (D16):** exact per-gate rule identity (https port + mount +
+  proxy target, durably recorded), path-scoped removals verified against a
+  fresh serve map, keep-on-rerun, replace-by-handle, foreign ports
+  respected. Subagent reported fixed, 140 passed (10 new tests).
+- **Environment note:** the parent's full-suite run failed 1 test — the
+  pre-existing plugin.yaml drift test imports pyyaml, which was never in
+  requirements.txt and silently vanished with Hermes env churn. Installed
+  into the repo venv and declared in requirements.txt; unrelated to the diff.
+- **Parent verification caught one edge:** with a live recorded rule, an
+  explicit target_port held by a foreign service dropped OUR working rule
+  before refusing — the refusal was only zero-mutation without a prior rule.
+  Follow-up delegation (D16b) reproduced the scenario RED first (the log
+  showed the 8445 off issued before the refusal), then gated the replace
+  branch behind a claimability pre-check (claimed-minus-our-port
+  accounting). 2 new tests, 142 passed.
+- **Verification (independent):** full suite re-run — 142 passed; probe
+  (`cache/scratch/probe_d16_rules.py`, own from-scratch stateful fake
+  tailscale binary, foreign rules seeded on 443 + 8443, every invocation
+  logged): first expose sets exactly our rule on the first FREE port;
+  re-run KEEPS it with zero serve mutations; a different gate port replaces
+  ONLY our rule via the path-scoped off; foreign-held explicit target port
+  refused with zero mutations and the live rule + record intact (the
+  follow-up edge closed); total failure cleans only this run's partial
+  rules, clears the record, foreign rules byte-identical throughout; no
+  forbidden command shapes (--http=, bare off, reset) ever issued.
+- **Commits:** `a7994bb` (both rounds + requirements.txt).
 
 ### D15 — finding 24 (MEDIUM): cloudflared reader deadline ✅ (after follow-up)
 
