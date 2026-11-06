@@ -8,7 +8,9 @@ description: >
   tool call; only a human passkey can approve it; the agent then verifies the
   signed assertion locally against a pinned public key before acting.
   No agent ever holds a private key, approvals are single-use, and an
-  append-only hash-chained audit log makes any tampering detectable.
+  append-only hash-chained audit log detects edits and corruption within
+  the log; its head can be notarized to an operator-kept file outside the
+  gate data dir, which is what detects a wholesale rewrite.
 
 author: Autumn Thomson (codepilots)
 
@@ -56,6 +58,11 @@ config_schema:
     default: []
     label: "Parent gate allowlist"
     description: "Origins (scheme+host+port, exact match, no wildcards) of peer gates this gate may fetch to re-check a claimed parent approval. Empty (the default) disables ALL parent-gate fetches — a claimed prior approval then renders as 'unverified (parent gate not on allowlist)' and is never fetched."
+  audit_notary_path:
+    type: str
+    default: ""
+    label: "Audit notary file"
+    description: "Operator-controlled file (OUTSIDE the gate data dir) where 'hermes passkey-gate audit-notarize' appends the current audit-chain head hash, and which 'audit-verify' compares against the chain to detect a wholesale rewrite. The chain alone only detects partial edits — this external anchor is the tamper evidence. Non-security setting: it names where anchors are kept, not what the gate enforces."
 
 python_dependencies:
   - webauthn==1.11.*

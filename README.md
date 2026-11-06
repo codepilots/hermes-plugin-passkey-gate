@@ -28,7 +28,11 @@ URL to its human; the human reads the page and signs with **their passkey** —
 the agent never holds a private key, and there is no agent-side path to
 approval. Before acting, the agent verifies the signed assertion **locally**
 with real cryptography against a **pinned owner key**. An append-only,
-hash-chained audit log makes any tampering detectable.
+hash-chained audit log detects partial edits and accidental corruption; a
+wholesale rewrite of the log by someone with write access to the data
+directory can pass internal checks, so the CLI can also notarize the chain
+head to an operator-kept file outside that directory — that external
+anchor is what detects a full rewrite.
 
 This is not prompt-gated "I promise" authorization, and not a yes/no an
 agent could fake. It is enforcement-with-proof: a gate can't lie about what
@@ -101,10 +105,18 @@ hermes passkey-gate bootstrap
 #    signature against this exact public key
 hermes passkey-gate pin /path/to/pinned_autumn.pem
 
-# 4) Audit the log at any time
-hermes passkey-gate audit-verify
+# 4) Audit the log: internal chain check, plus — if you keep a notary file —
+#    comparison against the operator-anchored heads (the only real tamper
+#    evidence; see 'Honest limits')
+hermes passkey-gate audit-verify --notary /root/gate-notary.log
 
-# 5) Every setting has a CLI command too — typed parse, validate, persist,
+# 5) Periodically anchor the current chain head to that operator-owned file
+#    (must live OUTSIDE the gate data dir — run bare after setting
+#    audit_notary_path once, or with no path to just print the head to
+#    record somewhere the agent cannot write)
+hermes passkey-gate audit-notarize --to /root/gate-notary.log
+
+# 6) Every setting has a CLI command too — typed parse, validate, persist,
 #    and immediately re-applied to the running configuration:
 #      hermes passkey-gate set require_passkey true
 #      hermes passkey-gate set authority_patterns ^terminal .*(rm |curl )
@@ -131,7 +143,7 @@ existing credential works for the plugin without re-registering.
 |---|---|
 | `gate_challenge` | Mint an approval request; returns URL + sha256. action_text must read like an authority document (40 chars / 6 word floor, max 4000). Refuses cross-human asks without `why`, and refuses parent chains without an owner named per link — both are etiquette floors, and the error text teaches the correct next move. |
 | `gate_verify` | Poll (optional wait) then LOCALLY verify: binding, signature, UV/UP flags, origin, pinned key, max-age. `verified: true` and no problems = safe to act. |
-| `gate_status` | Gate reachable? credentials registered? owner key pinned? peer keys pinned? audit chain intact? Which exposure backends exist? |
+| `gate_status` | Gate reachable? credentials registered? owner key pinned? peer keys pinned? audit chain internally consistent (internal check only)? Which exposure backends exist? |
 
 ## When agents owned by different humans collaborate
 
@@ -191,6 +203,17 @@ and to push back on the human if it thinks the pattern is a false alarm.
 
 ## Honest limits
 
+- The audit log is a hash chain **inside the gate data dir**: it detects
+  partial edits and accidental corruption, but anyone with write access to
+  that directory can rewrite the whole log and recompute a self-consistent
+  chain that passes `audit-verify`'s internal check. Internal consistency is
+  **not** tamper evidence against a full rewrite. Periodically run
+  `hermes passkey-gate audit-notarize --to <path>` (operator-owned file
+  outside that directory — or set `audit_notary_path` once); then
+  `audit-verify --notary <path>` compares the chain against the anchored
+  heads and reports INTACT AND NOTARIZED / GROWN SINCE NOTARIZATION /
+  DIVERGED (a notarized head no longer matching the chain — evidence of
+  rewriting or truncation).
 - The passkey flow protects what the human *reads on the approval page* —
   action_text quality is on the agent, hence the specificity floor. Garbage
   in, garbage signed.

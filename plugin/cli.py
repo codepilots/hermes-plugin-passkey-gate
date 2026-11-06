@@ -21,12 +21,30 @@
                      server-derived phrase; strengthening is free; both are
                      audited (finding 16).
   get                show all settings
-  audit-verify       check the append-only audit chain intact
+  audit-verify [--notary <path>]
+                     (1) check the internal hash chain, then (2) if a notary
+                     file exists (--notary, or the audit_notary_path setting),
+                     compare its recorded heads against the chain. Internal
+                     consistency is NOT tamper evidence: an attacker with write
+                     access to the gate data dir can rewrite the whole log and
+                     recompute a self-consistent chain (finding 8). The notary
+                     file — operator-owned, OUTSIDE the data dir — is the
+                     external anchor that detects a wholesale rewrite
+                     (INTACT AND NOTARIZED / GROWN SINCE NOTARIZATION /
+                     DIVERGED=rewritten).
+  audit-notarize [--to <path>]
+                     record the current chain head out of the log's reach:
+                     with --to (or a configured audit_notary_path) append
+                     '<ISO timestamp> <head hash>' to that operator-controlled
+                     file (must live outside the gate data dir); with neither,
+                     print the head with instructions to store it out of band
+                     (password manager, a note on another host).
 """
 import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import gate_core, expose, local_verify, netfetch, tools
@@ -34,7 +52,7 @@ from . import gate_core, expose, local_verify, netfetch, tools
 logger = logging.getLogger(__name__)
 
 USAGE = ("usage: hermes passkey-gate "
-         "<serve|bootstrap|expose|pin|show|set|get|status|audit-verify> [args]")
+         "<serve|bootstrap|expose|pin|show|set|get|status|audit-verify|audit-notarize> [args]")
 
 # keys exactly as declared in plugin.yaml config_schema (drift-tested)
 SETTINGS_SPEC = {
@@ -45,6 +63,7 @@ SETTINGS_SPEC = {
     "require_passkey": {"type": "bool"},
     "authority_patterns": {"type": "list"},
     "parent_gate_allowlist": {"type": "list"},
+    "audit_notary_path": {"type": "str"},
 }
 
 DEFAULTS = {
@@ -55,6 +74,7 @@ DEFAULTS = {
     "require_passkey": False,
     "authority_patterns": [],
     "parent_gate_allowlist": [],
+    "audit_notary_path": "",
 }
 
 # finding 16: the settings that define what the gate enforces. An agent with
@@ -586,9 +606,185 @@ def cmd_status(ctx, rest):
     return json.dumps(out, indent=2)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _notary_file(ctx, override):
+    """Resolve the operator's notary file: explicit flag wins, else the
+    configured audit_notary_path (non-security key — it only names where
+    anchors are kept, not what the gate enforces), else None."""
+    if override:
+        return Path(override).expanduser()
+    if ctx is not None:
+        configured = (ctx.get_config("audit_notary_path", default="") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+    return None
+
+
+def _read_notary(p):
+    """Parse the operator's notary file: lines of '<ISO timestamp> <head
+    hash>' as written by audit-notarize (or pasted by hand from its output).
+    Returns (records, problem); records is [(ts, head), ...]."""
+    records = []
+    for i, line in enumerate(p.read_text().splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if (len(parts) != 2 or len(parts[1]) != 64
+                or set(parts[1]) > set("0123456789abcdef")):
+            return None, (f"notary file line {i + 1} is malformed "
+                          "(expected '<timestamp> <head hash>')")
+        records.append((parts[0], parts[1]))
+    return records, None
+
+
+def _notary_verdict(records):
+    """Finding 8: compare notarized heads against the chain checkpoints.
+    Notarizations happen in chronological order against an append-only log,
+    so each notarized head must be a chain checkpoint at or after the
+    previous match (a prefix of the chain's history, not scattered). Returns
+    (verdict, detail), verdict in {'intact', 'grown', 'diverged'}."""
+    ok, msg, heads = gate_core.audit_checkpoints()
+    pos = 0
+    last = None
+    for ts, head in records:
+        try:
+            idx = heads.index(head, pos)
+        except ValueError:
+            if head in heads:
+                return "diverged", (
+                    f"notarized head {head[:12]}… ({ts}) matches the chain only "
+                    "BEFORE the previous notarized position — the log was "
+                    "rewritten or reordered")
+            return "diverged", (
+                f"notarized head {head[:12]}… ({ts}) is not a checkpoint of "
+                "the current chain — the log was truncated or wholesale-"
+                "rewritten after it was recorded")
+        last = (ts, head, idx)
+        pos = idx
+    if last is None:  # empty notary file — the caller reports this plainly
+        return "diverged", "the notary file contains no records"
+    ts, head, idx = last
+    new = len(heads) - (idx + 1)
+    if new:
+        return "grown", (
+            f"{new} new audit entries since the last notarized head "
+            f"{head[:12]}… ({ts}) — normal for an append-only log; notarize "
+            "again to re-anchor the new head")
+    return "intact", (
+        f"the last notarized head {head[:12]}… ({ts}) is the current chain "
+        f"head; 0 new entries since notarization")
+
+
 def cmd_audit_verify(ctx, rest):
+    """(1) internal chain check — semantics unchanged, backward-compatible
+    OK/BROKEN prefix — then (2) the notary comparison when an anchor file
+    exists. Finding 8: the internal check alone is NOT tamper evidence; only
+    the external anchor detects a wholesale rewrite."""
+    args = list(rest or [])
+    notary = None
+    if "--notary" in args:
+        i = args.index("--notary")
+        if i + 1 >= len(args):
+            return "error: --notary needs a path"
+        notary, args = args[i + 1], args[:i] + args[i + 2:]
+    if args:
+        return "error: unknown arguments: " + " ".join(args)
     ok, msg = gate_core.audit_verify()
-    return ("OK " if ok else "BROKEN ") + msg
+    base = ("OK " if ok else "BROKEN ") + msg
+    p = _notary_file(ctx, notary)
+    if p is None:
+        return (base + "\n"
+                "internal chain check only — no notary file, so this is NOT "
+                "evidence against a wholesale rewrite of the log (finding 8): "
+                "anyone with write access to the gate data dir can recompute "
+                "a self-consistent chain. Anchor the head out of band with "
+                "`hermes passkey-gate audit-notarize [--to <path>]`, then "
+                "verify with `audit-verify --notary <path>`.")
+    if not ok:
+        return base + "\nnotary comparison skipped — the internal chain is already broken"
+    if not p.exists():
+        return (base + "\n"
+                f"internal chain check only — notary file {p} does not exist, "
+                "so there is no external evidence against a wholesale rewrite. "
+                f"Create the anchor with `hermes passkey-gate audit-notarize --to {p}`.")
+    records, problem = _read_notary(p)
+    if problem:
+        return ("DIVERGED (notary unusable): " + problem + f" — treat {p} as "
+                "compromised or fix it by hand; the internal chain check "
+                "alone is not tamper evidence")
+    if not records:
+        return (base + "\n"
+                f"notary file {p} is empty — no external evidence recorded "
+                f"yet; run `audit-notarize --to {p}` to anchor the current head")
+    verdict, detail = _notary_verdict(records)
+    if verdict == "intact":
+        return base + "\nINTACT AND NOTARIZED — " + detail
+    if verdict == "grown":
+        return base + "\nGROWN SINCE NOTARIZATION — " + detail
+    return ("DIVERGED — the internal chain is self-consistent BUT " + detail
+            + ". Internal consistency alone must not be trusted here (finding 8)")
+
+
+def cmd_audit_notarize(ctx, rest):
+    """Finding 8 operator ceremony (same philosophy as bootstrap/pin: trust
+    lives outside the agent's write surface): record the current chain head
+    where the log's attacker cannot also rewrite it."""
+    args = list(rest or [])
+    to = None
+    if "--to" in args:
+        i = args.index("--to")
+        if i + 1 >= len(args):
+            return "error: --to needs a path"
+        to, args = args[i + 1], args[:i] + args[i + 2:]
+    if args:
+        return "error: unknown arguments: " + " ".join(args)
+    head = gate_core.audit_head()
+    if not head:
+        return "nothing to notarize: the audit log is empty"
+    p = _notary_file(ctx, to)
+    if p is None:
+        stamp = _utc_now()
+        return (f"audit head to record OUT OF BAND — the hash chain lives in "
+                f"the gate data dir, where an attacker with write access can "
+                f"rewrite the whole log and recompute a self-consistent chain "
+                f"(finding 8); its head is only evidence if recorded outside "
+                f"that directory:\n\n  {stamp}  {head}\n\n"
+                "store this line where the agent cannot write it (a note in "
+                "your password manager, a file on another host, a signed "
+                "message to yourself). To have the gate append it to a notary "
+                "file for you: `hermes passkey-gate audit-notarize --to "
+                "<path>` (or set `audit_notary_path` once and run it bare).")
+    # an anchor kept inside the log's own directory is no anchor at all
+    data_dir = gate_core.data_dir().resolve()
+    resolved = p.resolve()
+    if resolved == data_dir or data_dir in resolved.parents:
+        return (f"refusing: the notary file must live OUTSIDE the gate data "
+                f"dir ({data_dir}) — an attacker who can rewrite the audit "
+                f"log could rewrite a notary kept beside it")
+    if not p.parent.exists():
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"error: cannot create notary directory {p.parent}: {exc}"
+    stamp = _utc_now()
+    try:
+        # O_APPEND keeps concurrent notarizations from clobbering each other;
+        # O_NOFOLLOW refuses a symlink planted at the anchor path
+        fd = os.open(p, os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        return f"error: cannot open notary file {p} safely: {exc}"
+    with os.fdopen(fd, "a") as f:
+        f.write(f"{stamp} {head}\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return (f"notarized: appended '{stamp} {head}' to {p}\n"
+            "keep that file operator-owned and outside the agent's write "
+            f"reach — it is the external anchor `audit-verify --notary {p}` "
+            "checks against a wholesale rewrite of the audit log")
 
 
 _COMMANDS = {
@@ -602,6 +798,7 @@ _COMMANDS = {
     "show-settings": cmd_show_settings,
     "status": cmd_status,
     "audit-verify": cmd_audit_verify,
+    "audit-notarize": cmd_audit_notarize,
 }
 
 

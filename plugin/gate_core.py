@@ -161,8 +161,11 @@ def db():
 
 
 def audit(event, **fields):
-    """Append to a hash-chained JSONL log. Each line commits to the previous line's hash,
-    so any edit or deletion breaks the chain (audit-verify)."""
+    """Append to a hash-chained JSONL log. Each line commits to the previous
+    line's hash, so an edit or deletion WITHIN the file breaks the chain.
+    Finding 8: a wholesale rewrite of the whole file can recompute a
+    self-consistent chain — the head must be anchored out of band
+    (`hermes passkey-gate audit-notarize`) to make that detectable."""
     path = data_dir() / "audit.jsonl"
     with _lock:
         prev, seq = "0" * 64, 0
@@ -190,19 +193,35 @@ def audit_head():
     return json.loads(lines[-1])["hash"] if lines else None
 
 
-def audit_verify():
+def audit_checkpoints():
+    """Read-only helper for the finding-8 notarization ceremony: walk the
+    log exactly as audit_verify() does and return (ok, msg, heads), where
+    heads[i] is the running chain hash after entry i (heads[-1] is the
+    current head). The chain computation is unchanged — this only re-derives
+    the same hashes so an operator-kept notary can be compared against them."""
     path = data_dir() / "audit.jsonl"
     prev = "0" * 64
-    n = 0
+    heads = []
     for i, line in enumerate(path.read_text().splitlines() if path.exists() else []):
         rec = json.loads(line)
         h = rec.pop("hash")
         if rec["seq"] != i or rec["prev"] != prev:
-            return False, f"chain broken at line {i}"
+            return False, f"chain broken at line {i}", heads
         if hashlib.sha256(json.dumps(rec, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != h:
-            return False, f"hash mismatch at line {i}"
-        prev, n = h, n + 1
-    return True, f"{n} records, head {prev}"
+            return False, f"hash mismatch at line {i}", heads
+        prev = h
+        heads.append(h)
+    return True, f"{len(heads)} records, head {prev}", heads
+
+
+def audit_verify():
+    """Internal consistency of the chain ONLY (partial edits, deletions,
+    accidental corruption). This is NOT tamper evidence against an attacker
+    who can rewrite the whole log — they can recompute every hash. Evidence
+    against a wholesale rewrite requires an external anchor of the head:
+    `hermes passkey-gate audit-notarize` (finding 8)."""
+    ok, msg, _ = audit_checkpoints()
+    return ok, msg
 
 
 def sha256_hex(s):
