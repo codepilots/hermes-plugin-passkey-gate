@@ -37,12 +37,37 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `8d9ec70`; 130 passed; grandchild-deadlock probe green after follow-up |
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `a7994bb`; 142 passed; 5-scenario rule probe green after follow-up |
 | D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ✅ | commit `0fe4ec7`; 148 passed; independent collision/migration probe green |
-| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | 🔄 | delegated |
-| D19 | 28 — numeric setting range validation | LOW | ⬜ | |
+| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ✅ partial | commit `e924660`; 149 passed; minimized-record probe green; authenticated channel remains deployment residual |
+| D19 | 28 — numeric setting range validation | LOW | 🔄 | delegated |
 
 ## Log
 
+### D18 — finding 27 (LOW/MEDIUM): minimize bearer-readable verify records ✅ partial
+
+- **Delegated:** public approved `/verify` records now retain only the
+  action/cryptographic fields required by `verify_parent_approval()` and
+  `local_verify.check()`: status, challenge identity/hash, action text,
+  approval time, origin/RP, recorded challenge, assertion, and credential
+  public key. Removed binding hash, canonical tool call, requester, creation
+  time, and audit head. `gate_verify` recovers local binding metadata from
+  the local database, preserving its dispatch-binding contract. Parent
+  reported 149 passed.
+- **Parent verification:** full suite independently re-run — 149 passed;
+  `git diff --check` and added-line security scans clean. Independent probe
+  (`cache/scratch/probe_d18_parent.py`) fabricated an approved DB row and
+  verified the minimized response contains every required crypto/action field,
+  omits all removed metadata, and still returns only `{"status": "denied"}`
+  for a mismatched action hash.
+- **Residual (honest partial):** `/a/<id>` remains bearer-readable, and the
+  retained action text and cryptographic evidence remain bearer-readable to
+  anyone holding the high-entropy URL inputs. The plugin has no authenticated
+  operator channel from which to issue a safe viewing token; deployment must
+  provide an authenticated broker/session or equivalent short-lived,
+  authenticated token issuance. This is documented in `threat-model.md`.
+- **Commit:** `e924660`.
+
 ### D17 — finding 26 (LOW/MEDIUM): collision-resistant pin filenames ✅
+
 
 - **Delegated:** named pin paths now derive from the canonical owner label,
   an uppercase owner fingerprint, and normalized P-256 PEM bytes. The owner
