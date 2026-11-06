@@ -28,8 +28,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `89d2264`; 66 passed; fabricated-record probe green |
 | D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `a5a0cf9`; 78 passed; 19/19 exploit probe green |
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `a763ad6`; 84 passed; pin probe green |
-| D9 | 2+20+15 — threat model, bootstrap/registration hardening, dispatch limitation | CRITICAL (arch) | 🔄 | delegated |
-| D10 | 8 — audit chain: honest claim + external head notarization | MEDIUM | ⬜ | |
+| D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `32805bc`; 87 passed; DB-tamper probe green |
+| D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | 🔄 | delegated |
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ⬜ | |
 | D12 | 11 — challenge creation rate limit | LOW | ⬜ | |
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ⬜ | |
@@ -41,6 +41,32 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D9 — findings 2 (CRITICAL arch) + 20 (MEDIUM) + 15 (HIGH): threat model ✅ (honest partial)
+
+- **Delegated:** write the residual-risk threat model for findings 2/20/15
+  with only feasible code mitigations (dispatch-binding contract, no
+  auto-registration invariant), explicitly NOT claiming a local plugin defends
+  against an agent-controlled process or the final executor. Subagent
+  completed in ~170s, self-reported partial, TDD (3 new tests), left
+  uncommitted.
+- **Verification (independent):** full suite re-run — 87 passed; diff review —
+  the hook re-derives the stored canonical payload and checks it against BOTH
+  the hook call and the indexed binding before consuming; gate_verify exposes
+  approved_tool_call + dispatch_binding and refuses a differing requested
+  tool_call; threat-model doc names operator-owned trust anchors, refuses to
+  invent an agent-vs-human context signal, and lists concrete deployment
+  controls; probe (`cache/scratch/probe_d9_dispatch_fresh.py`, fresh row per
+  scenario so each block is attributable): control dispatches and consumes;
+  payload/index mismatch refused BY THE CONSISTENCY CHECK (message confirmed);
+  a fully self-consistent re-bound hostile payload refused.
+- **Residual, accepted deliberately:** findings 2 and 20 are deployment
+  requirements (root-owned install, operator-owned pins, no agent-reachable
+  bootstrap/pin, out-of-band registration); finding 15 remains unless the
+  final executor enforces the same canonical binding hash or a separate
+  broker owns that boundary. The threat-model doc records this — no "fully
+  fixed" claim for an architectural finding.
+- **Commit:** `32805bc`.
 
 ### D8 — findings 18 (HIGH) + 12 (MEDIUM): pin ceremony ✅
 
