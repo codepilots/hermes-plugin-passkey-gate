@@ -126,6 +126,13 @@ MAX_ACTION_CHARS = 4000
 USER_ID = b"passkey-gate-user"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# Finding 11: challenge creation is rate-limited so an agent cannot flood
+# the human with approval pages (and the DB with challenge rows + audit
+# lines). A cap bites only while the count of PENDING, UNEXPIRED
+# challenges is at the limit — a challenge that expires or gets decided
+# frees its slot immediately, so throttling never outlives the TTL.
+MAX_PENDING_CHALLENGES_PER_REQUESTER = 10
+MAX_PENDING_CHALLENGES_TOTAL = 100
 
 _lock = threading.Lock()
 
@@ -159,6 +166,16 @@ def db():
         except sqlite3.OperationalError:
             pass  # column exists (fresh CREATE) or another writer just added it
     return c
+
+
+def _safe_rollback(c):
+    """Undo an unfinished BEGIN IMMEDIATE (refusal, unexpected error). A
+    transaction that never opened or already committed is not an error
+    here — the original exception is what matters."""
+    try:
+        c.execute("ROLLBACK")
+    except sqlite3.OperationalError:
+        pass
 
 
 def audit(event, **fields):
@@ -264,6 +281,14 @@ class GateResult(dict):
     pass
 
 
+class ChallengeLimitError(ValueError):
+    """Finding 11: this requester's (or the whole gate's) budget of pending,
+    unexpired challenges is exhausted — a deliberate refusal, never a
+    crash. Subclasses ValueError so every existing refusal path (the
+    gate_challenge tool handler, the CLI, the HTTP handler) already
+    surfaces it as a clean error message."""
+
+
 def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
                      requester_owner: str | None = None, why: str | None = None,
                      parent_approval: dict | None = None) -> GateResult:
@@ -279,6 +304,11 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     challenge_id, action_sha256, owner}) records a prior approval already
     signed on another human's gate — rendered on the page with the local
     verification verdict, so chains of sign-off stay checkable.
+
+    Finding 11: minting is rate-limited — at most
+    MAX_PENDING_CHALLENGES_PER_REQUESTER pending, unexpired challenges per
+    requester, MAX_PENDING_CHALLENGES_TOTAL across the whole gate; over a
+    cap this raises ChallengeLimitError instead of inserting.
     """
     if not isinstance(action_text, str) or not isinstance(requester, str):
         raise ValueError("action_text and requester required")
@@ -331,12 +361,46 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                                               allowlist=parent_allowlist(),
                                               child_action_sha256=sha)
           if parent else None)
-    db().execute(
-        "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
-        "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"
-        " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
-        (cid, text, sha, binding, binding_json, requester, owner or None, why or None,
-         parent_json, pv, chal, now, now + challenge_ttl()))
+    c = db()
+    try:
+        # Finding 11: the quota check and the insert are ONE write
+        # transaction — BEGIN IMMEDIATE takes the write lock up front, so
+        # concurrent minters cannot each see room for one more and
+        # overshoot the caps (SQLite serializes this the same way it
+        # serializes the consume() claim; no TOCTOU window). Only pending,
+        # unexpired rows hold quota: an expired or decided challenge does
+        # not count toward either cap.
+        c.execute("BEGIN IMMEDIATE")
+        mine = c.execute("select count(*) from challenges where requester=?"
+                         " and status='pending' and expires_at>=?", (requester, now)).fetchone()[0]
+        if mine >= MAX_PENDING_CHALLENGES_PER_REQUESTER:
+            raise ChallengeLimitError(
+                f"challenge limit reached for requester {requester!r}: {mine} pending "
+                f"challenges are already open (max {MAX_PENDING_CHALLENGES_PER_REQUESTER}). "
+                "The human must approve or deny one, or it must expire, before "
+                "another can be minted.")
+        total = c.execute("select count(*) from challenges where status='pending'"
+                          " and expires_at>=?", (now,)).fetchone()[0]
+        if total >= MAX_PENDING_CHALLENGES_TOTAL:
+            raise ChallengeLimitError(
+                f"challenge limit reached: {total} pending challenges are open across "
+                f"all requesters (max {MAX_PENDING_CHALLENGES_TOTAL}). The gate will "
+                "not bury the human in approval pages; resolve or let pending "
+                "challenges expire first.")
+        c.execute(
+            "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
+            "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"
+            " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
+            (cid, text, sha, binding, binding_json, requester, owner or None, why or None,
+             parent_json, pv, chal, now, now + challenge_ttl()))
+        c.execute("COMMIT")
+    except ChallengeLimitError as exc:
+        _safe_rollback(c)
+        audit("challenge_rejected", requester=requester, reason=str(exc))
+        raise
+    except BaseException:
+        _safe_rollback(c)
+        raise
     audit("challenge_created", challenge_id=cid, action_sha256=sha,
           binding_sha256=binding, requester=requester, requester_owner=owner or None,
           why=why or None, parent_challenge_id=(parent or {}).get("challenge_id"),
@@ -741,6 +805,9 @@ class Handler(BaseHTTPRequestHandler):
                 if verb == "deny":
                     r = deny(cid)
                     return self._send(200, r)
+        except ChallengeLimitError as exc:  # finding 11: throttled, same error shape, 429
+            audit("error", path=p.split("/")[1] if "/" in p else p, error="ChallengeLimitError")
+            return self._send(429, {"error": str(exc)})
         except ValueError as exc:  # input problems the caller can fix (422, not 400)
             audit("error", path=p.split("/")[1] if "/" in p else p, error=type(exc).__name__)
             return self._send(422, {"error": str(exc)})
