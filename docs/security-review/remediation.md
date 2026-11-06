@@ -32,8 +32,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `7bfceee`; 102 passed; wholesale-rewrite probe green |
 | D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `ac5c577`; 107 passed; stamp/migration probe green |
 | D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `6ade254`; 114 passed; race probe green |
-| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | 🔄 | delegated |
-| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ⬜ | |
+| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `c3e6261`; 120 passed; live-ceremony probe green |
+| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | 🔄 | delegated |
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ⬜ | |
 | D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ⬜ | |
 | D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ⬜ | |
@@ -41,6 +41,32 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D13 — findings 21 (MEDIUM) + 13 (MEDIUM): sign-count clone detection ✅
+
+- **Delegated:** validate WebAuthn sign counters on approval (refuse
+  counter ≤ stored as clone evidence, atomic update on success,
+  counterless 0-after-0 allowed with documented residual), store the
+  attestation's initial counter at registration. Subagent completed in
+  ~422s, TDD (6 new tests + SoftAuthenticator extended with initial_count
+  and chosen-count), left uncommitted.
+- **Verification (independent):** full suite re-run — 120 passed (three
+  consecutive clean runs by the child, one run by the parent); diff review —
+  named clone guard before the crypto call (failure gets its true name), the
+  stored counter advances in ONE conditional UPDATE (sign_count=? WHERE
+  sign_count<?) before the challenge flip, registration stores v.sign_count,
+  local_verify requires the full 37-byte authData header and states the
+  offline limitation plainly. Probe
+  (`cache/scratch/probe_d13_counter.py`, real HTTP ceremonies on a live
+  gate): registration baseline 5 stored; a presented counter BELOW the
+  baseline refused as clone evidence; genuine advance to 6 accepted and
+  stored; same-counter replay and older-counter signatures refused by name;
+  counterless 0-after-0 approved twice; two concurrent approvals presenting
+  counter 7 — exactly one approved, the loser refused as clone, stored
+  counter atomically 7.
+- **Deviations:** none material (guard gives the crypto failure its name
+  first; the library call enforces the same rule generically).
+- **Commit:** `c3e6261`.
 
 ### D12 — finding 11 (LOW): challenge rate limiting ✅
 
