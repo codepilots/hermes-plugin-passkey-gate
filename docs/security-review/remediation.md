@@ -30,8 +30,8 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `a763ad6`; 84 passed; pin probe green |
 | D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `32805bc`; 87 passed; DB-tamper probe green |
 | D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `7bfceee`; 102 passed; wholesale-rewrite probe green |
-| D11 | 10 — consumed_at column, preserve decided_at | LOW | 🔄 | delegated |
-| D12 | 11 — challenge creation rate limit | LOW | ⬜ | |
+| D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `ac5c577`; 107 passed; stamp/migration probe green |
+| D12 | 11 — challenge creation rate limit | LOW | 🔄 | delegated |
 | D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ⬜ | |
 | D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ⬜ | |
 | D15 | 24 — cloudflared reader deadline | MEDIUM | ⬜ | |
@@ -41,6 +41,26 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D19 | 28 — numeric setting range validation | LOW | ⬜ | |
 
 ## Log
+
+### D11 — finding 10 (LOW): consumed_at column ✅
+
+- **Delegated:** add a consumed_at REAL column (existing alter-table loop),
+  stamp it in the SAME atomic conditional UPDATE that claims the row, keep
+  decided_at as the human's approval time, migrate old DBs, surface both
+  stamps in consumed records. Subagent completed in ~168s, TDD (5 new tests),
+  left uncommitted.
+- **Verification (independent):** full suite re-run — 107 passed; diff review —
+  the old code really did clobber decided_at at consume (`set
+  status='consumed', decided_at=?`); now `set status='consumed',
+  consumed_at=?` with the WHERE clause byte-identical and the single-statement
+  claim intact; consumed records expose approved_at + consumed_at and no
+  signature material; gate_verify stops waiting on consumed. Probe
+  (`cache/scratch/probe_d11_stamps.py`): old-schema DB migrates in place;
+  unconsumed row consumed_at NULL; consume stamps consumed_at while decided_at
+  stays exactly the approval time; second claim refused (D2 atomicity
+  untouched); record exposes both stamps.
+- **Deviations:** none material (migration loop now carries column types).
+- **Commit:** `ac5c577`.
 
 ### D10 — finding 8 (MEDIUM): audit chain honest claims + head notarization ✅
 
