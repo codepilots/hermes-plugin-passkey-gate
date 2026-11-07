@@ -52,8 +52,8 @@ are hardening. Full report frozen at
 
 | Item | Finding | Severity | Status | Evidence |
 |---|---|---|---|---|
-| F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | 🔄 | live 3×-replay repro confirmed by parent; probe `probe_freshreview_replay.py` |
-| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | ⬜ after F1 | re-pin needs the final release commit |
+| F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | ✅ | commit `6373ff4`; 159 passed; reviewer probe re-run + parent 4-process/phrase/expiry probe green |
+| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | 🔄 | re-pin needs the final release commit |
 | F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ⬜ | organic 2-process repro, chain broken |
 | F4 | DNS-rebinding TOCTOU: SSRF check resolves once, fetch dials again | LOW | ⬜ | stateful getaddrinfo fake, loopback dial demonstrated |
 | F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ⬜ | 30 wedged threads leaked |
@@ -65,6 +65,29 @@ are hardening. Full report frozen at
 | C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | with F2 | stale version |
 
 ## Log
+
+### F1 — fresh-review HIGH: gate-weakening approvals single-use ✅
+
+- **Delegated:** cmd_set atomically claims the approval at apply time via a
+  new `gate_core.consume_approval(cid, action_sha)` — one conditional UPDATE
+  (id + status=approved + exact-phrase sha + unexpired) flipping the row to
+  terminal consumed with a `consumed_at` stamp, same lock discipline as
+  consume(). Honest deviation: consume() could not be reused — weakening
+  approvals are minted text-only (binding_sha256 NULL), which its binding
+  match can never claim. Replays/race-losers get a single-use refusal naming
+  the spent cid; the verify endpoint reports consumed; config_changed audits
+  the consumed cid and the claim emits challenge_consumed. TDD RED first
+  (consumption, reviewer's replay scenario, 2-thread race); 4 new tests.
+- **Parent verification:** suite 159 passed (own run); reviewer's live probe
+  re-run — "replay NOT confirmed (approval was burned)", both replays
+  refused, re-arm survives. Independent probe
+  (`cache/scratch/probe_f1_parent.py`, direct DB-level attack on the claim
+  mechanism): single claim then refusal; a mismatched-phrase claim is
+  refused WITHOUT burning the approval; approved-but-expired is
+  unclaimable; a real 4-process race produced exactly one WIN with the
+  row terminal; exactly one challenge_consumed audit record per burned
+  approval and none for refusals.
+- **Commit:** `6373ff4`.
 
 ### Publication prep — v0.5.0 ✅ (post-campaign, user-approved closing task)
 
