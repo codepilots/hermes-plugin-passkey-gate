@@ -1005,6 +1005,161 @@ def test_set_weakening_applied_with_passkey_approval(monkeypatch, base, autumn):
     assert cc[-1]["old"] is True and cc[-1]["new"] is False
 
 
+def test_set_weakening_consumes_the_approval_challenge(monkeypatch, base, autumn):
+    """F1 (fresh review, live-reproduced twice with a real software
+    authenticator): applying a gate-weakening change under --approve must
+    burn the approval challenge in the same atomic conditional-UPDATE
+    discipline as gate_core.consume() — the challenge is terminal afterwards
+    (status consumed, consumed_at stamped), the verify endpoint answers
+    'consumed' instead of still handing out an approved record, and the
+    config_changed audit entry names the challenge id that was spent."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
+    assert "require_passkey = false" in out, out
+    # the challenge is spent: terminal status with BOTH stamps (decided_at
+    # is the human's approval time, consumed_at is this application's claim)
+    row = gate_core.db().execute("select status, consumed_at, decided_at from challenges"
+                                 " where id=?", (c["challenge_id"],)).fetchone()
+    assert row["status"] == "consumed", "challenge must be terminal after apply"
+    assert row["consumed_at"] is not None and row["decided_at"] is not None
+    s, rec = call(base, f"/verify/{c['challenge_id']}?action_sha256={c['action_sha256']}")
+    assert rec["status"] == "consumed", "verify endpoint must not report approved"
+    assert rec["consumed_at"] and rec["approved_at"]
+    # the burn is in the audit story: challenge_consumed for the claim, and
+    # config_changed records the challenge id it consumed
+    assert [r for r in _audit_records("challenge_consumed")
+            if r.get("challenge_id") == c["challenge_id"]], "challenge_consumed missing"
+    cc = _config_audit("require_passkey")
+    assert cc and cc[-1]["approved"] == c["challenge_id"]
+    assert cc[-1].get("consumed") == c["challenge_id"], \
+        "config_changed must name the consumed challenge id"
+
+
+def test_set_weakening_replay_of_used_approval_refused(monkeypatch, base, autumn):
+    """The reviewer's live-reproduced scenario (probe_freshreview_replay.py):
+    the human signs ONCE, cmd_set applies, the operator re-arms the gate,
+    and the agent replays the SAME --approve challenge id. Pre-fix that
+    disarmed the gate twice more within challenge_ttl with no new
+    signature; post-fix every replay is refused with the single-use rule,
+    the setting is untouched, and no phantom config_changed is audited."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    cid = c["challenge_id"]
+    # 1. the one legitimate application — the human signed exactly this
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", cid])
+    assert "require_passkey = false" in out, out
+    # 2. the operator re-arms (the free, approval-free direction)
+    out = cli.cmd_set(ctx, ["require_passkey", "true"])
+    assert ctx.settings["require_passkey"] is True
+    audited_before = len(_config_audit("require_passkey"))
+    # 3. the replay: same cid, no new signature — refused, gate stays armed
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", cid])
+    assert "REFUSED" in out, "a replayed approval must never re-apply"
+    assert "single-use" in out, out  # the refusal names the single-use rule
+    assert cid in out  # ...and the spent challenge it names
+    assert ctx.settings["require_passkey"] is True  # NOT disarmed by the replay
+    assert len(_config_audit("require_passkey")) == audited_before  # no phantom change
+    # 4. a third identical replay: refused the same way, still untouched
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", cid])
+    assert "REFUSED" in out and "single-use" in out, out
+    assert ctx.settings["require_passkey"] is True
+
+
+def test_set_weakening_concurrent_replays_exactly_one_applies(monkeypatch, base, autumn):
+    """F1's race face: two simultaneous applications of the SAME approved
+    challenge both pass verification while the row is still approved, so
+    only the atomic claim can arbitrate — exactly one applies, the loser is
+    refused with the single-use rule, and the audit log carries exactly one
+    config_changed story for the race."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    cid = c["challenge_id"]
+    audited_before = len(_config_audit("require_passkey"))
+
+    # Both racers read the current value and pass verification BEFORE
+    # either can apply, and both reach the atomic claim while the row is
+    # still approved: barriers inside the verification and claim steps
+    # make the double-apply deterministic instead of timing-dependent
+    # (mirrors the consume() race test's discipline).
+    verify_gate = threading.Barrier(2)
+    claim_gate = threading.Barrier(2)
+    orig_verify = cli._verify_weakening_approval
+    orig_claim = gate_core.consume_approval
+
+    def synced_verify(approve_cid, phrase):
+        verify_gate.wait(timeout=30)
+        return orig_verify(approve_cid, phrase)
+
+    def synced_claim(cid, sha):
+        claim_gate.wait(timeout=30)
+        return orig_claim(cid, sha)
+
+    monkeypatch.setattr(cli, "_verify_weakening_approval", synced_verify)
+    monkeypatch.setattr(gate_core, "consume_approval", synced_claim)
+
+    results = {}
+
+    def racer(i):
+        try:
+            results[i] = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", cid])
+        except Exception as exc:  # a thread crash must fail the test, not vanish
+            results[i] = f"THREAD-CRASH {type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=racer, args=(i,)) for i in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    applied = [i for i, out in results.items() if "require_passkey = false" in out]
+    refused = [i for i, out in results.items() if "REFUSED" in out]
+    assert len(applied) == 1 and len(refused) == 1, results
+    assert "single-use" in results[refused[0]]
+    assert ctx.settings["require_passkey"] is False  # the winner's effect stands
+    assert len(_config_audit("require_passkey")) == audited_before + 1
+
+
+def test_set_weakening_fresh_approval_for_a_second_weakening(monkeypatch, base, autumn):
+    """F1 must not over-block: the single-use rule spends one approval per
+    application — a fresh human signature keeps working. A second, different
+    weakening after the first approval was consumed applies normally, and
+    the same key can be weakened again after re-arming with another fresh
+    signature."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True,
+                        authority_patterns=[r"rm -rf"])
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    # first weakening: require_passkey off, its approval consumed on apply
+    c1 = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c1["challenge_id"])
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c1["challenge_id"]])
+    assert "require_passkey = false" in out, out
+    # second weakening, DIFFERENT key, fresh signature: applies normally
+    phrase2 = weaken_phrase("authority_patterns", "[]")
+    c2 = new_challenge(base, text=phrase2, requester="hermes-cli")
+    approve(base, autumn, c2["challenge_id"])
+    out = cli.cmd_set(ctx, ["authority_patterns", "[]", "--approve", c2["challenge_id"]])
+    assert ctx.settings["authority_patterns"] == [], out
+    cc = _config_audit("authority_patterns")
+    assert cc and cc[-1]["weakened"] is True and cc[-1]["approved"] == c2["challenge_id"]
+    # the same key again: re-arm, fresh signature, applies again
+    cli.cmd_set(ctx, ["require_passkey", "true"])
+    c3 = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    approve(base, autumn, c3["challenge_id"])
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c3["challenge_id"]])
+    assert "require_passkey = false" in out, out
+    assert ctx.settings["require_passkey"] is False
+
+
 def test_set_strengthening_is_free_and_audited(monkeypatch):
     """Turning enforcement ON is the direction an attacker never wants: it
     applies immediately with no approval, and is still audited."""

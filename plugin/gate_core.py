@@ -517,6 +517,45 @@ def consume(cid: str, binding_sha: str) -> bool:
     return cur.rowcount == 1
 
 
+def consume_approval(cid: str, action_sha: str) -> bool:
+    """F1 (fresh review): atomically claim an APPROVED, UNEXPIRED,
+    text-bound challenge by id + action hash — the claim behind
+    `set --approve`, so a gate-weakening approval authorises exactly ONE
+    application and a replay of the same --approve cid can never re-apply.
+
+    consume() cannot serve here: it matches on binding_sha256, and a
+    weakening approval is minted text-only (binding_sha256 is NULL), which
+    an `= ?` comparison never matches. The discipline is otherwise
+    identical — ONE conditional UPDATE flips the row to its terminal
+    'consumed' state and stamps consumed_at (finding 10: decided_at keeps
+    the human's approval time); SQLite serialises concurrent writers, so
+    of any number of simultaneous applications of the same approval
+    exactly one earns True and every loser gets False and must refuse.
+    The action_sha256 condition mirrors _verify_weakening_approval's
+    exact-phrase check (D7), so only the challenge the human signed for
+    THIS change can be spent on it; a stale approval past expires_at can
+    never be claimed (finding 4).
+    """
+    now = time.time()
+    sha = (action_sha or "").strip().lower()
+    cur = db().execute(
+        "update challenges set status='consumed', consumed_at=? "
+        "where id=? and status='approved' and action_sha256=? and expires_at>=?",
+        (now, cid, sha, now))
+    if cur.rowcount == 1:
+        audit("challenge_consumed", challenge_id=cid, action_sha256=sha,
+              consumed_by="hermes-cli set --approve")
+    return cur.rowcount == 1
+
+
+def challenge_consumed(cid: str) -> bool:
+    """F1: has this challenge id already been claimed? cmd_set uses it to
+    route a replay of a spent approval to the single-use refusal instead
+    of the generic verification failure, so the operator learns the rule."""
+    row = db().execute("select status from challenges where id=?", (cid,)).fetchone()
+    return row is not None and row["status"] == "consumed"
+
+
 def pending_for_binding(binding_sha: str) -> sqlite3.Row | None:
     """Approved, unexpired challenge covering this binding — an approval past
     expires_at must not satisfy the enforcement hook: stale signatures never

@@ -488,6 +488,24 @@ def _weakening_approval_failed(key, new_value, problems):
          "to your human, and re-run with --approve once they have signed it."])
 
 
+def _weakening_approval_used(key, cid):
+    """F1 refusal for a REPLAYED approval: the challenge was already consumed
+    by an application (or this application lost the atomic claim to a
+    concurrent one). One human signature authorises exactly one
+    gate-weakening change — re-arming does not revive a spent approval."""
+    return "\n".join(
+        [f"REFUSED: set {key} weakens the passkey gate, and its approval challenge "
+         f"{cid} has already been used.",
+         "",
+         "A passkey approval is single-use: one human signature authorises exactly "
+         "ONE application of one gate-weakening change, and it is consumed at apply "
+         "time — re-arming the gate does not revive it.",
+         "",
+         "Re-run the same change WITHOUT --approve to mint a fresh approval "
+         "challenge, send its URL to your human, and re-run with --approve once "
+         "they have signed it."])
+
+
 def cmd_set(ctx, rest):
     if not rest:
         return ("usage: hermes passkey-gate set <key> <value> [--approve <challenge-id>] — keys: "
@@ -539,14 +557,31 @@ def cmd_set(ctx, rest):
         if weakens:
             if approve_cid is None:
                 return _weakening_needs_approval(key, value, raw)
-            problems = _verify_weakening_approval(approve_cid, weakening_phrase(key, value))
+            phrase = weakening_phrase(key, value)
+            problems = _verify_weakening_approval(approve_cid, phrase)
             if problems:
+                # F1: an approval already spent on an application replays
+                # as status 'consumed' — route that to the single-use
+                # refusal so the operator learns the rule, not just a
+                # failed check (the verification itself is unchanged).
+                if gate_core.challenge_consumed(approve_cid):
+                    return _weakening_approval_used(key, approve_cid)
                 return _weakening_approval_failed(key, value, problems)
+            # F1: burn the approval ATOMICALLY, before anything is applied
+            # or audited — the claim is one conditional UPDATE in the same
+            # discipline as gate_core.consume(), so concurrent
+            # applications of the same --approve challenge cannot both
+            # win: exactly one applies, every replay and race loser is
+            # refused below.
+            if not gate_core.consume_approval(approve_cid, tools.hashlib_sha256(phrase)):
+                return _weakening_approval_used(key, approve_cid)
         # audit BEFORE applying: a security-critical change that cannot be
         # audited does not happen
         try:
             gate_core.audit("config_changed", key=key, old=_jsonable(old), new=_jsonable(value),
-                            weakened=weakens, approved=approve_cid if weakens else None)
+                            weakened=weakens,
+                            approved=approve_cid if weakens else None,
+                            consumed=approve_cid if weakens else None)
         except Exception as exc:
             return (f"REFUSED: this change could not be recorded in the audit log "
                     f"({type(exc).__name__}: {exc}) — a security-critical change that "
