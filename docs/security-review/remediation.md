@@ -53,18 +53,46 @@ are hardening. Full report frozen at
 | Item | Finding | Severity | Status | Evidence |
 |---|---|---|---|---|
 | F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | ✅ | commit `6373ff4`; 159 passed; reviewer probe re-run + parent 4-process/phrase/expiry probe green |
-| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | 🔄 | re-pin needs the final release commit |
+| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | ✅ | code `9c22772`, pin `baf1f30`; fresh-clone at the pin: 161 passed; catalog honest |
 | F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ⬜ | organic 2-process repro, chain broken |
 | F4 | DNS-rebinding TOCTOU: SSRF check resolves once, fetch dials again | LOW | ⬜ | stateful getaddrinfo fake, loopback dial demonstrated |
 | F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ⬜ | 30 wedged threads leaked |
 | F6 | `os_default_rp_id` dead code — `import shutil` missing | LOW | ⬜ | stub probe returns localhost |
 | F7 | `gate_verify` raises on `wait_seconds='abc'` (never-raise contract) | INFO | ⬜ | direct call raises ValueError |
-| C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | with F1 | accurate for weakening approvals after F1 |
-| C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | with F2 | only parent-gate fetches check |
-| C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | with F2 | finding-23 rule says parse, never prefix |
-| C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | with F2 | stale version |
+| C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | ✅ | accurate "single-use when applied" wording, `9c22772` |
+| C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | ✅ | scoped honestly to parent-gate fetches, `9c22772` |
+| C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | ✅ | parse_gate_origin at both sites, `9c22772`; parent probe 7 hostile origins/0 fetches |
+| C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | ✅ | bumped to v0.5.0, `9c22772` |
 
 ## Log
+
+### F2 + claims C1-C4 — catalog honest, strict origin parsing ✅
+
+- **Delegated:** catalog entry rewritten for v0.5.0 (honest README-backed
+  description; version 0.5.0; sha left as a placeholder for the parent to
+  pin). C1: single-use wording in plugin.yaml + schemas.py now states the
+  exact truth (consumed at apply time for enforced tool-call and
+  gate-weakening approvals; text-only verify until expiry). C2: CHANGELOG
+  SSRF bullet scoped honestly (private-network blocking + allowlist are
+  parent-gate only). C3: gate_verify and _verify_weakening_approval now
+  parse the configured origin via netfetch.parse_gate_origin instead of a
+  bare startswith prefix check — credential-carrying, hostless,
+  off-loopback-http, and scheme-less origins refused before any fetch;
+  loopback-http dev tolerance preserved (it lives in the parser). C4:
+  threat-model header bumped to v0.5.0. Two C3 regression tests; child
+  reported 161 passed.
+- **Parent verification:** suite 161 passed (own run). Independent probe
+  (`cache/scratch/probe_f2_parent.py`): all seven hostile origins refused
+  at BOTH sites with zero fetches; valid https and both loopback-http forms
+  pass the origin gate. Static scans clean (one hit was the new test's
+  hostile-input fixture string, not a secret).
+- **Pin and validation:** work committed as `9c22772` (code-complete
+  v0.5.0); catalog sha pinned to
+  `9c227722992661dbd966d426a8144e73868d0b81` in `baf1f30`. The catalog's
+  mandated fresh-clone validation ran against exactly the pinned commit:
+  local clone, clean venv, `pip install -r requirements.txt pytest`,
+  161 passed in 20.48 s.
+- **Commits:** `9c22772` (F2 + C1-C4), `baf1f30` (pin).
 
 ### F1 — fresh-review HIGH: gate-weakening approvals single-use ✅
 
