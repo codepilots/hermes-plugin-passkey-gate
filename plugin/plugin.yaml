@@ -1,14 +1,15 @@
 name: passkey-gate
 
-version: 0.4.0
+version: 0.5.0
 
 description: >
   Passkey (WebAuthn) authorization gate for high-authority agent actions.
   The agent mints a challenge bound bit-for-bit to the exact action text and
-  tool call; only a human passkey can approve it; the agent then verifies the
-  signed assertion locally against a pinned public key before acting.
-  No agent ever holds a private key, approvals are single-use, and an
-  append-only hash-chained audit log detects edits and corruption within
+  tool call; approval is a WebAuthn signature from the owner passkey
+  registered through the operator's out-of-band ceremony; the agent then
+  verifies the signed assertion locally against a pinned public key before
+  acting. No agent ever holds a private key, approvals are single-use, and
+  an append-only hash-chained audit log detects edits and corruption within
   the log; its head can be notarized to an operator-kept file outside the
   gate data dir, which is what detects a wholesale rewrite.
 
@@ -65,5 +66,5 @@ config_schema:
     description: "Operator-controlled file (OUTSIDE the gate data dir) where 'hermes passkey-gate audit-notarize' appends the current audit-chain head hash, and which 'audit-verify' compares against the chain to detect a wholesale rewrite. The chain alone only detects partial edits — this external anchor is the tamper evidence. Non-security setting: it names where anchors are kept, not what the gate enforces."
 
 python_dependencies:
-  - webauthn==1.11.*
-  - qrcode==7.*
+  - webauthn>=2,<4
+  - qrcode>=7,<9

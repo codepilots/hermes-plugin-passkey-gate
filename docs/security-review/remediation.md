@@ -42,6 +42,38 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 
 ## Log
 
+### Publication prep — v0.5.0 ✅ (post-campaign, user-approved closing task)
+
+- **Delegated:** version bump 0.4.0 → 0.5.0 (plugin.yaml, pyproject.toml);
+  CHANGELOG.md in Keep a Changelog style drawn from this ledger (Security /
+  Changed / Added / Known-limitations, findings traceable); README claims
+  pass aligning every security claim with the threat model (9 claim
+  rewrites: tagline, forged-signature framing, agent-side-path qualification,
+  enforcement→verification, diagram, bootstrap operator ceremony,
+  gate_verify row, new "Deployment requirements for real boundaries"
+  section, extended Honest limits); `.github/workflows/tests.yml` (push +
+  PR, least privilege, Python 3.14, pip install -r requirements.txt pytest).
+- **Real fix found by the child:** the declared `webauthn>=1.11,<2` pin was
+  broken for the repo's own test suite — tests import the webauthn ≥2-only
+  `encode_cbor` helper, and the repo venv had silently outrun its declared
+  pin (webauthn 3.0.1 installed). Corrected to `>=2,<4` across
+  requirements.txt / pyproject.toml / plugin.yaml; verified red under
+  1.11.1, green under 2.8.0 and 3.0.1, and CI was proven end-to-end from a
+  fresh venv running the workflow's exact commands (155 passed). Same
+  failure family as the D16 pyyaml discovery: silently misdeclared
+  dependencies riding a stale venv.
+- **Parent verification:** full suite independently re-run — 155 passed;
+  metadata diffs consistent across all three dependency declarations;
+  README diff reviewed hunk-by-hunk against the threat model — all 9
+  reported claim changes present and accurate, no drift elsewhere, remaining
+  "cannot" uses are legitimate deployment-control statements; static scans
+  clean.
+- **Standing follow-up (NOT for this release):** `catalog-entry/passkey-gate.yaml`
+  is a stale draft — version 0.2.0, pinning `bec3b78` (the pre-remediation
+  commit the review graded unsafe), with outdated description language.
+  It must be rewritten and repointed at the fresh-review-passed commit
+  before any catalog PR; it is deliberately untouched here.
+
 ### D19 — finding 28 (LOW): numeric setting range validation ✅
 
 - **Delegated:** persistence validates `port` in `1..65535` and
