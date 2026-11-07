@@ -40,6 +40,30 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 | D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ✅ partial | commit `e924660`; 149 passed; minimized-record probe green; authenticated channel remains deployment residual |
 | D19 | 28 — numeric setting range validation | LOW | ✅ | commit `76f0622`; 155 passed; independent range/legacy/backend/bind probe green |
 
+## Fresh independent review of v0.5.0 — new backlog
+
+A fresh adversarial review (no campaign context) of HEAD `dcc66b7` judged
+the release **safe-with-residuals**: the core WebAuthn ceremony is sound, no
+path approves or executes without the human's passkey, and the honest-claims
+documentation was verified accurate. Two HIGH findings are release blockers
+(demonstrated by live repro, independently re-run by the parent); the rest
+are hardening. Full report frozen at
+[docs/security-review/fresh-review-v0.5.0.md](fresh-review-v0.5.0.md).
+
+| Item | Finding | Severity | Status | Evidence |
+|---|---|---|---|---|
+| F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | 🔄 | live 3×-replay repro confirmed by parent; probe `probe_freshreview_replay.py` |
+| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | ⬜ after F1 | re-pin needs the final release commit |
+| F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ⬜ | organic 2-process repro, chain broken |
+| F4 | DNS-rebinding TOCTOU: SSRF check resolves once, fetch dials again | LOW | ⬜ | stateful getaddrinfo fake, loopback dial demonstrated |
+| F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ⬜ | 30 wedged threads leaked |
+| F6 | `os_default_rp_id` dead code — `import shutil` missing | LOW | ⬜ | stub probe returns localhost |
+| F7 | `gate_verify` raises on `wait_seconds='abc'` (never-raise contract) | INFO | ⬜ | direct call raises ValueError |
+| C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | with F1 | accurate for weakening approvals after F1 |
+| C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | with F2 | only parent-gate fetches check |
+| C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | with F2 | finding-23 rule says parse, never prefix |
+| C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | with F2 | stale version |
+
 ## Log
 
 ### Publication prep — v0.5.0 ✅ (post-campaign, user-approved closing task)
