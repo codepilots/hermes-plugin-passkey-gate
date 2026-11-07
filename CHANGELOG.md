@@ -57,9 +57,13 @@ rewritten security posture.
   parse-failure state; out-of-band config edits reload without a restart.
   [findings 17, 7]
 - **SSRF surface closed.** All server-side fetches (parent approval, origin,
-  health, verify) go through one shared no-redirect opener with strict URL
-  parsing and private-network blocking; parent gates must be on an explicit
-  allowlist, empty by default (no fetches at all). [findings 5, 23]
+  health, verify) go through one shared no-redirect opener; gate URLs are
+  strictly parsed wherever consumed (`set`, `gate_verify`, weakening-approval
+  re-checks, parent-approval fetches). Private-network blocking applies to
+  parent-gate fetches only, and those must also be on an explicit allowlist,
+  empty by default (no fetches at all); the plugin's own-origin fetches do
+  no private-network check — that origin is operator-configured and parsed
+  when set. [findings 5, 23]
 - **Parent approvals are fully verified.** A claimed prior approval is
   fetched and cryptographically verified locally (signature, challenge,
   origin, RP ID, flags) against the pinned peer key, with a child/parent

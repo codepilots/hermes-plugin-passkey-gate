@@ -21,7 +21,10 @@ GATE_CHALLENGE = {
         "via a channel they actually read, with one line of context. If another "
         "human already approved on their own gate, pass parent_approval so the "
         "page shows that checked, not claimed. Challenge expires (default 10 "
-        "min); approvals are single-use and consumed on use."
+        "min); approvals are single-use when applied — enforced tool-call "
+        "approvals and gate-weakening approvals are consumed atomically at "
+        "apply time, while plain text-only approvals verify until expiry and "
+        "are not consumed."
     ),
     "parameters": {
         "type": "object",

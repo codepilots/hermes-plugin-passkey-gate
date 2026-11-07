@@ -118,9 +118,17 @@ def gate_verify(args: dict, **kwargs) -> str:
 
     if not cid or not text:
         return json.dumps({"ok": False, "error": "challenge_id and action_text required"})
-    if not (_base_url().startswith("https://") or _base_url().startswith("http://")):
+    # Claims issue 3 (finding 23's rule): gate URLs are PARSED, never
+    # prefix-checked — the same rule cmd_set enforces. The old
+    # startswith('http://'/'https://') check let credential-carrying,
+    # hostless, and non-https origins through to a fetch.
+    try:
+        netfetch.parse_gate_origin(_base_url())
+    except ValueError:
         return json.dumps({"ok": False,
-                           "error": "gate origin not configured — set plugins.entries.passkey-gate.settings.origin"})
+                           "error": "gate origin is not configured or is not a valid gate origin "
+                           "(https; loopback http tolerated for dev) — set "
+                           "plugins.entries.passkey-gate.settings.origin"})
 
     base = _base_url()
     sha = hashlib_sha256(text)

@@ -8,10 +8,13 @@ description: >
   tool call; approval is a WebAuthn signature from the owner passkey
   registered through the operator's out-of-band ceremony; the agent then
   verifies the signed assertion locally against a pinned public key before
-  acting. No agent ever holds a private key, approvals are single-use, and
-  an append-only hash-chained audit log detects edits and corruption within
-  the log; its head can be notarized to an operator-kept file outside the
-  gate data dir, which is what detects a wholesale rewrite.
+  acting. No agent ever holds a private key; approvals are single-use when
+  applied — enforced tool-call approvals and gate-weakening approvals are
+  consumed atomically at apply time, while plain text-only approvals verify
+  until expiry and are not consumed; and an append-only hash-chained audit
+  log detects edits and corruption within the log; its head can be notarized
+  to an operator-kept file outside the gate data dir, which is what detects
+  a wholesale rewrite.
 
 author: Autumn Thomson (codepilots)
 

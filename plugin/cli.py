@@ -418,8 +418,15 @@ def _verify_weakening_approval(cid, phrase):
     (same origin/redirect rules, same seams), then re-derives every claim
     LOCALLY — the gate's yes/no is never trusted on its own."""
     base = tools._base_url()
-    if not base.startswith(("http://", "https://")):
-        return ["the gate origin is not configured — set "
+    # Claims issue 3 (finding 23's rule): gate URLs are PARSED, never
+    # prefix-checked — the same rule cmd_set enforces; the old
+    # startswith(('http://', 'https://')) check accepted credential-carrying
+    # and hostless origins.
+    try:
+        netfetch.parse_gate_origin(base)
+    except ValueError:
+        return ["the gate origin is not configured or is not a valid gate origin "
+                "(https; loopback http tolerated for dev) — set "
                 "plugins.entries.passkey-gate.settings.origin (or run "
                 "'hermes passkey-gate expose') so the approval can be checked "
                 "against the gate"]

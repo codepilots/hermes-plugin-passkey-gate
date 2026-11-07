@@ -160,6 +160,73 @@ def test_set_origin_is_parsed_not_prefix_checked():
         assert ctx.store["origin"] == good, out
 
 
+# The same finding-23 rule at the two remaining origin consumers (claims
+# issue 3 of the fresh v0.5.0 review): gate_verify and the cmd_set
+# weakening-approval re-check previously accepted the configured origin via
+# a bare startswith('http://'/'https://') prefix check and must parse instead,
+# exactly like `set origin` — including keeping the documented loopback-http
+# dev exception.
+_ORIGIN_REJECTED = [
+    "https://",                          # prefix-craft: no host at all
+    "https://:8445",                     # prefix-craft: port without a host
+    "https://user:secret@host.ts.net",   # credentials ride along
+    "https://host.ts.net:notaport",      # unparseable port
+    "http://192.168.1.9:8655",           # plain http off loopback
+    "ftp://host.ts.net",                 # not an http(s) scheme
+    "not-a-url",                         # no scheme at all
+]
+# A scary-looking hostname is still a syntactically valid https origin: the
+# parse cannot judge names, only structure — so it is ACCEPTED, matching
+# `set origin` exactly (consistency is the rule the review demands).
+_ORIGIN_ACCEPTED = [
+    "https://fine.example.ts.net:8445",
+    "https://evil.example.ts.net.evil.com",
+    "http://localhost:8655",             # documented dev exception
+    "http://127.0.0.1:8655",             # documented dev exception
+]
+
+
+def test_gate_verify_origin_is_parsed_not_prefix_checked(monkeypatch):
+    from passkey_gate import tools
+
+    def never_fetch(*a, **k):
+        raise AssertionError("a refused origin must never reach a fetch")
+
+    monkeypatch.setattr(tools, "_fetch_verify", never_fetch)
+    for origin in _ORIGIN_REJECTED:
+        monkeypatch.setattr(tools, "_base_url", lambda o=origin: o)
+        out = json.loads(tools.gate_verify({"challenge_id": "A" * 24,
+                                            "action_text": "x" * 50}))
+        assert out["ok"] is False, origin
+        assert "origin" in out["error"], (origin, out)
+    monkeypatch.setattr(tools, "_fetch_verify",
+                        lambda *a, **k: {"status": "error", "error": "stub"})
+    for origin in _ORIGIN_ACCEPTED:
+        monkeypatch.setattr(tools, "_base_url", lambda o=origin: o)
+        out = json.loads(tools.gate_verify({"challenge_id": "A" * 24,
+                                            "action_text": "x" * 50}))
+        assert out["ok"] is True, (origin, out)  # past the origin gate
+
+
+def test_weakening_approval_origin_is_parsed_not_prefix_checked(monkeypatch):
+    from passkey_gate import tools
+
+    def never_fetch(*a, **k):
+        raise AssertionError("a refused origin must never reach a fetch")
+
+    monkeypatch.setattr(tools, "_fetch_verify", never_fetch)
+    for origin in _ORIGIN_REJECTED:
+        monkeypatch.setattr(tools, "_base_url", lambda o=origin: o)
+        problems = cli._verify_weakening_approval("c" * 24, "set require_passkey=false — confirm")
+        assert len(problems) == 1 and "origin" in problems[0], (origin, problems)
+    monkeypatch.setattr(tools, "_fetch_verify",
+                        lambda *a, **k: {"status": "pending"})
+    for origin in _ORIGIN_ACCEPTED:
+        monkeypatch.setattr(tools, "_base_url", lambda o=origin: o)
+        problems = cli._verify_weakening_approval("c" * 24, "set require_passkey=false — confirm")
+        assert not any("origin" in p for p in problems), (origin, problems)
+
+
 def test_set_parent_gate_allowlist_roundtrip():
     """Finding 5's config key: allowed parent-gate origins, parsed as a list
     (JSON or comma form) and persisted like every other setting. Finding 16:
