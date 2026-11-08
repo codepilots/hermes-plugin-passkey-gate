@@ -1,7 +1,7 @@
 """`hermes passkey-gate setup` — the guided first run.
 
-One command walks the operator through everything the manual First run
-section does, checking each step before moving on:
+One command walks the operator through the manual setup commands
+(expose, bootstrap, credentials, pin --code; see `hermes passkey-gate --help`), checking each step before moving on:
 
   1. the gate is running (offers to install it as a background service)
   2. it has an HTTPS address your phone can reach (tailscale, or your origin)
@@ -13,12 +13,19 @@ Re-running it is safe: finished steps are detected and skipped. It is an
 operator ceremony, like bootstrap and pin — run it in your own terminal,
 never through an agent.
 """
+import json
 import sys
 import time
 
-from . import cli, gate_core, local_verify, netfetch, service, tools
+from . import cli, expose, gate_core, local_verify, netfetch, service, tools
 
-DEFAULT_PATTERN = r"^terminal .*(rm -rf|curl |scp |dd )"
+# Standard: dangerous command words in any flag order, find -delete, and any
+# code execution (which can do anything). A best-effort deny-list: an
+# adversarial agent can still route around it (v0.7 review M2), which is why
+# STRICT exists and why the docs say so.
+DEFAULT_PATTERN = (r"(?s)^terminal .*\b(rm|rmdir|shred|dd|curl|wget|scp|sftp|rsync|ssh|nc|chmod|chown)\b"
+                   r"|^terminal .*\s-delete\b|^execute_code ")
+STRICT_PATTERN = r"^(terminal|execute_code|write_file|patch) "
 CODE_TRIES = 3
 
 
@@ -107,6 +114,18 @@ class Wizard:
         self.say(f"✗ Port {port} is already used by a program that isn't this gate (for example")
         self.say("  the older approval-gate prototype, another Hermes profile's gate, or an older")
         self.say("  'passkey-gate serve' that needs restarting).")
+        origin = (self.ctx.get_config("origin", default="") or "").strip()
+        if origin:
+            # v0.7 review H1: the HTTPS address forwards to THIS port. Moving
+            # the gate would leave the address pointing at whatever holds it,
+            # which could then relay your registration and get its own key
+            # pinned. Never move a gate that already has an address.
+            self.say(f"  Your HTTPS address ({origin}) forwards to port {port}, so the gate can't")
+            self.say("  simply move: the address would then reach that other program instead.")
+            self.say("  Stop the other program (if you don't recognise it, treat it as hostile),")
+            self.say("  then press Enter to check again.")
+            self.pause()
+            return port
         suggestion = port + 1 if port < gate_core.PORT_MAX else port - 1
         answer = self.ask(f"Port to use instead [{suggestion}], or s to stop that program "
                           "yourself and re-check: ").lower()
@@ -134,16 +153,32 @@ class Wizard:
             self.sleep(0.5)
         return service.probe(port) == "ours"
 
-    def _probe(self, base):
+    def _probe(self, base, port):
         try:
             with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
-                if r.status == 200:
-                    return None
-                return {"error": f"the gate at {base} answered HTTP {r.status}", "next_step": ""}
+                if r.status != 200:
+                    return {"error": f"the gate at {base} answered HTTP {r.status}", "next_step": ""}
+                try:
+                    health = json.loads(r.read(65536))
+                except ValueError:
+                    health = None
         except Exception as exc:
             return tools.gate_unreachable_reason(base, exc)
+        if not expose.is_this_gate(health):
+            return {"error": f"{base} answers, but not as this passkey-gate",
+                    "next_step": "the address points at another service or another gate; fix "
+                                 "the forwarding (or re-run 'hermes passkey-gate expose')"}
+        # v0.7 review H1: a relaying impostor passes the identity check, so
+        # also make sure the address forwards to the port the gate runs on
+        target = expose.recorded_target_port()
+        if target is not None and target != port:
+            return {"error": f"your Tailscale address forwards to port {target}, but the gate "
+                             f"runs on port {port} — whatever answers on {target} is not this gate",
+                    "next_step": f"run 'hermes passkey-gate set port {target}' (and stop whatever "
+                                 f"holds {target}), then run setup again"}
+        return None
 
-    def step_address(self):
+    def step_address(self, port):
         self.heading(2, "Give it an HTTPS address")
         while True:
             origin = (self.ctx.get_config("origin", default="") or "").strip().rstrip("/")
@@ -153,7 +188,7 @@ class Wizard:
                 self.say(cli.cmd_expose(self.ctx, []))
                 origin = (self.ctx.get_config("origin", default="") or "").strip().rstrip("/")
             if origin:
-                problem = self._probe(origin)
+                problem = self._probe(origin, port)
                 if problem is None:
                     self.say(f"✓ Reachable at {origin}")
                     return origin
@@ -177,11 +212,19 @@ class Wizard:
         if pinned:
             match = [c for c in gate_core.list_credentials() if c["spki_pem"].strip() == pinned.strip()]
             self.code = match[0]["code"] if match else None
-            self.say("✓ An owner passkey is already pinned" +
+            self.say("✓ An owner key is already pinned" +
                      (f" (code {self.code})." if self.code else "."))
             self.say("  (To start over with a new phone, remove the pin file in "
                      f"{gate_core.data_dir()} first.)")
             return None
+        existing = gate_core.list_credentials()
+        if existing:
+            self.say(f"{len(existing)} passkey(s) are registered here, but none is trusted yet.")
+            self.say("If you registered on your phone earlier and didn't finish (the phone now says")
+            self.say("it already has a passkey for this gate), you can use that one: you'll need the")
+            self.say("code its page showed. Otherwise make a new one.")
+            if self.confirm("Use a passkey that's already registered?", default=False):
+                return existing
         while True:
             before = {c["credential_id"] for c in gate_core.list_credentials()}
             url = gate_core.mint_bootstrap_token()
@@ -265,10 +308,15 @@ class Wizard:
             self.say("Skipped. Later: hermes passkey-gate set require_passkey true")
             return
         if not (self.ctx.get_config("authority_patterns", default=[]) or []):
-            self.say("Default pattern (terminal commands with rm -rf, curl, scp or dd):")
-            self.say(f"    {DEFAULT_PATTERN}")
-            raw = self.ask("Press Enter to use it, or type your own regex: ") or DEFAULT_PATTERN
-            out = cli.cmd_set(self.ctx, ["authority_patterns", raw])
+            self.say("Which calls should need your approval?")
+            self.say("  1  Standard: dangerous terminal commands (rm, curl, ssh, dd…) and any")
+            self.say("     code execution. Best effort: a determined agent can find another way.")
+            self.say("  2  Strict: every terminal command, code run and file edit. Safest, but")
+            self.say("     you'll approve a lot.")
+            self.say("  Or type your own regular expression.")
+            raw = self.ask("Choose 1, 2, or a regex [1]: ") or "1"
+            raw = {"1": DEFAULT_PATTERN, "2": STRICT_PATTERN}.get(raw, raw)
+            out = cli.cmd_set(self.ctx, ["authority_patterns", json.dumps([raw])])
             if out.startswith("REFUSED"):
                 self.say(out)
                 self.say("Enforcement left off. Fix the pattern with: "
@@ -279,11 +327,14 @@ class Wizard:
 
     # ------------------------------------------------------------ run
     def run(self):
+        problem = cli.config_canary_problem(self.ctx)
+        if problem:
+            return f"setup stopped before changing anything: {problem}"
         self.say("passkey-gate setup: about 3 minutes, and you'll need your phone.")
         self.say("Run this in your own terminal, never through an agent.")
         try:
             port = self.step_running()
-            origin = self.step_address()
+            origin = self.step_address(port)
             new = self.step_register()
             if not self.step_confirm(new):
                 return "setup stopped before pinning a key — run 'hermes passkey-gate setup' again"
@@ -292,6 +343,7 @@ class Wizard:
             return "setup stopped. Run 'hermes passkey-gate setup' again any time; finished steps are skipped."
         except KeyboardInterrupt:
             return "\nsetup interrupted. Run 'hermes passkey-gate setup' again any time; finished steps are skipped."
+        cli.stamp_config_canary(self.ctx)  # arms the broken-config check (finding 17)
         enforce = bool(self.ctx.get_config("require_passkey", default=False))
         return "\n".join([
             "",
@@ -315,5 +367,5 @@ def cmd_setup(ctx, rest, **kw):
         return __doc__
     if not kw and not sys.stdin.isatty():
         return ("setup is interactive: run 'hermes passkey-gate setup' in a terminal. "
-                "(The manual steps are in the README's First run section.)")
+                "(To set up by hand instead, see 'Setting up by hand' in 'hermes passkey-gate --help'.)")
     return Wizard(ctx, **kw).run()

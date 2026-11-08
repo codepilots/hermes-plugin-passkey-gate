@@ -1,7 +1,12 @@
 """End-to-end check through REAL Hermes machinery: the plugin manager, the
 tool registry, and Hermes's own pre_tool_call directive dispatch, against a
 real `hermes passkey-gate serve`. A software authenticator stands in for the
-human's phone, so it runs unattended (no tailscale, no network).
+human's phone, so it runs unattended (no tailscale, no phone).
+
+The install step below downloads the PUBLISHED plugin from GitHub, so this
+tests what users get, not your working tree. To test local changes, copy
+plugin/ over $HERMES_HOME/plugins/passkey-gate after installing. Run it from
+the repository root.
 
 Run it in a THROWAWAY Hermes home so your real profile is untouched:
 

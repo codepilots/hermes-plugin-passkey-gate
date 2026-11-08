@@ -22,6 +22,7 @@ existing passkey credential registered under it — credentials only match
 origins sharing their RP ID suffix.
 """
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -382,14 +383,44 @@ def tailscale_expose(gate_port: int, target_port: int | None = None,
     return result
 
 
+def is_this_gate(health) -> bool:
+    """A /health answer that comes from THIS gate (same data dir), not just
+    anything saying "ok". The instance id can be computed by anyone who can
+    guess the data-dir path, so this catches misconfiguration and lazy
+    impostors, not a relaying man in the middle — see recorded_target_port()
+    for that (v0.7 review H1 / A1)."""
+    try:
+        from . import gate_core
+        return (isinstance(health, dict) and health.get("status") == "ok"
+                and health.get("service") == "passkey-gate"
+                and health.get("instance") == gate_core.instance_id())
+    except Exception:
+        return False
+
+
+def recorded_target_port() -> int | None:
+    """The local port our recorded tailscale serve rule forwards to, or None
+    when there is no record (no tailscale exposure, or a configured origin)."""
+    rec = _load_record(_record_path())
+    if not rec:
+        return None
+    m = re.fullmatch(r"http://127\.0\.0\.1:(\d{1,5})/?", str(rec.get("target", "")))
+    return int(m.group(1)) if m else None
+
+
 def _tls_probe(url: str, timeout: int = 12) -> tuple[bool, str]:
     try:
         with netfetch.open_no_redirect(url, timeout=timeout) as r:
             body = r.read(4096)
-            ok = r.status == 200 and b'"status": "ok"' in body
-            if ok:
-                return True, "health ok"
-            return False, f"unexpected response {r.status}" if r.status != 200 else "unexpected body"
+            if r.status != 200:
+                return False, f"unexpected response {r.status}"
+            try:
+                health = json.loads(body)
+            except ValueError:
+                return False, "unexpected body"
+            if not is_this_gate(health):
+                return False, "answered, but not as this passkey-gate (another service or another gate)"
+            return True, "health ok"
     except Exception as exc:
         return False, f"{type(exc).__name__}: {str(exc)[:140]}"
 

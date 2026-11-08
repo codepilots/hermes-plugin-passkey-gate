@@ -31,8 +31,7 @@ def _pinned_owner_problems(row) -> str | None:
     try:
         pinned = local_verify.pinned(gate_core.data_dir())
         if pinned is None:
-            return ("no owner key is pinned — pin it out of band with "
-                    "'hermes passkey-gate pin <pem-file>'")
+            return ("no owner key is pinned — run 'hermes passkey-gate setup' (or 'hermes passkey-gate pin --code <code from your phone>')")
         rec = gate_core.challenge_status(row["id"], row["action_sha256"])
         problems = local_verify.check(dict(rec), row["action_text"], gate_core.origin(),
                                       gate_core.rp_id(), pinned)
@@ -140,8 +139,16 @@ def gate_challenge(args: dict, **kwargs) -> str:
             "gate_verify with challenge_id and the same action_text before acting."
         )
     if c.get("url") is None:
-        out["error_hint"] = "gate origin is not configured — set plugins.entries.passkey-gate.settings.origin"
+        out["error_hint"] = ("the gate has no HTTPS address yet, so this request has no link — "
+                             "ask the human to run 'hermes passkey-gate setup'")
     return json.dumps(out)
+
+
+def _local_audit_head():
+    try:
+        return gate_core.audit_head()
+    except Exception:
+        return None
 
 
 def gate_verify(args: dict, **kwargs) -> str:
@@ -189,8 +196,7 @@ def gate_verify(args: dict, **kwargs) -> str:
         problems = local_verify.check(rec, text, _origin(), gate_core.rp_id(), pinned, max_age)
         if pinned is None:
             problems.append(
-                "no owner key pinned yet — pin it out of band with "
-                "'hermes passkey-gate pin <pem-file>' before trusting approvals"
+                "no owner key is pinned yet — run 'hermes passkey-gate setup' (or 'hermes passkey-gate pin --code <code from your phone>') before trusting approvals"
             )
         binding_note = None
         approved_tool_call = None
@@ -230,7 +236,9 @@ def gate_verify(args: dict, **kwargs) -> str:
                "approved_at": rec.get("approved_at"),
                "binding_sha256": approved_binding,
                "binding_note": binding_note,
-               "audit_head": rec.get("audit_head"),
+               # /verify no longer returns the head (finding 27 minimization);
+               # report this gate's own audit head instead of a constant null
+               "audit_head": _local_audit_head(),
                # Contract for callers and for a downstream dispatcher: this is
                # the exact canonical payload whose hash was approved. The
                # plugin cannot enforce that a later executor uses it.
@@ -314,7 +322,8 @@ def _unreachable_text(base: str, exc) -> dict:
                 "next_step": "check that the origin points at passkey-gate, not another service"}
     if isinstance(reason, ConnectionRefusedError):
         return {"error": f"nothing is listening at {base}",
-                "next_step": "start the gate: 'hermes passkey-gate serve'"}
+                "next_step": ("start the gate: 'hermes passkey-gate service start' (or "
+                              "'service install' / 'serve' if it isn't set up yet)")}
     if isinstance(reason, (socket.timeout, TimeoutError)):
         return {"error": f"timed out reaching {base}",
                 "next_step": "check the gate is running and the tailscale serve rule exists"}
@@ -401,6 +410,19 @@ def canonical_for_hook(tool_name: str, args) -> str:
     return json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
 
 
+def _string_values(value, depth=0):
+    """Every string inside a tool call's arguments, in a stable order."""
+    if depth > 20:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for k in sorted(value, key=str) for s in _string_values(value[k], depth + 1)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _string_values(v, depth + 1)]
+    return []
+
+
 def authority_matches(patterns, tool_name: str, args) -> tuple[int, str] | None:
     """First authority pattern matching this exact call, as (rule_index,
     pattern) — the index is the stable rule ID the block message shows.
@@ -408,9 +430,14 @@ def authority_matches(patterns, tool_name: str, args) -> tuple[int, str] | None:
     validation (an out-of-band edit) must neither crash the hook nor turn
     into an opaque block: it is skipped as non-matching and logged."""
     subject = tool_name + " " + canonical_for_hook(tool_name, args)
+    # v0.7 review M2: patterns also run over the DECODED argument values
+    # (real newlines and tabs, unescaped quotes and non-ASCII), so `\b`,
+    # `\s` and literal quotes behave as operators expect. This can only add
+    # matches, never remove one the JSON form would have made.
+    decoded = tool_name + " " + " ".join(_string_values(args))
     for i, pat in enumerate(patterns or []):
         try:
-            if re.search(pat, subject):
+            if re.search(pat, subject) or re.search(pat, decoded):
                 return i, pat
         except (re.error, TypeError):
             logger.warning("passkey-gate: authority pattern %r (rule %d) is unusable "
@@ -445,8 +472,10 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
                 "Call gate_challenge first with action_text describing EXACTLY this "
                 f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
                 "send the human the approval URL, wait for their passkey signature, "
-                "then retry this identical tool call verbatim. If you disagree that "
-                "this requires an approval, say so instead of trying to retry it."
+                "then retry this identical tool call verbatim. Do NOT reach the same "
+                "effect another way (a reworded command, different flags, another tool, "
+                "a script): that is a policy violation, whether or not the gate notices. "
+                "If you disagree that this requires an approval, say so to the human."
             )}
         # Do not trust the indexed binding alone: the stored canonical payload
         # must itself hash to that binding. This catches a tampered/malformed

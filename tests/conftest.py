@@ -17,3 +17,15 @@ if "passkey_gate" not in sys.modules:
     _plugin = importlib.util.module_from_spec(_spec)
     sys.modules["passkey_gate"] = _plugin
     _spec.loader.exec_module(_plugin)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config_canary(monkeypatch, tmp_path):
+    """Each test gets its own config-canary file: a canary armed by one test
+    (any `set` arms it) must not make later tests' fake configs look like a
+    config Hermes failed to read."""
+    from passkey_gate import cli
+    monkeypatch.setattr(cli, "_canary_file", lambda: tmp_path / "config-canary")

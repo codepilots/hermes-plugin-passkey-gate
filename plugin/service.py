@@ -136,12 +136,24 @@ def plist_text(exe: str, home: str | None) -> str:
 def local_health(port: int, timeout: float = 2.0):
     """The gate's /health on 127.0.0.1:<port> as a dict, or None if nothing
     that looks like passkey-gate answers there."""
+    # http.client, not urlopen: no redirects (a squatter could bounce the
+    # check to a forged answer elsewhere), no proxy settings from the
+    # environment, and a bounded read (v0.7 review L1 / A10)
+    import http.client
+    conn = None
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/health", timeout=timeout) as r:
-            body = json.loads(r.read())
+        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=timeout)
+        conn.request("GET", "/health")
+        r = conn.getresponse()
+        if r.status != 200:
+            return None
+        body = json.loads(r.read(65536))
         return body if isinstance(body, dict) and body.get("status") == "ok" else None
     except Exception:
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def probe(port: int) -> str:

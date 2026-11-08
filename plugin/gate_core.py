@@ -168,7 +168,24 @@ def parent_allowlist() -> list:
     return [x for x in (raw or []) if x]
 
 
+def _hermes_data_dir():
+    """Hermes's own data folder for this plugin, or None outside Hermes."""
+    try:
+        from plugins.plugin_storage import plugin_data_dir
+        return Path(plugin_data_dir("passkey-gate"))
+    except Exception:
+        return None
+
+
 def data_dir() -> Path:
+    # v0.7 review M4: inside Hermes the trust store (pins, approvals, canary,
+    # audit log) is ALWAYS Hermes's plugin data folder. A GATE_DATA override
+    # there let a shell point `set --approve` at a store it had seeded, and
+    # replay one settings approval indefinitely with nothing in the real
+    # audit log. GATE_DATA is honoured only outside a Hermes runtime.
+    hermes = _hermes_data_dir()
+    if hermes is not None:
+        return hermes
     return Path(os.environ.get("GATE_DATA") or (_plugin_data_dir or Path(__file__).resolve().parent / "data"))
 
 
@@ -249,7 +266,10 @@ def db():
         authenticator_data TEXT, client_data_json TEXT, signature TEXT, user_handle TEXT);
     """)
     for col, coltype in (("requester_owner", "TEXT"), ("why", "TEXT"), ("parent_approval", "TEXT"),
-                         ("parent_verified", "TEXT"), ("tool_call", "TEXT"), ("consumed_at", "REAL")):
+                         ("parent_verified", "TEXT"), ("tool_call", "TEXT"), ("consumed_at", "REAL"),
+                         # v0.7 review M1: 'settings' marks a challenge the gate's own
+                         # CLI minted for a settings change; nothing agents call sets it
+                         ("kind", "TEXT")):
         try:
             c.execute(f"alter table challenges add column {col} {coltype}")
         except sqlite3.OperationalError:
@@ -381,9 +401,13 @@ class ChallengeLimitError(ValueError):
     surfaces it as a clean error message."""
 
 
+SETTINGS_KIND = "settings"
+RESERVED_REQUESTERS = ("hermes-cli",)
+
+
 def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
                      requester_owner: str | None = None, why: str | None = None,
-                     parent_approval: dict | None = None) -> GateResult:
+                     parent_approval: dict | None = None, *, _kind: str | None = None) -> GateResult:
     """Mint a challenge bound to exact action text (and optionally a canonical tool call).
 
     The challenge's WebAuthn nonce embeds sha256(action_text), so the signed
@@ -407,6 +431,15 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     requester = requester.strip()
     if not requester or len(requester) > 64:
         raise ValueError("requester must be 1-64 chars")
+    if _kind not in (None, SETTINGS_KIND):
+        raise ValueError("unknown challenge kind")
+    if requester.lower() in RESERVED_REQUESTERS and _kind != SETTINGS_KIND:
+        # v0.7 review L6/M1: an agent must not be able to dress its request
+        # up as the gate's own settings request
+        raise ValueError(f"requester name {requester!r} is reserved for the gate's own "
+                         "settings requests; use your own agent name")
+    if _kind == SETTINGS_KIND and tool_call is not None:
+        raise ValueError("a settings challenge is text-only")
     owner = (requester_owner or "").strip()
     if len(owner) > 64:
         raise ValueError("requester_owner must be at most 64 chars")
@@ -477,7 +510,9 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                 "another can be minted.")
         total = c.execute("select count(*) from challenges where status='pending'"
                           " and expires_at>=?", (now,)).fetchone()[0]
-        if total >= MAX_PENDING_CHALLENGES_TOTAL:
+        # v0.7 review L2: agents filling the global cap must not lock the
+        # operator out of the gate's own settings requests
+        if total >= MAX_PENDING_CHALLENGES_TOTAL and _kind != SETTINGS_KIND:
             raise ChallengeLimitError(
                 f"challenge limit reached: {total} pending challenges are open across "
                 f"all requesters (max {MAX_PENDING_CHALLENGES_TOTAL}). The gate will "
@@ -485,10 +520,10 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                 "challenges expire first.")
         c.execute(
             "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
-            "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status)"
-            " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending')",
+            "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status,kind)"
+            " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?)",
             (cid, text, sha, binding, binding_json, requester, owner or None, why or None,
-             parent_json, pv, chal, now, now + challenge_ttl()))
+             parent_json, pv, chal, now, now + challenge_ttl(), _kind))
         c.execute("COMMIT")
     except ChallengeLimitError as exc:
         _safe_rollback(c)
@@ -595,8 +630,11 @@ def consume_approval(cid: str, action_sha: str) -> bool:
     sha = (action_sha or "").strip().lower()
     cur = db().execute(
         "update challenges set status='consumed', consumed_at=? "
-        "where id=? and status='approved' and action_sha256=? and expires_at>=?",
-        (now, cid, sha, now))
+        "where id=? and status='approved' and action_sha256=? and expires_at>=? "
+        # v0.7 review M1: only a text-only challenge the gate minted for a
+        # settings change can authorise one — not an agent's tool-call approval
+        "and kind=? and binding_sha256 is null and tool_call is null",
+        (now, cid, sha, now, SETTINGS_KIND))
     if cur.rowcount == 1:
         audit("challenge_consumed", challenge_id=cid, action_sha256=sha,
               consumed_by="hermes-cli set --approve")
@@ -979,8 +1017,18 @@ def approval_page(row):
         except Exception:
             parent_block = '<div class="parent"><b>Prior approval record unreadable</b> &mdash; treat as unverified.</div>'
     expiry = (f' &middot; expires in {left // 60}m {left % 60:02d}s' if state == "pending" else "")
+    try:
+        kind = row["kind"]
+    except (IndexError, KeyError):
+        kind = None
+    settings_banner = (
+        '<div class="bound-call settings"><h2>THIS CHANGES PASSKEY-GATE\'S OWN SECURITY SETTINGS</h2>'
+        '<p>Created by passkey-gate itself because someone asked to make the gate '
+        '<b>weaker</b>. Read the change below; approve only if you asked for it.</p></div>'
+        if kind == SETTINGS_KIND else "")
     body = f"""
 <h1>Approval request</h1>
+{settings_banner}
 <div class="from"><p class="label">From</p><p class="who">{who}</p>
 <p class="meta"><span class="pill pill-{state}" id="state">{state}</span>{expiry}</p></div>
 {why_block}

@@ -51,10 +51,10 @@ function registrationError(e) {
   if (e && e.name === "NotAllowedError")
     return "The passkey wasn't created: it was cancelled or timed out. Tap Create passkey to try again.";
   if (e && e.name === "InvalidStateError")
-    return "This phone already has a passkey for this gate. Nothing else to do here. If the computer is still waiting, run setup again there.";
+    return "This phone already has a passkey for this gate. If its code was never typed in, run 'hermes passkey-gate setup' again on the computer and choose to use the passkey that's already registered. If you've lost its code, delete this passkey from the phone's password settings and start again.";
   if (e && e.name === "SecurityError")
     return "Your browser refused to create a passkey for this address. Open the link from the QR code exactly as shown (it must start with https://).";
-  if (/token invalid|expired|used/.test(m))
+  if (/token invalid|expired|used|session invalid/.test(m))
     return "This setup link has expired or was already used. On the computer, run 'hermes passkey-gate setup' again and scan the new QR code.";
   return "Something went wrong (" + m + "). Tap Create passkey to try again, or run setup again on the computer.";
 }
@@ -70,7 +70,11 @@ document.addEventListener("DOMContentLoaded", () => {
                              : "Denied. Nothing will happen. You can close this page.", cls);
   };
   if (a) a.onclick = () => { a.disabled = true; approve(cidEl.dataset.id).then(() => done("approved", "ok")).catch(e => { a.disabled = false; msg(e && e.name === "NotAllowedError" ? "Not approved: cancelled or timed out. Tap Approve to try again." : "Not approved: " + e.message, "err"); }); };
-  if (d) d.onclick = () => post(`/a/${cidEl.dataset.id}/deny`).then(() => done("denied", "err")).catch(e => msg(e.message, "err"));
+  if (d) d.onclick = () => post(`/a/${cidEl.dataset.id}/deny`).then(j => {
+    // the gate answers 200 with an error when the request was no longer pending
+    if (j && j.error) { a && a.remove(); d.remove(); msg("Nothing changed: this request was already decided or has expired. Reload the page to see its status.", "err"); }
+    else done("denied", "err");
+  }).catch(e => msg(e.message, "err"));
   if (g) {
     const token = location.hash.slice(1);
     history.replaceState(null, "", location.pathname);  // drop the token from the address bar

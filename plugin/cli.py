@@ -1,66 +1,62 @@
-"""CLI commands — everything under `hermes passkey-gate <cmd> [args]`.
+"""Commands under `hermes passkey-gate <command>`.
 
-  setup              guided first run: start the gate (optionally in the
-                     background), publish its HTTPS address, register your
-                     phone's passkey, and pin it by typing the code the phone
-                     shows. Safe to re-run; finished steps are skipped
-  service <install|uninstall|start|stop|restart|status|logs>
-                     run the gate in the background as a per-user service
-                     (systemd --user on Linux, a LaunchAgent on macOS)
-  serve              run the HTTP gate service (binds 127.0.0.1:<port>; TLS is
-                     terminated by tailscale serve or your own reverse proxy)
-  bootstrap          mint the one-time passkey registration link (QR + link
-                     printed only to THIS terminal; never send it through chat)
-  expose [backend]   set up HTTPS exposure (your configured origin > tailscale
-                     serve > honest instructions) and persist origin + rp_id
-                     into plugin settings
-  credentials        list registered passkeys with key fingerprints
+Getting started
+  setup              guided first run: starts the gate, gives it an HTTPS
+                     address, registers your phone's passkey and pins it
+                     when you type the code the phone shows. Safe to re-run.
+  service <action>   run the gate in the background (install, status, logs,
+                     start, stop, restart, uninstall). Uses a systemd user
+                     unit on Linux or a LaunchAgent on macOS.
+  serve              run the gate in this terminal instead.
+  status             is the gate reachable, is your key pinned, is
+                     enforcement on?
+
+Setting up by hand (what `setup` does)
+  expose [auto|tailscale]
+                     give the gate an HTTPS address (Tailscale, or check the
+                     origin you configured) and save it.
+  bootstrap          print a one-time registration link and QR code for your
+                     phone (15 minutes, single use). Show it only on your own
+                     screen; never send it through a chat.
+  credentials        list registered passkeys with their confirmation codes.
   pin --code <XXXXX-XXXXX>
-                     pin the registered passkey whose confirmation code your
-                     phone showed after registering
-  pin --credential <id-prefix>
-                     pin a registered passkey by credential id
-  pin <pem> [owner]  pin an owner public key locally (out-of-band first sight);
-                     name the owner to pin PEER keys for parent-approval chains
-  show <challenge>   print a pending challenge's URL + QR — the human-lifts-
-                     her-phone path when the URL arrived in a chat she's on
+                     trust the passkey whose code your phone showed.
+  pin --credential <id-prefix>  |  pin <pem-file> [owner]
+                     trust a passkey by id, or a public key file (name an
+                     owner to trust another person's key for shared
+                     approvals).
+
+Day to day
+  show <challenge-id>
+                     print a pending request's link and QR code.
   set <key> <value> [--approve <challenge-id>]
-                     configure a setting (typed parse + validate + persist +
-                     re-apply immediately; same namespace the Desktop form
-                     uses). Weakening a security-critical setting — turning
-                     require_passkey off, removing an authority pattern,
-                     adding a parent-gate allowlist entry, raising
-                     challenge_ttl, or moving an already-set origin/rp_id
-                     — is REFUSED unless
-                     --approve names a passkey approval of the exact
-                     server-derived phrase; strengthening is free; both are
-                     audited (finding 16).
-  get                show all settings
-  mint-token         print the bearer token HTTP POST /challenge requires
-                     (for remote agents minting on this gate; local agents
-                     mint in-process and never need it)
-  audit-verify [--notary <path>]
-                     (1) check the internal hash chain, then (2) if a notary
-                     file exists (--notary, or the audit_notary_path setting),
-                     compare its recorded heads against the chain. Internal
-                     consistency is NOT tamper evidence: an attacker with write
-                     access to the gate data dir can rewrite the whole log and
-                     recompute a self-consistent chain (finding 8). The notary
-                     file — operator-owned, OUTSIDE the data dir — is the
-                     external anchor that detects a wholesale rewrite
-                     (INTACT AND NOTARIZED / GROWN SINCE NOTARIZATION /
-                     DIVERGED=rewritten).
-  audit-notarize [--to <path>]
-                     record the current chain head out of the log's reach:
-                     with --to (or a configured audit_notary_path) append
-                     '<ISO timestamp> <head hash>' to that operator-controlled
-                     file (must live outside the gate data dir); with neither,
-                     print the head with instructions to store it out of band
-                     (password manager, a note on another host).
+                     change a setting; applies to a running gate at once.
+                     Changes that make the gate weaker (turning enforcement
+                     off, removing a pattern, trusting another gate, a longer
+                     request lifetime, moving the address) need your passkey:
+                     the refusal prints a link and the --approve command.
+  get                show all settings.
+  mint-token         print the token another machine's agent needs to send
+                     requests to this gate. It can create requests, never
+                     approve them.
+
+Audit log
+  audit-verify [--notary <file>]
+                     check the log's hash chain and, if you keep an anchor
+                     file, compare against it (INTACT AND NOTARIZED, GROWN
+                     SINCE NOTARIZATION, or DIVERGED).
+  audit-notarize [--to <file>]
+                     record the log's current head in an anchor file outside
+                     the gate's data folder. The chain alone can't detect the
+                     whole log being rewritten; the anchor can.
+
+Run setup, bootstrap and pin yourself, never through an agent: they decide
+which key is trusted.
 """
 import json
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import time
@@ -185,17 +181,88 @@ def _settings_stamp():
         return ("unreadable", str(path))
 
 
-def _active_settings_error():
-    """A config.yaml that exists but will not read/parse is served to
-    readers as silent DEFAULTS by the Hermes config loader; this returns the
-    loader's recorded parse failure while the file on disk is still the
-    broken one, so the gate can tell 'the admin chose this' from 'the
-    loader fell back'. None outside Hermes."""
+# ------------------------------------------------------------ config canary
+# Finding 17: if the gate's settings are lost — a settings reset, an edit
+# that removed them, another profile's config, or a config.yaml that won't
+# parse with no last-known-good copy to fall back on — readers get silent
+# DEFAULTS, and the default here is "enforcement off". To tell "the operator chose these settings" from "the
+# loader fell back", every operator command that writes settings also writes
+# a random check value into them (CANARY_KEY), and keeps a copy in the gate's
+# data dir — which a broken config.yaml cannot take with it. On every load:
+#   no copy            -> never configured: default-off is the honest state
+#   copy == config     -> the config was read
+#   copy, config lacks -> fall back / wrong profile / replaced: FAIL CLOSED
+# Only public plugin API (ctx.get_config / set_config) is involved. The
+# canary is never written on load: writing into a config the loader just
+# failed to parse could overwrite the operator's real settings.
+CANARY_KEY = "config_canary"
+
+
+def _canary_file() -> Path:
+    return gate_core.data_dir() / "config-canary"
+
+
+def _expected_canary():
+    """The check value this gate expects in its config, or None if the gate
+    was never configured. An unreadable copy raises (the caller fails closed)."""
     try:
-        from hermes_cli.config_read_errors import get_active_config_parse_failure
-        return get_active_config_parse_failure() or None
+        return _canary_file().read_text().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def config_canary_problem(ctx):
+    """None when the settings were demonstrably read (or the gate was never
+    configured); otherwise a plain explanation with the way out."""
+    if ctx is None:
+        return None
+    try:
+        expected = _expected_canary()
+    except Exception as exc:  # unreadable OR undecodable: fail closed (A4)
+        return (f"the gate's config check file {_canary_file()} can't be read "
+                f"({type(exc).__name__}: {exc})")
+    if expected is None:
+        return None
+    try:
+        got = ctx.get_config(CANARY_KEY, default=None)
+    except Exception as exc:
+        return f"the Hermes config can't be read ({type(exc).__name__}: {exc})"
+    if got == expected:
+        return None
+    return (f"the Hermes config wasn't read as expected: passkey-gate's check value "
+            f"({CANARY_KEY}) is {'missing' if got is None else 'different'}, so its settings "
+            "were lost or replaced (a settings reset, an edit that removed them, a "
+            "broken config.yaml, or another Hermes profile's config). Restore them and "
+            "the gate picks them up automatically. If you replaced "
+            f"the config on purpose, delete {_canary_file()} and run "
+            "'hermes passkey-gate setup'.")
+
+
+def _expected_canary_safe():
+    try:
+        return _expected_canary()
     except Exception:
         return None
+
+
+def stamp_config_canary(ctx):
+    """Arm the check after an operator command wrote settings successfully.
+    Config first, then the copy: if writing the config fails, the check is
+    simply not armed yet (never a fail-closed caused by our own write)."""
+    if ctx is None or config_canary_problem(ctx):
+        return
+    expected = _expected_canary()
+    if expected is not None:
+        return  # already armed, and the config matches
+    value = secrets.token_hex(8)
+    ctx.set_config(CANARY_KEY, value)
+    path = _canary_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+    os.replace(tmp, path)
 
 
 def invalidate_config_cache():
@@ -225,12 +292,10 @@ def _load_config_state():
         logger.exception("passkey-gate: config load failed; failing closed until it loads")
         return {"require_passkey": True, "patterns": [],
                 "_config_error": f"{type(exc).__name__}: {exc}"}
-    parse_failure = _active_settings_error()
-    if parse_failure:
-        logger.error("passkey-gate: settings source unreadable (%s); failing closed",
-                     parse_failure)
-        return {"require_passkey": True, "patterns": [],
-                "_config_error": f"settings source unreadable: {parse_failure}"}
+    problem = config_canary_problem(_ctx_ref)
+    if problem:
+        logger.error("passkey-gate: %s; failing closed", problem)
+        return {"require_passkey": True, "patterns": [], "_config_error": problem}
     return cfg
 
 
@@ -317,6 +382,9 @@ def cmd_expose(ctx, rest):
     backend = rest[0].strip().lower() if rest else "auto"
     if backend not in ("auto", "tailscale", "none"):
         return "usage: hermes passkey-gate expose [auto|tailscale|none]"
+    problem = config_canary_problem(ctx)
+    if problem:
+        return f"REFUSED: {problem}"
     origin_cfg = (ctx.get_config("origin", default="") or "").strip() if ctx is not None else ""
     rp_cfg = (ctx.get_config("rp_id", default="") or "").strip() if ctx is not None else ""
     try:
@@ -342,8 +410,17 @@ def cmd_expose(ctx, rest):
                      f"{rp_cfg or '(default)'}). Moving it needs a passkey approval — run "
                      f"'hermes passkey-gate set origin {url}' and follow its instructions.")
     elif result.get("persistent") and ctx is not None:
+        try:  # first-time origin setup is free, but it is still recorded
+            _ensure_data_dir()
+            gate_core.audit("config_changed", key="origin", old=_jsonable(origin_cfg),
+                            new=url, weakened=False, approved=None, via="expose")
+            gate_core.audit("config_changed", key="rp_id", old=_jsonable(rp_cfg),
+                            new=rp_id, weakened=False, approved=None, via="expose")
+        except Exception:
+            logger.exception("passkey-gate: could not audit the origin saved by expose")
         ctx.set_config("origin", url)
         ctx.set_config("rp_id", rp_id)
+        stamp_config_canary(ctx)
         gate_core.configure(rp_id=rp_id, origin=url)
         lines.append("saved origin + rp_id to plugin settings (persists across sessions)")
     return "\n".join(x for x in lines if x)
@@ -351,10 +428,10 @@ def cmd_expose(ctx, rest):
 
 def cmd_credentials(ctx, rest):
     """List registered passkeys with their key fingerprints, so the operator
-    can pin the one whose fingerprint their registration page showed."""
+    can pin the one whose code their phone showed after registering."""
     creds = gate_core.list_credentials()
     if not creds:
-        return ("no passkeys registered yet — run 'hermes passkey-gate bootstrap' "
+        return ("no passkeys registered yet — run 'hermes passkey-gate setup' "
                 "and register on your phone first")
     try:
         pinned_pem = local_verify.pinned(gate_core.data_dir())
@@ -488,12 +565,49 @@ def _canonical_value(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def weakening_phrase(key, new_value):
+def _quoted(items):
+    return ", ".join(json.dumps(str(x)) for x in items)
+
+
+def _change_description(key, old, new):
+    """What a gate-weakening change does, in words the signer can judge
+    (v0.7 review M5: showing only the new value let a near-identical edit
+    that disables a pattern look like the existing rule)."""
+    if key == "require_passkey":
+        return "turns enforcement OFF (require_passkey true → false)"
+    if key in ("authority_patterns", "parent_gate_allowlist"):
+        old_l = [str(x) for x in (old or [])] if isinstance(old, (list, tuple)) else []
+        new_l = [str(x) for x in (new or [])] if isinstance(new, (list, tuple)) else []
+        removed = [x for x in old_l if x not in new_l]
+        added = [x for x in new_l if x not in old_l]
+        noun = "pattern" if key == "authority_patterns" else "trusted peer gate"
+        parts = []
+        if removed:
+            parts.append(f"REMOVES {len(removed)} {noun}(s): {_quoted(removed)}")
+        if added:
+            parts.append(f"ADDS {len(added)} {noun}(s): {_quoted(added)}")
+        if not parts:
+            parts.append(f"shrinks the list from {len(old_l)} to {len(new_l)} entries")
+        return f"{key}: " + "; ".join(parts)
+    if key == "challenge_ttl":
+        return f"lengthens the request lifetime from {old} to {new} seconds"
+    if key == "origin":
+        return f"moves the gate's address from {old!r} to {new!r}"
+    if key == "rp_id":
+        return f"moves the passkey domain (RP ID) from {old!r} to {new!r}"
+    return f"{key}: {_canonical_value(old)} → {_canonical_value(new)}"
+
+
+def weakening_phrase(key, new_value, old_value=None):
     """The EXACT server-derived action text a passkey must sign to authorize
     this gate-weakening change (finding 16). One derivation serves both the
-    mint and the verification, so the two can never drift apart."""
-    return (f"passkey-gate: set {key}={_canonical_value(new_value)} — "
-            "confirm this gate-weakening change")
+    mint and the verification, so the two can never drift apart. It names
+    the old value as well as the new one, so an approval only applies to the
+    state it was granted against (v0.7 review M5)."""
+    return (f"passkey-gate settings change: {_change_description(key, old_value, new_value)}. "
+            f"Exact change: {key} from {_canonical_value(old_value)} to "
+            f"{_canonical_value(new_value)}. This weakens the gate; approve only if you "
+            "asked for it.")
 
 
 def _normalize_typed(key, value):
@@ -600,21 +714,32 @@ def _verify_weakening_approval(cid, phrase):
     if rec.get("action_sha256") != sha:
         return ["the approval was signed for different action text than this "
                 "change requires"]
+    # v0.7 review M1: only a challenge the gate's own CLI minted for a
+    # settings change counts — never an agent's request, even one whose text
+    # is the same phrase, and never one with a bound tool call (the page
+    # would have told the human to judge the command, not this text)
+    row = gate_core.db().execute(
+        "select kind, binding_sha256, tool_call, action_sha256 from challenges where id=?",
+        (cid,)).fetchone()
+    if (row is None or row["kind"] != gate_core.SETTINGS_KIND or row["binding_sha256"]
+            or row["tool_call"] or row["action_sha256"] != sha):
+        return ["this approval wasn't created by passkey-gate for a settings change, so it "
+                "can't authorise one — re-run the change without --approve to get the right "
+                "approval link"]
     pinned = local_verify.pinned(gate_core.data_dir())
     if pinned is None:
-        return ["no owner key is pinned — pin the human's public key out of band "
-                "with 'hermes passkey-gate pin <pem-file>' before any gate-weakening "
+        return ["no owner key is pinned — run 'hermes passkey-gate setup' (or 'hermes passkey-gate pin --code <code from your phone>') before any gate-weakening "
                 "change can be approved"]
     return [f"local verification failed: {p}" for p in
             local_verify.check(rec, phrase, tools._origin(), gate_core.rp_id(), pinned)]
 
 
-def _weakening_needs_approval(key, new_value, raw):
+def _weakening_needs_approval(key, new_value, raw, old_value=None):
     """Refusal that carries its own recovery (finding 16): mint the approval
     challenge for the EXACT server-derived phrase and hand back the URL, the
     challenge id, and the --approve re-run — the human decides, not the agent
     this setting is meant to constrain."""
-    phrase = weakening_phrase(key, new_value)
+    phrase = weakening_phrase(key, new_value, old_value)
     lines = [f"REFUSED: set {key} weakens the passkey gate — enforcement settings "
              "are operator-owned, and a gate-weakening change needs a passkey "
              "approval signed by your human first.",
@@ -622,11 +747,11 @@ def _weakening_needs_approval(key, new_value, raw):
              "approval phrase (the human signs EXACTLY this):",
              f"  {phrase}"]
     try:
-        c = gate_core.create_challenge(phrase, "hermes-cli")
+        c = gate_core.create_challenge(phrase, "hermes-cli", _kind=gate_core.SETTINGS_KIND)
     except Exception as exc:
         c = None
-        lines.append(f"  (no approval challenge could be minted here — {type(exc).__name__}: "
-                     f"{exc}; mint one with the gate_challenge tool using the phrase above)")
+        lines.append(f"  (no approval challenge could be created — {type(exc).__name__}: "
+                     f"{exc}; fix that and re-run this command)")
     if c:
         if c.get("url"):
             lines += ["", "approval URL — send it to your human; they read the page "
@@ -646,14 +771,14 @@ def _weakening_needs_approval(key, new_value, raw):
     return "\n".join(lines)
 
 
-def _weakening_approval_failed(key, new_value, problems):
+def _weakening_approval_failed(key, new_value, problems, old_value=None):
     """Refusal for a --approve that did not verify, with the reasons."""
     return "\n".join(
         [f"REFUSED: set {key} weakens the passkey gate, and the supplied approval "
          "did not verify for this exact change:"] +
         [f"  - {p}" for p in problems] +
         ["", "approval phrase this change requires (the human must sign exactly this):",
-         f"  {weakening_phrase(key, new_value)}",
+         f"  {weakening_phrase(key, new_value, old_value)}",
          "re-run without --approve to mint a fresh approval challenge, send its URL "
          "to your human, and re-run with --approve once they have signed it."])
 
@@ -686,6 +811,11 @@ def cmd_set(ctx, rest):
     key, raw = rest[0], " ".join(rest[1:])
     if key not in SETTINGS_SPEC:
         return f"unknown setting {key!r}. Keys: " + ", ".join(SETTINGS_SPEC)
+    problem = config_canary_problem(ctx)
+    if problem:
+        # writing into a config Hermes couldn't read could replace the
+        # operator's real settings — and would then "match" the canary
+        return f"REFUSED: {problem} Nothing was saved."
     value, err = parse_setting(key, raw)
     if err:
         return err
@@ -726,8 +856,8 @@ def cmd_set(ctx, rest):
         weakens = _change_weakens(key, old, value)
         if weakens:
             if approve_cid is None:
-                return _weakening_needs_approval(key, value, raw)
-            phrase = weakening_phrase(key, value)
+                return _weakening_needs_approval(key, value, raw, old)
+            phrase = weakening_phrase(key, value, old)
             problems = _verify_weakening_approval(approve_cid, phrase)
             if problems:
                 # F1: an approval already spent on an application replays
@@ -736,7 +866,7 @@ def cmd_set(ctx, rest):
                 # failed check (the verification itself is unchanged).
                 if gate_core.challenge_consumed(approve_cid):
                     return _weakening_approval_used(key, approve_cid)
-                return _weakening_approval_failed(key, value, problems)
+                return _weakening_approval_failed(key, value, problems, old)
             # F1: burn the approval ATOMICALLY, before anything is applied
             # or audited — the claim is one conditional UPDATE in the same
             # discipline as gate_core.consume(), so concurrent
@@ -765,11 +895,18 @@ def cmd_set(ctx, rest):
         except Exception:
             pass
     ctx.set_config(key, value)
+    stamp_config_canary(ctx)
     # finding 7: a running gateway must see this change on the NEXT hook
     # call — drop the cache before re-applying so no verdict serves stale state
     invalidate_config_cache()
     apply_config(ctx)
-    return f"{key} = {json.dumps(value)}\n" + cmd_show_settings(ctx)
+    note = ""
+    if key == "port" and (ctx.get_config("origin", default="") or "").strip():
+        # v0.7 review H1: the HTTPS address doesn't follow the port
+        note = ("NOTE: your HTTPS address still forwards to the old port. Until it's "
+                "updated, whatever listens there answers your phone instead of the gate. "
+                "Update the forwarding (for Tailscale: run 'hermes passkey-gate expose').\n")
+    return f"{key} = {json.dumps(value)}\n" + note + cmd_show_settings(ctx)
 
 
 def parse_setting(key, raw: str):
@@ -834,6 +971,10 @@ def cmd_status(ctx, rest):
     out["owner_key_pinned"] = local_verify.pinned(gate_core.data_dir()) is not None
     pins_dir = gate_core.data_dir() / "pins"
     out["peer_keys_pinned"] = sorted(p.name[:-4] for p in pins_dir.glob("*.pem")) if pins_dir.exists() else []
+    problem = config_canary_problem(ctx)
+    out["config_check"] = (f"FAILING: {problem}" if problem else
+                           "ok" if _expected_canary_safe() else
+                           "not armed yet (run 'hermes passkey-gate setup')")
     out["enforcement"] = {**apply_config_safe(),
                           "note": "patterns are regexes matched against tool_name + canonical args JSON"}
     return json.dumps(out, indent=2)

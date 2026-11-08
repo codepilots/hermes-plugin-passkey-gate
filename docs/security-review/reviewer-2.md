@@ -1,3 +1,12 @@
+# Independent review 2 — passkey-gate v0.4.0
+
+> **Historical record.** Apart from its title and this note, the review is kept
+> exactly as written, as evidence of
+> what was found. It describes v0.4.0 (commit `69bcd7e6`), 5 November 2026. Its findings are reconciled into [security-review.md](../security-review.md) as findings 1–28.
+> File paths, line numbers and behaviour refer to that version, and many of
+> the problems it describes have since been fixed.
+> For what was fixed and what is still open, see the [remediation ledger](remediation.md); for the residual risks that are accepted rather than fixed, see the [threat model](threat-model.md).
+
 ## Verdict
 
 **Not safe to ship publicly as a security plugin.** The WebAuthn cryptographic verification path is mostly sound, but the authorization boundary is not: approvals can be detached from the exact execution, parent approvals can be misleading, and concurrent enforcement can allow the same approval twice.

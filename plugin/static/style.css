@@ -55,3 +55,5 @@ pre.command { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding
   background: #0c0f0a; border-radius: 6px; color: #fff;
   font: 600 1em/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 p.warn { font-size: .95em; }
+div.bound-call.settings { border-color: #f08080; background: #241313; }
+div.bound-call.settings h2 { color: #f08080; }

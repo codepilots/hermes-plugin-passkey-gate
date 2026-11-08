@@ -1,20 +1,17 @@
 name: passkey-gate
 
-version: 0.7.1
+version: 0.7.2
 
 description: >
-  Passkey (WebAuthn) authorization gate for high-authority agent actions.
-  The agent mints a challenge bound bit-for-bit to the exact action text and
-  tool call; approval is a WebAuthn signature from the owner passkey
-  registered through the operator's out-of-band ceremony; the agent then
-  verifies the signed assertion locally against a pinned public key before
-  acting. No agent ever holds a private key; approvals are single-use when
-  applied — enforced tool-call approvals and gate-weakening approvals are
-  consumed atomically at apply time, while plain text-only approvals verify
-  until expiry and are not consumed; and an append-only hash-chained audit
-  log detects edits and corruption within the log; its head can be notarized
-  to an operator-kept file outside the gate data dir, which is what detects
-  a wholesale rewrite.
+  Approve your agents' risky actions with your phone's passkey. An agent
+  asks for approval of an exact action (and, optionally, the exact command
+  to run); you read it on your phone and sign with Face ID, a fingerprint or
+  your screen lock; the agent checks your signature against your key before
+  acting. Optional enforcement blocks matching commands until you approve
+  them, each approval running once. Requests, approvals and setting
+  changes go into a tamper-evident audit log. Start with `hermes passkey-gate setup`.
+
+requires_hermes: ">=0.21.5"
 
 author: Autumn Thomson (codepilots)
 
@@ -30,43 +27,43 @@ config_schema:
   origin:
     type: str
     default: ""
-    label: "Gate origin"
-    description: "HTTPS origin of the gate service, e.g. https://your-host.ts.net:8445. Leave empty to run the verifier in offline-check-only mode against an already-fetched record. Setting it the first time is free; changing an origin that is already set needs a passkey approval (`set origin ... --approve`)."
+    label: "Gate address (origin)"
+    description: "The HTTPS address your phone uses to reach the gate, e.g. https://your-host.your-tailnet.ts.net. `hermes passkey-gate setup` fills this in. Until it's set, approval requests have no link. Setting it the first time is free; changing it later needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   rp_id:
     type: str
     default: ""
-    label: "RP ID"
-    description: "WebAuthn RP ID — usually the domain name the gate origin is served on (e.g. yourhost.ts.net). Defaults to the origin's hostname. Changing an RP ID that is already set needs a passkey approval."
+    label: "Passkey domain (RP ID)"
+    description: "The web domain your passkey is registered to (WebAuthn \"RP ID\"). Leave empty to use the gate address's host name. Set it to a broader domain, such as your-tailnet.ts.net, to reuse a passkey you already have there. Changing it later needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   port:
     type: int
     default: 8655
-    label: "Serve port"
-    description: "Port for 'hermes passkey-gate serve' (binds 127.0.0.1; must be an integer from 1 to 65535; put it behind TLS with tailscale serve, an nginx proxy, or similar)."
+    label: "Local port"
+    description: "Local port the gate listens on, 1–65535. It only listens on 127.0.0.1; Tailscale or your own HTTPS proxy forwards to it."
   challenge_ttl:
     type: int
     default: 600
-    label: "Challenge TTL"
-    description: "Seconds a challenge stays pending after creation (must be an integer from 1 to 86400). Lowering it is free; raising it keeps approvals spendable longer, so it needs a passkey approval."
+    label: "Request lifetime (seconds)"
+    description: "Seconds from creation until a request, and any approval of it, expires: 1–86400 (default 10 minutes). Shortening it is free; lengthening it needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   require_passkey:
     type: bool
     default: false
-    label: "Enforce passkey before listed tool calls"
-    description: "When true, pre_tool_call blocks tool calls matching authority_patterns unless a challenge bound to that exact tool call was approved (and binds user verification). Opt-in."
+    label: "Require passkey for matching tool calls"
+    description: "When on, any tool call matching an authority pattern is blocked until you approve that exact call with your passkey. Each approval lets the call run once. Turning this off needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   authority_patterns:
     type: list
     default: []
-    label: "Authority patterns"
-    description: "Regex list matched against 'tool_name + canonical JSON of tool args' (e.g. '^terminal .*(rm |curl |scp |dd )') that trigger passkey enforcement when require_passkey is true. Validated when set: every pattern must be a string that compiles as a regex, at most 200 chars, at most 100 patterns; a list with any bad entry is refused whole."
+    label: "Commands that need approval (patterns)"
+    description: "Which tool calls need your approval when enforcement is on: regular expressions matched against the tool name followed by its arguments as JSON, e.g. '^terminal .*(rm -rf|curl |scp |dd )'. Up to 100 patterns of up to 200 characters each; a list with any invalid pattern is rejected whole. Removing a pattern needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   parent_gate_allowlist:
     type: list
     default: []
-    label: "Parent gate allowlist"
-    description: "Origins (scheme+host+port, exact match, no wildcards) of peer gates this gate may fetch to re-check a claimed parent approval. Empty (the default) disables ALL parent-gate fetches — a claimed prior approval then renders as 'unverified (parent gate not on allowlist)' and is never fetched."
+    label: "Trusted peer gates"
+    description: "Other people's gates this gate may contact, to check an approval their human already gave (exact origins, e.g. https://their-host.ts.net:8445, no wildcards). Empty, the default, means it never contacts another gate, and such approvals are shown as unverified claims. Adding an entry needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   audit_notary_path:
     type: str
     default: ""
-    label: "Audit notary file"
-    description: "Operator-controlled file (OUTSIDE the gate data dir) where 'hermes passkey-gate audit-notarize' appends the current audit-chain head hash, and which 'audit-verify' compares against the chain to detect a wholesale rewrite. The chain alone only detects partial edits — this external anchor is the tamper evidence. Non-security setting: it names where anchors are kept, not what the gate enforces."
+    label: "Audit anchor file"
+    description: "A file outside the gate's data folder, where `audit-notarize` records the audit log's latest fingerprint and `audit-verify` checks against it. This is what detects the whole log being rewritten. Keep it somewhere agents can't write."
 
 python_dependencies:
   - webauthn>=2,<4

@@ -10,6 +10,9 @@ from passkey_gate import cli
 
 class FakeCtx:
     def __init__(self):
+        # a new fake config models a fresh install, which has no armed
+        # config canary either (the canary file is per-test, see conftest)
+        cli._canary_file().unlink(missing_ok=True)
         self.store = {}
 
     def get_config(self, key, default=None):
@@ -243,7 +246,7 @@ def test_set_parent_gate_allowlist_roundtrip():
     # adding entries is gate-weakening -> refused, nothing persisted
     assert ctx.store.get("parent_gate_allowlist") is None
     assert '["https://peer-a.example.ts.net:8445","https://peer-b.example.ts.net:8445"]' in out
-    assert "confirm this gate-weakening change" in out
+    assert "This weakens the gate" in out
     assert "--approve" in out
     # removing an entry is strengthening: parsed, persisted, no approval needed
     ctx.store["parent_gate_allowlist"] = ["https://peer-a.example.ts.net:8445",
@@ -299,7 +302,7 @@ def test_set_authority_patterns_length_and_count_caps():
     assert ctx.store.get("authority_patterns") is None  # refused -> not stored
     out = _cli(ctx, f'set authority_patterns ["{"a" * 200}"]')
     assert ctx.store["authority_patterns"] == ["a" * 200]  # exactly at the cap
-    ctx.store.clear()
+    ctx = FakeCtx()  # fresh config for the count cap
     out = _cli(ctx, f"set authority_patterns {json.dumps(['p%d' % i for i in range(101)])}")
     assert "REFUSED" in out and "100" in out
     assert ctx.store.get("authority_patterns") is None
@@ -410,3 +413,60 @@ def test_key_fingerprint_is_stable_and_matches_registration(monkeypatch):
     pem = _fake_creds(1)[0]["spki_pem"]
     fp = gate_core.key_fingerprint(pem)
     assert fp == gate_core.key_fingerprint(pem) and len(fp.split(":")) == 8
+
+
+# ------------------------------------------------ config canary (finding 17)
+def test_canary_never_configured_stays_default_off():
+    from passkey_gate import cli
+    assert cli.config_canary_problem(FakeCtx()) is None   # nothing armed: honest default
+
+
+def test_set_arms_the_canary_and_a_lost_config_fails_closed(tmp_path):
+    from passkey_gate import cli
+    ctx = FakeCtx()
+    _cli(ctx, "set require_passkey true")
+    value = ctx.store[cli.CANARY_KEY]
+    assert (tmp_path / "config-canary").read_text() == value     # copy kept outside config
+    assert cli.config_canary_problem(ctx) is None
+    ctx.store.clear()                                            # loader fell back to defaults
+    assert "missing" in cli.config_canary_problem(ctx)
+    ctx.store[cli.CANARY_KEY] = "0000000000000000"               # another profile's config
+    assert "different" in cli.config_canary_problem(ctx)
+
+
+def test_set_and_expose_refuse_while_the_config_is_unread():
+    """Writing into a config Hermes couldn't read could replace the real
+    settings and then 'match' the canary, hiding the problem."""
+    from passkey_gate import cli
+    ctx = FakeCtx()
+    _cli(ctx, "set require_passkey true")
+    ctx.store.clear()
+    out = _cli(ctx, "set challenge_ttl 60")
+    assert out.startswith("REFUSED") and "wasn't read as expected" in out
+    assert "challenge_ttl" not in ctx.store
+    assert cli.cmd_expose(ctx, []).startswith("REFUSED")
+
+
+def test_canary_is_not_armed_when_writing_the_config_fails(tmp_path):
+    from passkey_gate import cli
+
+    class ReadOnlyCtx(FakeCtx):
+        def set_config(self, key, value):
+            if key == cli.CANARY_KEY:
+                raise OSError("config not writable")
+            super().set_config(key, value)
+    ctx = ReadOnlyCtx()
+    with pytest.raises(OSError):
+        cli.stamp_config_canary(ctx)
+    assert not (tmp_path / "config-canary").exists()   # never fail closed on our own failed write
+    assert cli.config_canary_problem(ctx) is None
+
+
+def test_status_reports_the_config_check():
+    from passkey_gate import cli
+    ctx = FakeCtx()
+    assert "not armed" in json.loads(_cli(ctx, "status"))["config_check"]
+    _cli(ctx, "set require_passkey true")
+    assert json.loads(_cli(ctx, "status"))["config_check"] == "ok"
+    ctx.store.clear()
+    assert json.loads(_cli(ctx, "status"))["config_check"].startswith("FAILING")

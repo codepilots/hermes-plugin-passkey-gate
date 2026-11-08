@@ -117,6 +117,12 @@ GATE_VERIFY = {
                 "type": "integer",
                 "description": "Poll until this many seconds elapse waiting for the human to sign (max 120). Omit for an instant one-shot check.",
             },
+            "tool_call": {
+                "type": "object",
+                "description": (
+                    "Optional: the exact {tool, args} you are about to run. verified is "
+                    "false unless it matches the call the human approved."),
+            },
             "max_age": {
                 "type": "integer",
                 "description": "Optional: reject approvals older than this many seconds.",

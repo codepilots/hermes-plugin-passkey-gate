@@ -831,18 +831,21 @@ def test_config_load_failure_fails_closed(monkeypatch):
 
 def test_unparseable_settings_source_fails_closed(monkeypatch):
     """Finding 17's production face inside Hermes: a config.yaml that exists
-    but will not parse is served to readers as silent DEFAULTS by the config
-    loader. The gate must detect the recorded parse failure and fail closed
-    instead of running on defaults the admin never chose."""
+    but won't parse is served to readers as silent DEFAULTS (here: no
+    passkey-gate settings at all, so enforcement off). Once the gate has been
+    configured, its config canary is missing from those defaults, and the
+    gate fails closed instead of running on settings nobody chose."""
     import passkey_gate
     cli = reset_gate_config(monkeypatch)
-    monkeypatch.setattr(cli, "_ctx_ref",
-                        FakeCtx({"require_passkey": False, "authority_patterns": []}))
-    monkeypatch.setattr(cli, "_active_settings_error", raising=False,
-                        value=lambda: "config.yaml has a formatting error at line 12")
+    ctx = FakeCtx({"require_passkey": True, "authority_patterns": [r"^terminal "]})
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    cli.stamp_config_canary(ctx)                      # an operator configured it
+    assert cli.apply_config_safe()["require_passkey"] is True
+    cli._cfg_cache = None
+    ctx.settings.clear()                             # Hermes fell back to defaults
     cfg = cli.apply_config_safe()
     assert cfg["require_passkey"] is True, cfg
-    assert "formatting error" in cfg["_config_error"]
+    assert "wasn't read as expected" in cfg["_config_error"]
     v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
     assert v is not None and v["action"] == "block" and "failed to load" in v["message"]
 
@@ -871,7 +874,7 @@ def test_cmd_set_takes_effect_without_restart(monkeypatch):
     # the cache, so the finding-7 reload story is unchanged)
     out = cli.cmd_set(ctx, ["require_passkey", "false"])
     assert "require_passkey = false" not in out
-    assert "passkey-gate: set require_passkey=false" in out
+    assert "turns enforcement OFF" in out
     v = passkey_gate._on_pre_tool_call("terminal", call, "t3")
     assert v is not None and v["action"] == "block"
 
@@ -940,16 +943,21 @@ def test_register_with_broken_config_fails_closed(monkeypatch):
 
 
 # ------------------- finding 16: enforcement config is not agent-mutable
-WEAKEN_OFF_PHRASE = ("passkey-gate: set require_passkey=false — "
-                     "confirm this gate-weakening change")
+def weaken_phrase(key, new_value, old_value):
+    """The server-derived phrase a passkey must sign to authorize a
+    gate-weakening `set` (finding 16), naming old and new values (v0.7
+    review M5)."""
+    from passkey_gate import cli as _cli
+    return _cli.weakening_phrase(key, new_value, old_value)
 
 
-def weaken_phrase(key, canonical_value):
-    """The spec-exact server-derived phrase a passkey must sign to authorize a
-    gate-weakening `set`: 'passkey-gate: set <key>=<canonical-new-value> —
-    confirm this gate-weakening change'."""
-    return (f"passkey-gate: set {key}={canonical_value} — "
-            "confirm this gate-weakening change")
+WEAKEN_OFF_PHRASE = weaken_phrase("require_passkey", False, True)
+
+
+def settings_challenge(phrase):
+    """A settings-change challenge minted the way `set` mints it (v0.7 review
+    M1: only these can authorise a settings change)."""
+    return dict(gate_core.create_challenge(phrase, "hermes-cli", _kind=gate_core.SETTINGS_KIND))
 
 
 def _set_ctx(monkeypatch, **settings):
@@ -1004,7 +1012,7 @@ def test_set_weakening_applied_with_passkey_approval(monkeypatch, base, autumn):
     the pinned owner key, applied, and audited with the challenge id."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
     pin_once(gate_core.data_dir(), autumn.pem)
-    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)  # the gate_verify fetch path
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
@@ -1026,7 +1034,7 @@ def test_set_weakening_consumes_the_approval_challenge(monkeypatch, base, autumn
     config_changed audit entry names the challenge id that was spent."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
     pin_once(gate_core.data_dir(), autumn.pem)
-    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
@@ -1059,7 +1067,7 @@ def test_set_weakening_replay_of_used_approval_refused(monkeypatch, base, autumn
     the setting is untouched, and no phantom config_changed is audited."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
     pin_once(gate_core.data_dir(), autumn.pem)
-    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     cid = c["challenge_id"]
@@ -1091,7 +1099,7 @@ def test_set_weakening_concurrent_replays_exactly_one_applies(monkeypatch, base,
     config_changed story for the race."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
     pin_once(gate_core.data_dir(), autumn.pem)
-    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     cid = c["challenge_id"]
@@ -1150,13 +1158,13 @@ def test_set_weakening_fresh_approval_for_a_second_weakening(monkeypatch, base, 
     pin_once(gate_core.data_dir(), autumn.pem)
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     # first weakening: require_passkey off, its approval consumed on apply
-    c1 = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c1 = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c1["challenge_id"])
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c1["challenge_id"]])
     assert "require_passkey = false" in out, out
     # second weakening, DIFFERENT key, fresh signature: applies normally
-    phrase2 = weaken_phrase("authority_patterns", "[]")
-    c2 = new_challenge(base, text=phrase2, requester="hermes-cli")
+    phrase2 = weaken_phrase("authority_patterns", [], [r"rm -rf"])
+    c2 = settings_challenge(phrase2)
     approve(base, autumn, c2["challenge_id"])
     out = cli.cmd_set(ctx, ["authority_patterns", "[]", "--approve", c2["challenge_id"]])
     assert ctx.settings["authority_patterns"] == [], out
@@ -1164,7 +1172,7 @@ def test_set_weakening_fresh_approval_for_a_second_weakening(monkeypatch, base, 
     assert cc and cc[-1]["weakened"] is True and cc[-1]["approved"] == c2["challenge_id"]
     # the same key again: re-arm, fresh signature, applies again
     cli.cmd_set(ctx, ["require_passkey", "true"])
-    c3 = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c3 = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c3["challenge_id"])
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c3["challenge_id"]])
     assert "require_passkey = false" in out, out
@@ -1190,7 +1198,7 @@ def test_set_authority_pattern_removal_refused_without_approval(monkeypatch):
                         authority_patterns=[r"ssh git@100", r"rm -rf"])
     out = cli.cmd_set(ctx, ["authority_patterns", '["ssh git@100"]'])
     assert ctx.settings["authority_patterns"] == [r"ssh git@100", r"rm -rf"]
-    assert weaken_phrase("authority_patterns", '["ssh git@100"]') in out
+    assert weaken_phrase("authority_patterns", ["ssh git@100"], [r"ssh git@100", r"rm -rf"]) in out
     assert "--approve" in out
 
 
@@ -1200,7 +1208,7 @@ def test_set_authority_patterns_emptying_refused_without_approval(monkeypatch):
                         authority_patterns=[r"ssh git@100"])
     out = cli.cmd_set(ctx, ["authority_patterns", "[]"])
     assert ctx.settings["authority_patterns"] == [r"ssh git@100"]
-    assert weaken_phrase("authority_patterns", "[]") in out
+    assert weaken_phrase("authority_patterns", [], [r"ssh git@100"]) in out
 
 
 def test_set_authority_pattern_addition_is_free(monkeypatch):
@@ -1222,7 +1230,8 @@ def test_set_parent_allowlist_addition_refused_without_approval(monkeypatch):
     new = '["https://peer-a.example.ts.net:8445","https://peer-b.example.ts.net:8445"]'
     out = cli.cmd_set(ctx, ["parent_gate_allowlist", new])
     assert ctx.settings["parent_gate_allowlist"] == ["https://peer-a.example.ts.net:8445"]
-    assert weaken_phrase("parent_gate_allowlist", new) in out
+    assert weaken_phrase("parent_gate_allowlist", json.loads(new),
+                         ["https://peer-a.example.ts.net:8445"]) in out
     assert "--approve" in out
 
 
@@ -1258,7 +1267,7 @@ def test_set_approve_rejects_unapproved_and_bogus_challenges(monkeypatch, base, 
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
     pin_once(gate_core.data_dir(), autumn.pem)
     monkeypatch.setattr(tools, "_base_url", lambda: base)
-    pending = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    pending = settings_challenge(WEAKEN_OFF_PHRASE)
     out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", pending["challenge_id"]])
     assert ctx.settings["require_passkey"] is True
     assert "REFUSED" in out and "pending" in out
@@ -1432,7 +1441,7 @@ def test_set_approve_requires_a_pinned_owner_key(monkeypatch, base, autumn):
     out-of-band pinned key authorizes nothing (a self-registered rogue
     credential must not pass --approve)."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
-    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="hermes-cli")
+    c = settings_challenge(WEAKEN_OFF_PHRASE)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(tools, "_base_url", lambda: base)
     monkeypatch.setattr(local_verify, "pinned", lambda data_dir, owner=None: None)
@@ -1856,3 +1865,111 @@ def test_cli_registers_with_hermes_signature_and_runs(monkeypatch, capsys):
     args = parser.parse_args(["passkey-gate", "nonsense-subcommand"])
     assert args.func(args) == 2
     assert "usage: hermes passkey-gate" in capsys.readouterr().out
+
+
+# ------------------------------------------- A4 (v0.7 review M3): never fail open
+def test_unreadable_canary_content_fails_closed_not_open(monkeypatch, tmp_path):
+    """A canary copy that isn't valid UTF-8 raised UnicodeDecodeError out of
+    the hook, and Hermes treats a raising hook as 'allow'."""
+    import passkey_gate
+    cli = reset_gate_config(monkeypatch)
+    ctx = FakeCtx({"require_passkey": True, "authority_patterns": [r"^terminal .*rm -rf"]})
+    monkeypatch.setattr(cli, "_ctx_ref", ctx)
+    cli.stamp_config_canary(ctx)
+    cli._canary_file().write_bytes(b"\xff\xfe\x00junk")
+    cli._cfg_cache = None
+    v = passkey_gate._on_pre_tool_call("terminal", {"command": "rm -rf ./important"}, "t")
+    assert v is not None and v["action"] == "block", v
+
+
+def test_any_exception_in_the_hook_blocks(monkeypatch):
+    import passkey_gate
+    reset_gate_config(monkeypatch)
+    from passkey_gate import cli as _cli
+    def boom():
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(_cli, "apply_config_safe", boom)
+    v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
+    assert v is not None and v["action"] == "block" and "unexpected" in v["message"]
+    # a future Hermes that stops passing task_id must not turn into 'allow' either
+    v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"})
+    assert v is not None and v["action"] == "block"
+
+
+# ------------- v0.7 review M1 / A2 and M5 / A6: settings approvals
+def test_a_tool_call_approval_cannot_authorise_a_settings_change(monkeypatch, base, autumn):
+    """M1 exploit: the agent mints the exact settings phrase as action text,
+    bound to a harmless tool call; the page tells the human to judge the
+    command; the human approves 'read README'. That must not turn
+    enforcement off."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True)
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    c = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="helpful-agent",
+                      tool_call={"tool": "read_file", "args": {"path": "README.md"}})
+    approve(base, autumn, c["challenge_id"])
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c["challenge_id"]])
+    assert ctx.settings["require_passkey"] is True, out
+    assert "wasn't created by passkey-gate for a settings change" in out
+    # and a text-only agent request with the same phrase doesn't count either
+    c2 = new_challenge(base, text=WEAKEN_OFF_PHRASE, requester="helpful-agent")
+    approve(base, autumn, c2["challenge_id"])
+    out = cli.cmd_set(ctx, ["require_passkey", "false", "--approve", c2["challenge_id"]])
+    assert ctx.settings["require_passkey"] is True, out
+    assert not gate_core.consume_approval(c2["challenge_id"], gate_core.sha256_hex(WEAKEN_OFF_PHRASE))
+
+
+def test_agents_cannot_use_the_gates_own_requester_name(base):
+    s, r = call(base, "/challenge", {"action_text": ACTION, "requester": "Hermes-CLI"})
+    assert s == 422 and "reserved" in r["error"]
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "hermes-cli"}))
+    assert out["ok"] is False and "reserved" in out["error"]
+
+
+def test_settings_phrase_shows_what_is_removed_and_the_old_value():
+    """M5: a near-identical edit (capital T never matches the 'terminal'
+    tool) must read as removing the existing pattern, not as the same rule."""
+    from passkey_gate import cli as _cli
+    old = ["^terminal .*(rm -rf|curl )"]
+    new = ["^Terminal .*(rm -rf|curl )"]
+    phrase = _cli.weakening_phrase("authority_patterns", new, old)
+    assert 'REMOVES 1 pattern(s): "^terminal .*(rm -rf|curl )"' in phrase
+    assert 'ADDS 1 pattern(s): "^Terminal .*(rm -rf|curl )"' in phrase
+    assert "from " + json.dumps(old, separators=(",", ":")) in phrase
+
+
+def test_a_settings_approval_only_applies_to_the_state_it_was_granted_for(monkeypatch, base, autumn):
+    """The phrase names the old value, so an approval granted while the list
+    was A can't be used after the list has changed to B."""
+    cli, ctx = _set_ctx(monkeypatch, require_passkey=True, authority_patterns=["a", "b"])
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    c = settings_challenge(weaken_phrase("authority_patterns", ["a"], ["a", "b"]))
+    approve(base, autumn, c["challenge_id"])
+    ctx.settings["authority_patterns"] = ["a", "b", "c"]         # state moved on
+    out = cli.cmd_set(ctx, ["authority_patterns", '["a"]', "--approve", c["challenge_id"]])
+    assert ctx.settings["authority_patterns"] == ["a", "b", "c"], out
+
+
+def test_settings_requests_get_their_own_banner_and_skip_the_global_cap(monkeypatch):
+    reset_gate_config(monkeypatch)
+    monkeypatch.setattr(gate_core, "MAX_PENDING_CHALLENGES_TOTAL", 0)
+    c = settings_challenge(WEAKEN_OFF_PHRASE)                     # not starved by agents
+    row = gate_core.db().execute("select * from challenges where id=?", (c["challenge_id"],)).fetchone()
+    assert "OWN SECURITY SETTINGS" in gate_core.approval_page(row)
+
+
+# ------------------------------- v0.7 review M4 / A5: one trust store in Hermes
+def test_gate_data_override_is_ignored_inside_hermes(monkeypatch, tmp_path):
+    """Inside Hermes, GATE_DATA must not redirect pins, approvals, the canary
+    or the audit log to a store a shell can seed."""
+    import types
+    real = tmp_path / "hermes-plugin-data"
+    fake_mod = types.ModuleType("plugins.plugin_storage")
+    fake_mod.plugin_data_dir = lambda name: real
+    monkeypatch.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
+    monkeypatch.setitem(sys.modules, "plugins.plugin_storage", fake_mod)
+    monkeypatch.setenv("GATE_DATA", str(tmp_path / "attacker-seeded"))
+    assert gate_core.data_dir() == real
+    monkeypatch.delitem(sys.modules, "plugins.plugin_storage")
+    assert gate_core.data_dir() == tmp_path / "attacker-seeded"   # outside Hermes: honoured

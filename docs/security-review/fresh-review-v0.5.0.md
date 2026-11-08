@@ -1,5 +1,11 @@
 # Fresh independent security review — passkey-gate v0.5.0
 
+> **Historical record.** This review is kept exactly as written, as evidence of
+> what was found. It describes v0.5.0 (commit `d572e02`), 7 November 2026. Its findings are tracked as F1–F7 in the ledger.
+> File paths, line numbers and behaviour refer to that version, and many of
+> the problems it describes have since been fixed.
+> For what was fixed and what is still open, see the [remediation ledger](remediation.md); for the residual risks that are accepted rather than fixed, see the [threat model](threat-model.md).
+
 - **Reviewed at:** HEAD `d572e0235aa4009530a4219a5db1c1a7d3bf936d` (v0.5.0, clean tree)
 - **Reviewer:** independent subagent, no campaign context (delegation
   `deleg_11029514`, 32 API calls, 629 s; live transcript:

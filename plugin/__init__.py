@@ -14,12 +14,12 @@ What this plugin is, in one paragraph for future maintainers:
   flags, origin/rp_id) against a PINNED owner key. An optional pre_tool_call
   hook hard-enforces the flow: calls matching configured authority patterns
   are blocked unless an approved, unconsumed challenge covers that exact
-  canonical binding — signatures are consumed, so each approval authorises
-  exactly one deliberate action.
+  canonical binding, and consume it on use — so each enforced approval
+  authorises exactly one execution (text-only approvals, with no bound call,
+  stay verifiable until they expire).
 
 Design provenance: the WebAuthn server core and the local verifier are ports
-of Autumn's `approval-gate` service and `verify_local.py` (protocol draft
-docs/protocol-v1.1-authority-verification-DRAFT.md in that project), which
+of Autumn's `approval-gate` service and `verify_local.py` (the protocol draft lives in that prototype's repository, not here), which
 passed a full field acceptance test on 2026-10-25: challenge minted by one
 machine, approved by the human's passkey, verified independently on two
 machines, tamper/attempts denied, audit chain intact.
@@ -34,7 +34,21 @@ from . import cli, gate_core, schemas, tools
 logger = logging.getLogger(__name__)
 
 
-def _on_pre_tool_call(tool_name: str, args: dict, task_id: str, **kwargs):
+def _on_pre_tool_call(tool_name: str, args: dict = None, task_id: str = "", **kwargs):
+    # Hermes drops exceptions raised by hooks and lets the call proceed, so
+    # an exception here would be a fail-OPEN. Anything unexpected blocks
+    # (v0.7 adversarial review M3 / A4).
+    try:
+        return _pre_tool_call_verdict(tool_name, args if isinstance(args, dict) else {})
+    except Exception as exc:
+        logger.exception("passkey-gate: pre_tool_call failed; blocking")
+        return {"action": "block", "message": (
+            f"Passkey gate: an internal error stopped the safety check ({type(exc).__name__}: "
+            f"{exc}) — failing closed, this call is blocked. Tell the human; "
+            "'hermes passkey-gate status' shows what the gate sees.")}
+
+
+def _pre_tool_call_verdict(tool_name, args):
     cfg = cli.apply_config_safe()
     if cfg.get("_config_error"):
         # Finding 17: a config that is PRESENT but failed to load must fail
@@ -69,11 +83,15 @@ def _run_cli(ctx, args) -> int:
 def register(ctx):
     cli._ctx_ref = ctx
     cli.invalidate_config_cache()
-    # Fail-closed from the first moment: a config that exists but will not
-    # load yields the error marker (every call blocked with the reason) —
-    # a register() that died here would leave NO hook, the one fail-open
-    # path worse than a blocked one.
-    cfg = cli.apply_config_safe()
+    # The hook goes in FIRST: a register() that died while loading settings
+    # would leave no hook at all, the one fail-open path worse than a block.
+    # Settings that won't load make the hook block every call with the reason.
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    try:
+        cfg = cli.apply_config_safe()
+    except Exception as exc:
+        logger.exception("passkey-gate: settings failed to load at registration")
+        cfg = {"require_passkey": True, "_config_error": f"{type(exc).__name__}: {exc}"}
 
     ctx.register_tool(name="gate_challenge", toolset="passkey-gate",
                       schema=schemas.GATE_CHALLENGE, handler=tools.gate_challenge)
@@ -82,7 +100,6 @@ def register(ctx):
     ctx.register_tool(name="gate_status", toolset="passkey-gate",
                       schema=schemas.GATE_STATUS, handler=tools.gate_status)
 
-    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     try:
         # Hermes API: register_cli_command(name, help, setup_fn(subparser),
         # handler_fn(args) -> exit code). A failure here must never take the

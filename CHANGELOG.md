@@ -4,7 +4,7 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.2] - 2026-11-08
 
 ### Changed
 
@@ -15,6 +15,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The security model is stated once (what it is, what it isn't, how to make
   it a real boundary, known limits), and a troubleshooting table is new. The
   install section no longer tells you to set `origin`/`rp_id` by hand.
+  The old manual "First run" walkthrough is gone; the commands are in the
+  Reference table and in `hermes passkey-gate --help` ("Setting up by
+  hand"). New sections: what the plugin does on your machine (commands it
+  runs, network use, what it stores), and how direct config edits bypass the
+  passkey check on settings.
+- `docs/scenario.md` rewritten in plain language. It no longer overstates
+  what a compromised gate can do, says which approvals are single-use, and
+  links to the threat model.
+- Plain-language pass over the text people see: the plugin and setting
+  descriptions in `plugin.yaml` (shown in the Desktop app), the CLI help,
+  and next-step messages, which now point to `setup` / `pin --code` instead
+  of `pin <pem-file>`. A plain summary and glossary open the threat model.
+- Threat model updated for v0.7: `setup` is listed with `bootstrap`/`pin`
+  as an operator-only ceremony; what typed confirmation codes do and don't
+  protect against (a compromised gate, a deliberate 50-bit collision, the
+  other pin paths); `service install` runs as the operator's user, so it
+  doesn't meet the separate-account control (example system unit given);
+  the `/health` instance id is an identifier, not authentication.
 - The approval page matches the registration page: a "From" card with a
   status pill and countdown, the action under "What it wants to do", and the
   bound command in a framed warning box (its heading is still "THE EXACT
@@ -23,8 +41,86 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next. The Approve button is disabled while the passkey prompt is open, and
   a cancel says so plainly.
 
+### Security
+
+- Adversarial review of v0.7.1 and these unreleased changes:
+  [docs/security-review/adversarial-review-v0.7.md](docs/security-review/adversarial-review-v0.7.md).
+  The core verification held; it found 1 HIGH, 8 MEDIUM and 16 LOW issues,
+  queued as A1–A30 in the remediation ledger. Fixed in this release:
+- **H1: `setup` could pin a port-squatter's key.** It no longer moves a gate
+  that already has an HTTPS address, refuses to send a registration link if
+  the address doesn't answer as this gate or the recorded Tailscale rule
+  forwards to a different port, and `set port` warns that the address
+  doesn't follow. Local health checks no longer follow redirects or read
+  unbounded responses, and `expose` checks it's talking to this gate. [A1, A10]
+- **M3: the enforcement hook could fail open.** A corrupted config-canary
+  file made the hook throw, which Hermes treats as "allow". Any error now
+  blocks, and the hook is registered before settings load. (Introduced by the
+  canary earlier in this release cycle; never shipped.) [A4]
+- **M1: a tool-call approval could authorise a settings change.** Only a
+  text-only challenge that passkey-gate itself created for a settings change
+  counts now, marked server-side; agents can't use the `hermes-cli` name;
+  settings requests get their own warning banner and can't be crowded out by
+  the global request cap. [A2, A11, A15]
+- **M5: the settings phrase now says what changes** (patterns removed or
+  added, enforcement turned off) and names the old and new values, so an
+  approval only applies to the state it was granted for. The phrase wording
+  changed. [A6]
+- **M4: `GATE_DATA` can no longer redirect the trust store inside Hermes**,
+  which let one settings approval be replayed. [A5]
+- **M2: enforcement patterns.** Patterns also match the decoded argument
+  values; the `setup` default now covers dangerous command words in any flag
+  order, `find -delete` and all code execution; `setup` offers a strict mode
+  that gates every terminal, code and file-edit call; the block message tells
+  the model that routing around the gate is a violation; and the docs say
+  plainly that patterns are a best-effort list. [A3]
+
+### Added
+
+- **Config canary (finding 17).** `set`, `expose` and `setup` write a random
+  check value into the plugin's settings and keep a copy in the gate's data
+  folder. If the copy exists but the settings don't carry it (a settings
+  reset, an edit that removed them, another profile's config), the gate
+  fails closed and refuses to write settings, instead of running with
+  enforcement silently off. This replaces a private Hermes import (catalog
+  rule 9) that could break on any release and couldn't see removed settings
+  at all. `status` shows the check. Limit, documented in the threat model: if
+  `config.yaml` won't parse and Hermes has no last-known-good copy, Hermes
+  doesn't load the plugin at all, so no plugin check can run.
+- A short "Historical record" note at the top of each frozen security review,
+  saying which version it describes and where current status lives. The
+  reviews themselves are unchanged (the two reviewer reports also gained a
+  title).
+- `plugin/README.md`: the plugin catalog renders the README from the
+  plugin's folder, and there wasn't one.
+- `setup` offers to use a passkey that's already registered but not yet
+  trusted. Before, a phone that had registered without its code being typed
+  refused to create a second passkey for the gate, while `setup` only
+  accepted new ones, so re-running it could loop forever.
+- `gate_verify` declares its optional `tool_call` parameter, so the model
+  knows it can check the exact call it's about to run.
+- `requires_hermes` in `plugin.yaml` (catalog rule 14), `license` in
+  `pyproject.toml`, and compare links in this changelog.
+
 ### Fixed
 
+- **Deny could say "Denied" when nothing was denied.** If the request had
+  already been approved (say, in another tab) or had expired, the page still
+  reported a denial. It now says nothing changed.
+- `expose` saved the gate's address without an audit record; it now writes
+  one.
+- `gate_verify` always returned `audit_head: null` (the field `/verify` no
+  longer serves); it now reports this gate's audit head.
+- Catalog entry: `version` said 0.6.4 while pinning v0.7.1; it referred to
+  a README section that no longer exists; it claimed Windows support, where
+  pinning would fail (`O_NOFOLLOW`); and its description is now readable.
+  Screenshots added.
+- Consistency fixes across the docs: the CHANGELOG's 0.6.0 ledger range and
+  the CSRF item's tag (H10); finding 12 and 13 severities in the ledger; H8
+  superseded by H13; the ledger's stale catalog follow-up; an open-items
+  list in the ledger; the `gate_verify` parameter name (`wait_seconds`);
+  what `gate_status` reports; what the audit log records; that
+  `challenge_ttl` also limits how long an approval stays usable.
 - In the "Already signed by another human?" box, the verdict was forced onto
   its own line (a CSS rule made every bold word a block), leaving the rest of
   the sentence dangling.
@@ -160,7 +256,7 @@ Hackathon-readiness release: closes the HIGH found by an independent code
 review, clears every HIGH finding from Hermes's install-time plugin scanner
 (verdict `safe`), and works through the open fresh-review backlog. Ledger:
 [docs/security-review/remediation.md](docs/security-review/remediation.md)
-(items H1–H9, F3–F7).
+(items H1–H3, H5–H8, H10, F3, F5–F7; H4 and H9 completed with 0.6.1, F4 with 0.6.2).
 
 ### Removed
 
@@ -191,7 +287,7 @@ review, clears every HIGH finding from Hermes's install-time plugin scanner
   under any name or fill the pending cap. In-process `gate_challenge` is
   unaffected. [H6]
 - POST endpoints accept `application/json` only (415 otherwise), closing
-  cross-site form posts to `/a/<id>/deny`. [reviewer, low]
+  cross-site form posts to `/a/<id>/deny`. [H10]
 - Negative `Content-Length` is rejected and handler sockets time out after
   30 s, so one connection cannot pin a server thread. [F5]
 - Audit-log appends and chain reads take a cross-process lock (flock on
@@ -343,3 +439,13 @@ These are architectural, deliberate, and documented in
   authenticated viewing channel. `/verify` records are minimized, but the
   action text and cryptographic evidence are still readable by anyone holding
   the high-entropy URL inputs.
+
+[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.4...v0.7.0
+[0.6.4]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/releases/tag/v0.6.0

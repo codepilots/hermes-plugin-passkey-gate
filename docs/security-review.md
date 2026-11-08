@@ -1,5 +1,11 @@
 # Adversarial security review — passkey-gate (as of pin `69bcd7e6`, v0.4.0)
 
+> **Historical record.** This review is kept exactly as written, as evidence of
+> what was found. It describes v0.4.0 (commit `69bcd7e6`), reconciled with two independent reviewer reports on 5 November 2026.
+> File paths, line numbers and behaviour refer to that version, and many of
+> the problems it describes have since been fixed.
+> For what was fixed and what is still open, see the [remediation ledger](security-review/remediation.md); for the residual risks that are accepted rather than fixed, see the [threat model](security-review/threat-model.md).
+
 Reviewed by an adversarial pass over the full source (gate_core, local_verify,
 tools, cli, expose, schemas, static/app.js), plus two independent reviewers
 (full-source passes; their findings were folded in on 5 Nov 2026 — see

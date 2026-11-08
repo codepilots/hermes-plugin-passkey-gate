@@ -8,6 +8,22 @@ logged here with evidence. Status legend: ⬜ queued · 🔄 delegated ·
 ✅ fixed+verified · 📝 addressed-by-documentation (residual limitation
 explicitly stated) · ⛔ blocked.
 
+**Reading this ledger:** each row or section is one finding and its fix,
+with the evidence that it was verified. Probe scripts cited as
+`cache/scratch/probe_*.py` were run outside this repository and are not
+committed; the test names cited are in `tests/`.
+
+**Open items (8 Nov 2026):**
+
+- A1–A30: findings of the [v0.7 adversarial review](adversarial-review-v0.7.md); A1, A2, A4–A6, A10 fixed, A3/A11/A15 partly, A9 documented, the rest queued (see the end of this ledger).
+
+- H9: a demo recording for the README.
+- D1: deferred refinement — derive `action_text` from the `tool_call` at mint time.
+- D2/D3 follow-up outside this repo: apply the same fixes to the original
+  `verify_local.py` in the `approval-gate` prototype.
+- Residuals that are documented rather than fixed (D9: findings 2, 15, 20;
+  D18: finding 27) — see [threat-model.md](threat-model.md).
+
 Baseline: commit `cea3fa4` ("docs: catalog entry updated for 0.4.0"),
 review as of `69bcd7e` (v0.4.0). Test suite baseline: **29 passed**
 (`.venv/bin/python -m pytest tests/ -q`, verified 5 Nov 2026).
@@ -78,18 +94,18 @@ scanner. Fixed items shipped in v0.6.0.
 | H5 | tool-call binding not covered by the signature (nonce = sha256(action_text) + entropy; binding lives only in DB) | MEDIUM | ✅ v0.6.0 | nonce = sha256(text) ‖ binding ‖ 16B entropy; hook + gate_verify check it; `test_signature_covers_tool_call_binding` fails pre-fix |
 | H6 | unauthenticated `POST /challenge` on exposed origin — arbitrary requester names, can fill global pending cap | MEDIUM | ✅ v0.6.0 | `POST /challenge` needs `Bearer <mint token>` (`mint-token` CLI); `test_http_challenge_requires_mint_token` |
 | H7 | `gate_verify` hashes raw action_text but lookup uses stripped text — trailing whitespace never verifies | LOW | ✅ v0.6.0 | verify the stripped text the gate signed; `test_gate_verify_tolerates_surrounding_whitespace` |
-| H8 | real tailnet hostname in tests/test_expose.py fixtures (`REAL_HOST`) | LOW (privacy) | ✅ v0.6.0 (working tree) | fixtures use `gate-host.example-tailnet.ts.net`; the old name remains in already-public git history (not rewritten) |
-| H9 | no end-to-end run inside a real Hermes since v0.5.0 (tests use a mocked ctx); no demo media in README | release | ✅ partial | v0.6.1: `scripts/e2e_hermes.py` — 19/19 PASS through real Hermes v0.23.0 (plugin manager, registry, pre_tool_call dispatch, serve, CLI ceremony; software authenticator). Open: a phone-passkey run over tailscale + a demo recording for the README (needs the human) |
+| H8 | real tailnet hostname in tests/test_expose.py fixtures (`REAL_HOST`) | LOW (privacy) | ✅ v0.6.0 (working tree) | fixtures use `gate-host.example-tailnet.ts.net`; the old name remained in already-public git history at the time — superseded by H13 (history rewritten 8 Nov 2026) |
+| H9 | no end-to-end run inside a real Hermes since v0.5.0 (tests use a mocked ctx); no demo media in README | release | ✅ partial | v0.6.1: `scripts/e2e_hermes.py` — 19/19 PASS through real Hermes v0.23.0 (plugin manager, registry, pre_tool_call dispatch, serve, CLI ceremony; software authenticator). Phone-passkey runs over tailscale done by the operator on 8 Nov 2026 (their feedback became H18); phone screenshots in the README since v0.7.1 docs. Still open: a demo recording |
+| H10 | CSRF: `/a/<id>/deny` accepted cross-site `text/plain` posts | LOW | ✅ v0.6.0 | POSTs require application/json (415); `test_cross_site_form_post_to_deny_is_refused` |
+| H11 | `challenge_ttl` (up to 24 h), `origin`, `rp_id` changeable without passkey approval | LOW | ✅ v0.6.2 | added to SECURITY_KEYS: raising TTL / moving a set origin or rp_id needs approval, lowering + first-time setup free; `expose` refuses to move an established origin; 3 new tests |
 | H12 | plugin FAILED TO LOAD in real Hermes: `register_cli_command(name, fn)` vs Hermes's `(name, help, setup_fn, handler_fn)` — no tools, no hook; hidden by a loose test fake | CRITICAL (release) | ✅ v0.6.1 | found by the real-Hermes smoke run (`Failed to load plugin 'passkey-gate': ... missing 1 required positional argument: 'setup_fn'`); strict fake + `test_cli_registers_with_hermes_signature_and_runs`; e2e 19/19 |
-| H13 | PII in git history: real tailnet hostname (test fixtures), a real tailnet IP (test fixtures), home/profile paths (docs), and a full shell-environment dump with Discord user/chat/message IDs, session key, user name and hostname in one commit message (a backticked `set` the shell executed) | MEDIUM (privacy) | ✅ | history rewritten 8 Nov 2026 with git-filter-repo (fixtures → `gate-host.example-tailnet.ts.net` / `100.64.0.10`, paths generalized, message restored to its intended text); every commit hash changed — references in these docs and the catalog pin remapped; tags `v0.6.0`/`v0.6.1` moved to the rewritten commits; full-history re-scan finds none of the strings. GitHub kept the old commits reachable by SHA, so the repository was recreated: the old repo was renamed `hermes-plugin-passkey-gate-old` and made private (pending deletion by the owner), and the clean history pushed to a fresh `codepilots/hermes-plugin-passkey-gate` — old SHAs return 404 there; CI green; fresh-clone tests 170 passed; README install + e2e 19/19 at pin `5fbc509` |
+| H13 | PII in git history: real tailnet hostname (test fixtures), a real tailnet IP (test fixtures), home/profile paths (docs), and a full shell-environment dump with Discord user/chat/message IDs, session key, user name and hostname in one commit message (a backticked `set` the shell executed) | MEDIUM (privacy) | ✅ | history rewritten 8 Nov 2026 with git-filter-repo (fixtures → `gate-host.example-tailnet.ts.net` / `100.64.0.10`, paths generalized, message restored to its intended text); every commit hash changed — references in these docs and the catalog pin remapped; tags `v0.6.0`/`v0.6.1` moved to the rewritten commits; full-history re-scan finds none of the strings. GitHub kept the old commits reachable by SHA, so the repository was recreated: the old repo was renamed `hermes-plugin-passkey-gate-old` and made private (pending deletion by the owner), and the clean history pushed to a fresh `codepilots/hermes-plugin-passkey-gate` — old SHAs return 404 there; CI green; fresh-clone tests 170 passed; README install + e2e 19/19 at pin `5fbc509`; note: the trees at tags `v0.6.0`/`v0.6.1` still contain their pre-rewrite catalog pins (`9c22772…`, `90df5e3…`), which no longer exist — only HEAD's pin was remapped |
 | H14 | `status` showed a bare `"error": "ValueError"` with no origin set — the first thing a new operator sees | UX | ✅ v0.6.2 | plain-English reason + next step for no origin / refused / timeout / TLS / DNS / redirect; exception name kept as `error_type`; 2 new tests |
 | H15 | `docs/scenario.md` named the author's travel plans | privacy | ✅ v0.6.2 (current tree) | sentence removed; earlier public commits still contain it (low sensitivity, past date) |
 | H16 | pin step had no real-world path: registration page never showed the public key and nothing exported it (the e2e read it from the HTTP response, hiding the gap) | release | ✅ v0.6.3 | fingerprint on the registration page; `credentials` CLI (fingerprints, flags extra passkeys); `pin --credential <id-prefix>`; 3 tests; e2e now follows the page→credentials→pin flow |
 | H17 | `serve` never reloaded settings, so the origin `expose` saved didn't reach a running gate (registration fails its origin check); README listed expose before serve, but expose's TLS probe needs serve running | release | ✅ v0.6.4 | serve re-applies settings on change (cached stat per request); README order fixed; e2e step 'running serve picks up a settings change live' |
 | H18 | first-run demo feedback: install took eight manual commands across two terminals; on the phone it was unclear what to provide to confirm the key (a 32-hex fingerprint compared by eye, then a credential-id prefix typed from a different screen); the gate only ran while a terminal stayed open; also the 'Why this ask' / 'Already signed' boxes rendered light-on-light | UX (release) | ✅ v0.7.0 | `setup` wizard (start → HTTPS → register → confirm → optional enforcement; skips finished steps; detects a port held by another program via a new /health `instance` id and moves off it); registration page rewritten around one large 10-char confirmation code (Crockford base32, 50 bits of SHA-256 over the SPKI) that the operator TYPES — `setup` / `pin --code` pin only the passkey that matches, and only among passkeys registered after the QR was shown; `service install|uninstall|start|stop|restart|status|logs` (systemd --user / LaunchAgent, HERMES_HOME pinned, never runs sudo); dark-theme fix; 25 new tests (207 total); e2e OK (23 steps); real-pty wizard run through Hermes with a software phone, including the 8655 port conflict; real systemd install/status/restart/logs/uninstall |
 | H19 | v0.7.0 install blocked: scanner verdict `caution` (1 HIGH `sudo_usage`) from the `sudo loginctl enable-linger` hint string in service.py (printed, never run) — found by the fresh-clone pinned install | HIGH (release) | ✅ v0.7.1 | hint reworded ('run this once as an administrator'); scanner verdict `safe` (0 HIGH, 11 medium informational); `test_plugin_code_never_mentions_privilege_escalation`; v0.7.0 tag left as published, catalog never pinned to it; v0.7.1 validated at the pin from a fresh GitHub clone (208 passed, pinned install not blocked, e2e OK) and catalog pinned to `e82f224` |
-| H10 | CSRF: `/a/<id>/deny` accepted cross-site `text/plain` posts | LOW | ✅ v0.6.0 | POSTs require application/json (415); `test_cross_site_form_post_to_deny_is_refused` |
-| H11 | `challenge_ttl` (up to 24 h), `origin`, `rp_id` changeable without passkey approval | LOW | ✅ v0.6.2 | added to SECURITY_KEYS: raising TTL / moving a set origin or rp_id needs approval, lowering + first-time setup free; `expose` refuses to move an established origin; 3 new tests |
 
 ## Log
 
@@ -174,7 +190,7 @@ scanner. Fixed items shipped in v0.6.0.
   is a stale draft — version 0.2.0, pinning `69bcd7e` (the pre-remediation
   commit the review graded unsafe), with outdated description language.
   It must be rewritten and repointed at the fresh-review-passed commit
-  before any catalog PR; it is deliberately untouched here.
+  before any catalog PR; it is deliberately untouched here. **Resolved by F2** (pin `7d6e509`) and every later catalog pin.
 
 ### D19 — finding 28 (LOW): numeric setting range validation ✅
 
@@ -321,7 +337,7 @@ scanner. Fixed items shipped in v0.6.0.
   + caps per the review's ask).
 - **Commit:** `64cc439`.
 
-### D13 — findings 21 (MEDIUM) + 13 (MEDIUM): sign-count clone detection ✅
+### D13 — findings 21 (MEDIUM) + 13 (LOW): sign-count clone detection ✅
 
 - **Delegated:** validate WebAuthn sign counters on approval (refuse
   counter ≤ stored as clone evidence, atomic update on success,
@@ -433,7 +449,7 @@ scanner. Fixed items shipped in v0.6.0.
   fixed" claim for an architectural finding.
 - **Commit:** `74568a1`.
 
-### D8 — findings 18 (HIGH) + 12 (MEDIUM): pin ceremony ✅
+### D8 — findings 18 (HIGH) + 12 (LOW): pin ceremony ✅
 
 - **Delegated:** validate P-256 public PEM before any write; create pin files
   exclusively with O_EXCL|O_NOFOLLOW, mode 0600, fsync; refuse replacement
@@ -607,3 +623,41 @@ scanner. Fixed items shipped in v0.6.0.
 - **Commit:** `c564930`. Deferred refinement (not blocking): deriving
   action_text from the tool_call at mint time.
 
+## Adversarial review of v0.7.1 + unreleased (8 Nov 2026) — A1–A30
+
+Findings from [adversarial-review-v0.7.md](adversarial-review-v0.7.md):
+four independent reviewers, MEDIUM-and-above re-verified by the primary
+reviewer (M3 reproduced in real Hermes v0.23). Status legend adds 🟡 partially addressed.
+
+| ID | Finding | Severity | Status |
+|---|---|---|---|
+| A1 | H1: setup pins a port-squatter's key (wizard trusts any 200 at the origin; port move leaves exposure pointing at the squatter) | HIGH | ✅ v0.7.2 — setup never moves a gate that has an address; refuses a link if the address doesn't answer as this gate or the recorded Tailscale rule forwards elsewhere; `set port` warns; threat model corrected; 4 tests |
+| A2 | M1: tool-call approval accepted as a settings-weakening approval | MEDIUM | ✅ v0.7.2 — `kind='settings'` set only by the CLI; consume/verify require it and no binding; `hermes-cli` requester reserved; page banner; 3 tests |
+| A3 | M2: authority patterns are a trivially evaded deny-list; default presented as protection | MEDIUM | 🟡 v0.7.2 mitigated — decoded-value matching, broader default (+ code execution), strict mode in setup, block message forbids routing around, limits documented; a determined agent can still evade a deny-list (approval-transport idea is the fuller fix); 13 tests |
+| A4 | M3: corrupted canary file makes the hook fail open (introduced with the canary) | MEDIUM | ✅ v0.7.2 — any canary read error fails closed; hook body wrapped (any exception blocks); hook registered before settings load; `task_id` optional; verified in real Hermes; 2 tests |
+| A5 | M4: `GATE_DATA` override lets a settings approval be replayed | MEDIUM | ✅ v0.7.2 — inside Hermes the data folder is always Hermes's; `GATE_DATA` honoured only outside; verified in real Hermes; 1 test |
+| A6 | M5: settings-change phrase hides what is removed | MEDIUM | ✅ v0.7.2 — phrase names the change (REMOVES/ADDS, turns enforcement OFF) and old → new values, so an approval only applies to the state it was granted for; 2 tests |
+| A7 | M6: anonymous audit-log flooding | MEDIUM | ⬜ |
+| A8 | M7: terminal escape sequences via `show` | MEDIUM | ⬜ |
+| A9 | M8: approvals bind command text, not what it depends on | MEDIUM | 📝 v0.7.2 — documented in README known limits and the threat model; not fixed |
+| A10 | L1: probe/local_health follow redirects; expose/status don't check instance | LOW | ✅ v0.7.2 — `local_health` uses http.client (no redirects, no proxies, bounded read); `expose`'s TLS probe and setup check the instance; 1 test |
+| A11 | L2: request cap per self-declared name; global cap starves the CLI | LOW | 🟡 v0.7.2 partial — settings requests no longer starved by the global cap; per-agent quota is still per self-declared name |
+| A12 | L3: GET cap lockout lasts as long as the flood | LOW | ⬜ |
+| A13 | L4: slow clients fill connection slots | LOW | ⬜ |
+| A14 | L5: no Host check (DNS rebinding) | LOW | ⬜ |
+| A15 | L6: bidi/invisible Unicode and page imitation in agent text | LOW | 🟡 v0.7.2 partial — `hermes-cli` requester reserved; bidi/invisible Unicode still rendered |
+| A16 | L7: rejected config still applied to runtime settings | LOW | ⬜ |
+| A17 | L8: `set rp_id` free while a default RP ID is in effect | LOW | ⬜ |
+| A18 | L9: upgraded installs not armed; no upgrade note | LOW | ⬜ |
+| A19 | L10: newline injection into the systemd unit | LOW | ⬜ |
+| A20 | L11: SSRF filter misses 100.64.0.0/10 | LOW | ⬜ |
+| A21 | L12: unbounded fetch reads, no overall deadline | LOW | ⬜ |
+| A22 | L13: existing-passkey path drops the after-QR restriction | LOW | ⬜ |
+| A23 | L14: deny on non-pending returns 200 "denied" | LOW | ⬜ |
+| A24 | L15: free strengthening changes can deny service | LOW | ⬜ |
+| A25 | L16: cache freshness depends on `get_config_path` | LOW | ⬜ |
+| A26 | INFO: registration/approval expiry edges | INFO | ⬜ |
+| A27 | INFO: /health activity signal; bearer can deny | INFO | ⬜ |
+| A28 | INFO: symlink-following writes; serve record; notary path unprotected | INFO | ⬜ |
+| A29 | INFO: canary arming race; schema; fetched-record trust | INFO | ⬜ |
+| A30 | INFO: robustness: torn audit line, non-object tool_call, prose guard | INFO | ⬜ |
