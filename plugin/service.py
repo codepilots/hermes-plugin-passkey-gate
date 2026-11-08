@@ -12,8 +12,8 @@ The service runs as YOU, with HERMES_HOME pinned to the Hermes home this
 command ran under, so it serves the same profile, settings and data as the
 terminal you set it up from. It binds 127.0.0.1 only, exactly like `serve`.
 Nothing here needs root; on Linux, keeping it running while you are logged
-out needs lingering (`sudo loginctl enable-linger $USER`), which this module
-reports but never runs for you.
+out needs lingering (`loginctl enable-linger $USER`, run once as an
+administrator), which this module reports but never runs for you.
 """
 import json
 import os
@@ -180,7 +180,8 @@ def _linger_note():
     if rc == 0 and out.strip().endswith("=yes"):
         return None
     return ("note: it runs while you are logged in. To keep it running after you log out "
-            f"(and start it at boot), run once: sudo loginctl enable-linger {user or '$USER'}")
+            f"(and start it at boot), run this once as an administrator: "
+            f"loginctl enable-linger {user or '$USER'}")
 
 
 def install(port: int):

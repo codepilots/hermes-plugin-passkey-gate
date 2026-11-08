@@ -4,6 +4,17 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-11-08
+
+### Fixed
+
+- **v0.7.0 could not be installed non-interactively.** Hermes's install
+  scanner rated the background-service hint (the `loginctl enable-linger`
+  advice, which mentioned `sudo`) HIGH, so the verdict became `caution` and
+  `hermes plugins install` refused without a prompt. The hint now says
+  "run this once as an administrator". Scanner verdict is `safe` again, and
+  a test keeps privilege-escalation wording out of the plugin tree. [H19]
+
 ## [0.7.0] - 2026-11-08
 
 ### Added
