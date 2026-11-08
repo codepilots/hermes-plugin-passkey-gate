@@ -944,8 +944,8 @@ def approval_page(row):
     if state == "pending":
         actions = ('<div class="buttons"><button id="approve" class="approve">Approve with passkey</button>'
                    '<button id="deny" class="deny">Deny</button></div>'
-                   '<p class="hint">Denying is always safe: it just declines, and nothing happens '
-                   'until someone signs.</p>')
+                   '<p class="hint">Denying is always safe: it just declines. If you do nothing, '
+                   'the request expires and nothing happens.</p>')
     who = html.escape(row["requester"])
     if row["requester_owner"]:
         who += f' <span class="owner">(agent of {html.escape(row["requester_owner"])})</span>'
@@ -955,15 +955,14 @@ def approval_page(row):
     if row["tool_call"]:
         call_block = (
             '<div class="bound-call"><h2>THE EXACT COMMAND YOU ARE APPROVING</h2>'
-            '<p>This request is bound to the tool call below. <b>The bound tool call, '
-            'not the prose above, is what executes if you approve</b> — the prose can '
-            'say anything, so check this call character by character before signing.</p>'
-            f'<pre class="action">{html.escape(row["tool_call"])}</pre></div>')
+            '<pre class="command">' + html.escape(row["tool_call"]) + '</pre>'
+            '<p><b>This command, not the prose above, is what executes if you approve.</b> '
+            'The description can say anything, so check the command itself.</p></div>')
     else:
         call_block = (
-            '<div class="bound-call"><b>No tool call is bound to this request.</b> '
-            'This is a text-only approval: your signature covers the action text '
-            'above, and nothing here is bound for execution.</div>')
+            '<div class="bound-call text-only"><b>No tool call is bound to this request.</b> '
+            'This is a text-only approval: your signature covers the text above, and '
+            'nothing here is bound for execution.</div>')
     parent_block = ""
     if row["parent_approval"]:
         try:
@@ -979,19 +978,23 @@ def approval_page(row):
                 'before trusting it &mdash; the claim alone is not evidence.</div>')
         except Exception:
             parent_block = '<div class="parent"><b>Prior approval record unreadable</b> &mdash; treat as unverified.</div>'
+    expiry = (f' &middot; expires in {left // 60}m {left % 60:02d}s' if state == "pending" else "")
     body = f"""
 <h1>Approval request</h1>
-<p class="meta">From <b>{who}</b> &middot; status <b id="state">{state}</b>
-{'&middot; expires in ' + str(left // 60) + 'm ' + str(left % 60) + 's' if state == 'pending' else ''}</p>
+<div class="from"><p class="label">From</p><p class="who">{who}</p>
+<p class="meta"><span class="pill pill-{state}" id="state">{state}</span>{expiry}</p></div>
 {why_block}
-<p class="warn">Read the whole action. Approving authorises exactly this text and nothing else.
-You are the only one who can sign this &mdash; agents cannot, and no relay of
-"someone approved it" counts without this signature.</p>
+<p class="label">What it wants to do</p>
 <pre class="action">{html.escape(row['action_text'])}</pre>
-<p class="sha">sha256 {row['action_sha256']}</p>
 {call_block}
 {parent_block}
+<p class="warn">Approving signs exactly this request and nothing else. Only you can sign it:
+agents can't, and a message saying "someone approved it" counts for nothing without this
+signature.</p>
 {actions}<p id="msg"></p>
+<details class="hint"><summary>Technical details</summary>
+<p>Action sha256 <code>{row['action_sha256']}</code><br>Request <code>{row['id'][:12]}&hellip;</code></p>
+</details>
 <div id="cid" data-id="{row['id']}"></div>"""
     return PAGE.format(title="Approval request", body=body)
 

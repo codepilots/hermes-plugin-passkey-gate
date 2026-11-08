@@ -62,8 +62,14 @@ function registrationError(e) {
 document.addEventListener("DOMContentLoaded", () => {
   const cidEl = document.getElementById("cid");
   const a = document.getElementById("approve"), d = document.getElementById("deny"), g = document.getElementById("register");
-  const done = (state, cls) => { document.getElementById("state").textContent = state; a && a.remove(); d && d.remove(); msg(state === "approved" ? "Approved and recorded." : "Denied.", cls); };
-  if (a) a.onclick = () => approve(cidEl.dataset.id).then(() => done("approved", "ok")).catch(e => msg("Not approved: " + e.message, "err"));
+  const done = (state, cls) => {
+    const st = document.getElementById("state");
+    st.textContent = state; st.className = "pill pill-" + state;
+    a && a.remove(); d && d.remove();
+    msg(state === "approved" ? "✓ Approved and recorded. The agent can go ahead with exactly this request. You can close this page."
+                             : "Denied. Nothing will happen. You can close this page.", cls);
+  };
+  if (a) a.onclick = () => { a.disabled = true; approve(cidEl.dataset.id).then(() => done("approved", "ok")).catch(e => { a.disabled = false; msg(e && e.name === "NotAllowedError" ? "Not approved: cancelled or timed out. Tap Approve to try again." : "Not approved: " + e.message, "err"); }); };
   if (d) d.onclick = () => post(`/a/${cidEl.dataset.id}/deny`).then(() => done("denied", "err")).catch(e => msg(e.message, "err"));
   if (g) {
     const token = location.hash.slice(1);

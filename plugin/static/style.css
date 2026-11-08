@@ -14,7 +14,7 @@ p.why { margin: 1.1em 0; padding: .7em .9em; border-left: 3px solid #7a9e7e;
   background: #1b2619; border-radius: 0 6px 6px 0; }
 div.parent { margin: 1.2em 0; padding: .8em 1em; border: 1px solid #3d5a34;
   border-radius: 8px; background: #172015; font-size: .95em; }
-div.parent b { display: block; margin-bottom: .3em; }
+div.parent > b:first-child { display: block; margin-bottom: .3em; }
 span.owner { color: #b8c7b0; }
 p.hint, details.hint { color: #9aab92; font-size: .9em; margin-top: .7em; }
 p.why b, div.parent b { font-weight: 600; }
@@ -31,3 +31,27 @@ p.code { margin: 0 0 1em; padding: 18px 10px; text-align: center; background: #1
   font: 700 2.2em/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em;
   word-break: break-all; user-select: all; }
 details.hint code { font-size: .85em; word-break: break-all; }
+
+/* ---- approval page ---- */
+p.label { margin: 1.3em 0 .35em; color: #b8c7b0; text-transform: uppercase;
+  letter-spacing: .08em; font-size: .8em; }
+div.from { margin: 1em 0 1.2em; padding: 12px 14px; background: #172015;
+  border: 1px solid #2d4227; border-radius: 10px; }
+div.from p.label { margin-top: 0; }
+p.who { margin: 0; font-size: 1.15em; font-weight: 600; }
+div.from p.meta { margin: .4em 0 0; font-size: .92em; }
+span.pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: .85em;
+  font-weight: 600; background: #2d4227; color: #e8efe4; }
+span.pill-pending { background: #4a3f1c; color: #f0c674; }
+span.pill-approved, span.pill-consumed { background: #24401c; color: #9fd18b; }
+span.pill-denied, span.pill-expired { background: #4a2222; color: #f08080; }
+pre.action { font: 1em/1.5 system-ui, sans-serif; }
+div.bound-call { margin: 1.3em 0; padding: 14px; border: 2px solid #f0c674;
+  border-radius: 10px; background: #1d1a10; }
+div.bound-call h2 { margin: 0 0 .6em; font-size: .8em; letter-spacing: .08em; color: #f0c674; }
+div.bound-call p { margin: .7em 0 0; font-size: .95em; }
+div.bound-call.text-only { border: 1px solid #3d5a34; background: #172015; font-size: .95em; }
+pre.command { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px;
+  background: #0c0f0a; border-radius: 6px; color: #fff;
+  font: 600 1em/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+p.warn { font-size: .95em; }

@@ -1,377 +1,359 @@
 # passkey-gate
 
-A Hermes plugin for **cryptographically verified human approval** of
-high-authority agent actions — a tamper-evident record of what the human
-actually signed.
+[![Tests](https://github.com/codepilots/hermes-plugin-passkey-gate/actions/workflows/tests.yml/badge.svg)](https://github.com/codepilots/hermes-plugin-passkey-gate/actions/workflows/tests.yml)
+![Hermes plugin](https://img.shields.io/badge/Hermes-plugin-4f8a3c)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-**The key problem it solves:** an agent teammate that sits behind a firewall
-— another machine, another network, another schedule — can obtain real
-authorization from the human *without the human ever being at that agent's
-keyboard*. Hermes's built-in approval system prompts the human in the
-session where the action runs; that works when she is present at that
-session, and gives an isolated or peer agent nothing but silence. This
-plugin gives such an agent a way to mint an approval request bound
-bit-for-bit to the exact action text and tool call, deliver it through any
-channel the human actually reads (Discord DM, push, QR), and — most
-importantly — **independently verify her passkey signature locally with
-cryptography before acting**. No agent ever holds a private key, so a relayed
-"the human said it's fine" is no longer needed: the genuine article is a
-WebAuthn signature from the human's own authenticator, and that signature
-cannot be forged from any lane the agent controls. Forging the signature is
-not the only attack, though — an agent that controls the gate's host can
-subvert the ceremony around the signature (pins, config, records), which is
-why real boundaries are a deployment requirement, not something this plugin
-can enforce alone (see
-[Deployment requirements for real boundaries](#deployment-requirements-for-real-boundaries)).
+**Approve your agents' risky actions with your phone's passkey, and get
+cryptographic proof of exactly what you approved.**
 
-The full first-hand scenario this came out of — a field agent needing
-GitLab access while its human was away from every relevant keyboard, with a
-planted fabricated authorization on the wires the same morning — is written
-up in [docs/scenario.md](docs/scenario.md).
+An agent that wants to do something consequential (delete data, grant
+access, push to production) asks for approval. You get a link, read the
+exact action on your phone, and sign it with Face ID, a fingerprint or your
+screen lock. Before acting, the agent checks your signature itself, with
+real cryptography, against your key. A message saying "Autumn said it's
+fine" proves nothing. Only a signature from your passkey counts, and the
+agent never has a private key it could sign with.
 
-One paragraph for engineers: an agent wanting a high-authority action mints a
-**WebAuthn challenge bound bit-for-bit to the exact action text** (and
-optionally to the exact canonical tool call). The agent sends the approval
-URL to its human; the human reads the page and signs with **their passkey** —
-the agent never holds a private key, so approval must be a WebAuthn
-signature from the registered owner credential. Inside a correctly deployed
-boundary there is no agent-side path to approval; on a host the agent itself
-controls, that boundary is a deployment requirement, not something this
-plugin can enforce by itself (see below). Before acting, the agent verifies
-the signed assertion **locally** with real cryptography against a **pinned
-owner key**. An append-only, hash-chained audit log detects partial edits
-and accidental corruption; a wholesale rewrite of the log by someone with
-write access to the data directory can pass internal checks, so the CLI can
-also notarize the chain head to an operator-kept file outside that
-directory — that external anchor is what detects a full rewrite.
+It works when you're **not at the agent's keyboard**. Hermes's built-in
+approvals prompt you in the session where the action runs. That's no help
+when the agent is on another machine, behind a firewall, or running while
+you're away. passkey-gate sends the request wherever you'll see it (a
+Discord DM, a QR code, any chat) and the agent verifies the answer locally.
 
-This is not prompt-gated "I promise" authorization, and not a yes/no an
-agent could fake. It is verification-with-proof: the signed challenge binds
-bit-for-bit to what the human saw on the page, so a gate can't lie about
-what you signed, and a fake claim "Autumn approved this" collapses on
-`gate_verify` unless a signature from the pinned owner key actually checks
-out. "Pinned" means only as much as the boundary protecting the pins — see
-[Deployment requirements for real boundaries](#deployment-requirements-for-real-boundaries).
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/phone-register.png" width="240" alt="Registration page: three numbered steps and a Create passkey button"></td>
+    <td align="center"><img src="docs/images/phone-code.png" width="240" alt="After registering: a large confirmation code to type into the computer"></td>
+    <td align="center"><img src="docs/images/phone-approve.png" width="240" alt="Approval request: the action text, the exact bound command, Approve and Deny buttons"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>1.</b> Set up your passkey once</sub></td>
+    <td align="center"><sub><b>2.</b> Type this code into the terminal</sub></td>
+    <td align="center"><sub><b>3.</b> Approve exactly this command</sub></td>
+  </tr>
+</table>
 
-## How it works
+## Contents
 
-```
-agent wants a high-authority action
-  └─ gate_challenge(action_text, tool_call?)     → approval URL + challenge id
-human opens URL (over TLS, e.g. tailscale serve) → passes passkey with UV
-  └─ WebAuthn nonce == sha256(action_text) [+ binding_sha256] + entropy:
-     the signature covers that EXACT text and, when bound, that EXACT call
-agent act-check:
-  └─ gate_verify(challenge_id, action_text)      → LOCAL crypto verification
-        sha256(action_text) [+ binding] == signed challenge
-        signature over authenticatorData‖sha256(clientDataJSON) vs PINNED pubkey
-        user-presence + user-verification flags, origin/rp_id match
-  └─ verified: true (problems: [])  →  record is sound + matches request
-optional enforcement hook (require_passkey):
-  └─ pre_tool_call blocks calls matching authority patterns unless a challenge
-     bound to that exact canonical tool call is approved AND re-verifies
-     against the pinned owner key — then CONSUMES it, so each approval
-     authorises exactly one deliberate execution.
-```
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Using it](#using-it)
+- [Reference](#reference)
+- [Security model](#security-model)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
-Design provenance: the core is a port of a field-proven prototype
-(`approval-gate`, October 2026) whose acceptance test covered two machines:
-challenge minted by one, signed by a human passkey on the other, verified
-independently, tamper and replay attempts denied, audit chain intact.
+## Quick start
 
-## Install
+**You need:**
+
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) with plugin
+  support (tested on v0.23)
+- [Tailscale](https://tailscale.com) on this computer **and** your phone,
+  signed in to the same tailnet, with HTTPS certificates enabled in the
+  admin console. You can use your own HTTPS reverse proxy instead; see
+  [Exposure](#exposure).
+- A phone that supports passkeys (any recent iPhone or Android)
+
+**Install, then run the setup wizard:**
 
 ```bash
 hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin
-```
-
-Then set the two settings that locate your gate (Desktop → Settings → Plugins,
-or config.yaml):
-
-```yaml
-plugins:
-  entries:
-    passkey-gate:
-      settings:
-        origin: "https://your-host.tailnet-name.ts.net:8445"   # HTTPS origin
-        rp_id: "your-host.tailnet-name.ts.net"                 # WebAuthn RP ID
-```
-
-## First run
-
-```bash
 hermes passkey-gate setup
 ```
 
-The wizard takes about three minutes and needs your phone. It checks each
-step before moving on, and re-running it skips what's already done:
+The wizard takes about three minutes and checks each step before moving on:
 
-1. **Start the gate.** Offers to run it as a background service (so no
-   terminal has to stay open), or tells you to run `serve` and waits. If
-   another program already holds the port (say an older approval-gate), it
+1. **Starts the gate**, offering to run it as a background service so no
+   terminal has to stay open. If another program already holds the port, it
    notices and moves to a free one.
-2. **Give it an HTTPS address.** Publishes it on your tailnet with
-   `tailscale serve` (private to your own devices), or checks the origin you
-   configured, and proves it answers before going on.
-3. **Create your passkey.** Prints a QR code. Scan it, tap **Create passkey**
-   and confirm with your face, fingerprint or screen lock.
-4. **Confirm it's yours.** The phone then shows one large 10-character code
-   (like `7KQ2M-X9D4R`). Type it into the terminal. Only the passkey with
-   that code is pinned as the owner key, so the key you trust is provably
-   the one on your phone. That code is the only thing you copy.
-5. **Optionally** switch on enforcement with a sensible default pattern.
+2. **Gives it an HTTPS address** on your tailnet, private to your own
+   devices, and checks that the address answers.
+3. **Shows a QR code.** Scan it, tap **Create passkey**, and confirm with
+   your face, fingerprint or screen lock.
+4. **Asks for the code your phone shows** (like `7KQ2M-X9D4R`). Only the
+   passkey with that code becomes your owner key, so the key the gate
+   trusts is provably the one on your phone.
+5. **Optionally switches on enforcement**, which blocks risky terminal
+   commands until you approve them.
 
-Run it in your own terminal, never through an agent: like `bootstrap` and
-`pin`, it is an operator ceremony.
+Re-running `setup` is safe; finished steps are skipped. Run it in your own
+terminal, never through an agent: it decides which key is trusted.
 
-### Run it in the background
+**Try it.** With enforcement on, ask your agent to run
+`rm -rf ./some-scratch-dir`. The call is blocked, the agent sends you an
+approval link, you approve on your phone, and the command runs once. Ask
+again and it's blocked again: each approval is good for one execution.
 
-```bash
-hermes passkey-gate service install     # start now and at every login
-hermes passkey-gate service status      # running? answering on 127.0.0.1?
-hermes passkey-gate service logs        # recent output
-hermes passkey-gate service restart     # also: start, stop, uninstall
+## How it works
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant G as passkey-gate
+    participant P as Your phone
+    A->>G: gate_challenge(action text, tool call)
+    G-->>A: approval link
+    A->>P: sends the link (chat, DM, QR)
+    P->>G: you read the page and sign with your passkey
+    A->>G: gate_verify(challenge, action text)
+    Note over A,G: checked locally against your pinned key:<br/>exact text, exact call, signature, face/PIN used, origin
+    G-->>A: verified: true
+    A->>A: runs the approved call, once
 ```
 
-This installs a per-user service: a systemd user unit on Linux
-(`~/.config/systemd/user/passkey-gate.service`) or a LaunchAgent on macOS.
-It runs `hermes passkey-gate serve` as you, with `HERMES_HOME` pinned to the
-profile you installed it from, and restarts it if it crashes. Nothing needs
-root. On Linux it runs while you're logged in; to keep it up after logout
-and across reboots, run `sudo loginctl enable-linger $USER` once (the
-installer tells you if that's needed, and never runs it for you). For a real
-trust boundary, run it under a separate account instead (see
-[Deployment requirements](#deployment-requirements-for-real-boundaries)).
+- **The signature covers the exact action.** The WebAuthn challenge is built
+  from `sha256(action text)`, plus `sha256(tool call)` when one is bound, plus
+  random bytes. Your passkey signs that, so the page can't show you one
+  thing and get a signature for another.
+- **Verification is local.** `gate_verify` re-derives every claim itself:
+  the hashes, the signature over `authenticatorData ‖ sha256(clientDataJSON)`,
+  the user-presence and user-verification flags, the origin and RP ID, and
+  optionally the approval's age. It checks all of this against the
+  **pinned** owner key from setup, never against "the gate said yes".
+- **Enforcement is optional.** With `require_passkey` on, the
+  `pre_tool_call` hook blocks any tool call matching your patterns until an
+  approval covers that exact call, then consumes the approval so it can't be
+  reused.
+- **Every step is audited** in an append-only, hash-chained log that you can
+  anchor outside the gate's reach (see [Audit log](#audit-log)).
 
-### Manual setup (what `setup` does, step by step)
+The core is a port of a working October 2026 prototype (`approval-gate`).
+Its acceptance test minted a challenge on one machine, had a human sign it
+on another, verified it independently on both, and refused tamper and
+replay attempts. The story behind it is in [docs/scenario.md](docs/scenario.md).
+
+## Using it
+
+### Enforcement
+
+Turn it on in the wizard, or at any time:
 
 ```bash
-# 0) Run the gate: in the background (see above), or in its own terminal
-#    with `serve`. It binds 127.0.0.1 only; tailscale forwards to it.
-#    Settings you change from another terminal (expose, set) apply live.
-hermes passkey-gate service install     # or: hermes passkey-gate serve
-
-# 1) Publish a HTTPS URL (in a second terminal, with serve running — expose
-#    proves the URL works with a real TLS /health probe), in this order:
-#    explicit config origin > tailscale serve --bg. With tailscale installed
-#    it picks a free HTTPS serve port on your tailnet (private to your
-#    devices — nothing is put on the public internet), derives origin + RP
-#    id from tailscale status --json (no shell string parsing; the serve map
-#    is re-read and the new entry located), and saves both back into plugin
-#    settings so challenges mint to the right origin from then on.
-hermes passkey-gate expose            # or: expose tailscale
-
-# 2) Register passkey -- mint the one-time registration link. OPERATOR
-#    ceremony: run it in a terminal you, the human, control (prints there
-#    only); never send it through chat, never run it from an agent session
-hermes passkey-gate bootstrap
-
-# 3) Pin your owner key: every signature is checked against this exact
-#    public key. After registering, your phone shows a 10-character
-#    confirmation code (like 7KQ2M-X9D4R) — type it here and the passkey it
-#    belongs to is pinned (never pin a code you didn't just see on your own
-#    phone). `credentials` lists every registered passkey with its code.
-hermes passkey-gate pin --code <the code your phone shows>
-#    (or, with a PEM you got some other way: hermes passkey-gate pin <pem-file>)
-
-# 4) Audit the log: internal chain check, plus — if you keep a notary file —
-#    comparison against the operator-anchored heads (the only real tamper
-#    evidence; see 'Honest limits')
-hermes passkey-gate audit-verify --notary /root/gate-notary.log
-
-# 5) Periodically anchor the current chain head to that operator-owned file
-#    (must live OUTSIDE the gate data dir — run bare after setting
-#    audit_notary_path once, or with no path to just print the head to
-#    record somewhere the agent cannot write)
-hermes passkey-gate audit-notarize --to /root/gate-notary.log
-
-# 6) Every setting has a CLI command too — typed parse, validate, persist,
-#    and immediately re-applied to the running configuration:
-#      hermes passkey-gate set require_passkey true
-#      hermes passkey-gate set authority_patterns ^terminal .*(rm |curl )
-#      hermes passkey-gate set origin https://your-host.ts.net:8447
-#      hermes passkey-gate get
-#    Changes that WEAKEN the gate — require_passkey off, removing a pattern,
-#    adding a parent-gate allowlist entry, raising challenge_ttl, or moving
-#    an origin/rp_id that is already set — are refused until your passkey
-#    signs the exact change; the refusal prints the approval link and the
-#    --approve re-run. Strengthening, and first-time setup, are free.
+hermes passkey-gate set require_passkey true
+hermes passkey-gate set authority_patterns '^terminal .*(rm -rf|curl |scp |dd )'
 ```
 
-### Check it end to end
+Patterns are regular expressions matched against the tool name plus its
+arguments as canonical JSON. A matching call is blocked with instructions
+the model can follow: mint a challenge bound to this exact call, send the
+link to the human, and retry once it's approved. If the agent thinks the
+pattern is a false alarm, the block message tells it to say so to you
+rather than work around it.
 
-`scripts/e2e_hermes.py` drives the whole flow through a real Hermes install —
-CLI ceremony, plugin loading, the enforcement hook blocking, a passkey
-approval (software authenticator standing in for your phone), local
-verification against the pinned key, one allowed execution, the replay
-blocked, and the audit chain — in a throwaway Hermes home. Its docstring has
-the three commands to run it.
+If the retried call differs from the approved one in any way, it's blocked
+again: the hook fails closed.
 
-### Exposure backends
+### What you see on the approval page
 
-| backend | persistence | what happens |
-|---|---|---|
-| tailscale (default pick) | survives restarts | `tailscale serve --bg --https=<port> http://127.0.0.1:<gate>`; URL is your machine's `https://<host>.ts.net[:port]`; every candidate port is VERIFIED with a real TLS `/health` probe before it's accepted (a rule being accepted isn't proof it serves — an nginx listening on every interface at :443 can shadow it), rejected ports are un-ruled automatically |
-| configured origin | yours | set `plugins.entries.passkey-gate.settings.origin` (and optionally `rp_id`, which otherwise defaults to the origin's host) to an HTTPS origin you already terminate TLS for — e.g. an nginx/caddy reverse proxy to `127.0.0.1:<gate>` — and `expose` just validates |
+- **From:** the agent and whose agent it is (`bramble (agent of Autumn)`).
+- **Why this ask:** one plain sentence, required when the agent may be
+  asking someone other than its own human.
+- **The action text**, plus a countdown to expiry. Its SHA-256 and the
+  request ID are under *Technical details*.
+- **The exact command**, if one is bound. This is what runs, so check it
+  rather than the prose above it.
+- **Approve with passkey** or **Deny**. Denying is always safe, and
+  ignoring the request just lets it expire.
 
-Why tailscale and no public tunnel: the approval page only has to reach
-*your* phone, and a tailnet does that over TLS without publishing the gate
-to the internet. If the human's phone is on your tailnet, the approval link
-just works from anywhere.
+If the link arrives somewhere you can't easily open it,
+`hermes passkey-gate show <challenge-id>` prints it as a QR code.
 
-WebAuthn RP-ID detail: default RP is the full origin hostname — always valid.
-If you already registered a passkey credential under a broader suffix (e.g.
-your tailnet's `*.ts.net` domain), set `rp_id` to that suffix and your
-existing credential works for the plugin without re-registering.
+### Changing settings safely
 
-## Tools
+Every setting can be changed with `hermes passkey-gate set <key> <value>`,
+and the change applies to a running gate straight away. Changes that make
+the gate **weaker** need your passkey first:
 
-| Tool | What the model reads |
+- turning `require_passkey` off
+- removing an authority pattern
+- adding a parent-gate allowlist entry
+- raising `challenge_ttl`
+- moving an `origin` or `rp_id` that's already set
+
+The refusal prints an approval link and the exact `--approve <id>` command
+to re-run once you've signed. Making the gate stricter, and first-time
+setup, need no approval. Each weakening approval works once.
+
+### Agents owned by different people
+
+This is the case the plugin was built for: one person's agent needs
+something that lives on another person's machine, and the person signing
+may never have met that agent. The ask has to stand on its own:
+
+- **`requester_owner`** names the agent's human, so the signer can judge
+  whose agent this is.
+- **`why`** is one plain sentence for the signer. `gate_challenge` refuses
+  a cross-human ask without one.
+- **`parent_approval`** carries an approval the agent's own human already
+  gave on their gate. The page re-checks it locally and shows **verified**
+  only once the signer has pinned that person's key
+  (`hermes passkey-gate pin peer-key.pem <owner>`). Until then it's shown as
+  a claim. The gate only fetches it at all if that gate's origin is on
+  `parent_gate_allowlist`.
+- **Remote minting:** an agent on another machine mints over
+  `POST /challenge` with the gate's mint token
+  (`hermes passkey-gate mint-token`). The token lets its holder put requests
+  in front of you; it can never approve one. Agents on the gate's own host
+  don't need it.
+
+### Exposure
+
+The gate listens on `127.0.0.1` only. Passkeys need HTTPS, so something has
+to terminate TLS in front of it:
+
+| Option | How |
 |---|---|
-| `gate_challenge` | Mint an approval request; returns URL + sha256. action_text must read like an authority document (40 chars / 6 word floor, max 4000). Refuses cross-human asks without `why`, and refuses parent chains without an owner named per link — both are etiquette floors, and the error text teaches the correct next move. |
-| `gate_verify` | Poll (optional wait) then LOCALLY verify: binding, signature, UV/UP flags, origin, pinned key, max-age. `verified: true` means the record is cryptographically sound and matches this exact request — not that whatever executes next is that call (see Honest limits). |
-| `gate_status` | Gate reachable? credentials registered? owner key pinned? peer keys pinned? audit chain internally consistent (internal check only)? Which exposure backends exist? |
+| **Tailscale** (default) | `setup` or `hermes passkey-gate expose` runs `tailscale serve --bg` on a free HTTPS port, proves it answers with a real TLS request, and saves the address. The page is reachable only from your own devices, from anywhere. |
+| **Your own proxy** | Point nginx, Caddy or similar at `127.0.0.1:<port>` and run `hermes passkey-gate set origin https://your-host`. `expose` then only validates it. |
 
-## When agents owned by different humans collaborate
+`rp_id` defaults to the origin's hostname. If you already have a passkey
+registered under a broader domain (such as your tailnet's `.ts.net` name),
+set `rp_id` to that domain to reuse it.
 
-This is the case the plugin was originally built for. Sorrel's agent (field
-laptop, behind a firewall) needs a resource that lives on Autumn's machine —
-and the signer may be a human who has never met that agent. So the ask is a
-document, not a favour:
+### Audit log
 
-**For the agent** — when you may be asking someone else's human:
+Every challenge, approval, denial, passkey registration and settings change
+is appended to a hash-chained log in the gate's data directory.
 
-- `requester`: your agent name. `requester_owner`: *your* human's name — the
-  signer judges whose agent this is. `why`: ONE plain sentence for them:
-  what signing enables and why it is safe/needed. Required when the signer
-  isn't plausibly your own human; the tool refuses without it — that floor
-  is deliberate. Never copy a command line into `why`; explain to a person.
-- If a human already approved on the agent's own gate, pass
-  `parent_approval` ({base, challenge_id, action_sha256, owner}) — the page
-  re-checks the parent record locally before rendering, and the verifier
-  says 'unverified' rather than pretending, until you pin that peer's key:
-  `hermes passkey-gate pin peer-key.pem <owner>`.
-- Your message to them should be one line: who's asking, what it does, the
-  link. The page carries the rest.
-- Minting on *another* machine's gate over HTTP (`POST /challenge`) needs
-  that gate's mint token (`Authorization: Bearer <token>`); its operator
-  prints it with `hermes passkey-gate mint-token`. A token lets its holder
-  put a request in front of the human — never approve one. Agents on the
-  gate's own host mint in-process through `gate_challenge` and need nothing.
-
-**For the human signing** — what you see on the page, in one place:
-
-- **From**: the agent + a named `(agent of <owner>)` — check that owner is
-  who you expect; that plus the page's TLS origin and your passkey is the
-  whole trust story.
-- **Why this ask**: one sentence in their words.
-- **Already signed...**: if the request was pre-approved on someone else's
-  gate, its locally-checked verdict shows here (verified / unverified /
-  key-mismatch). Unverified = a claim, ask for their pinned key first.
-- The **full action text** and its sha256, and an expiry. Approving
-  authorises exactly that text and nothing else; **denying is always
-  safe**, and doing nothing just lets it expire.
-- Arrived by chat link but prefer your phone? `hermes passkey-gate show
-  <challenge-id>` prints a QR.
-
-Fun fact for the signer: the agents in this story named themselves Bramble
-and Sorrel. The gate stays impartial — it only knows whose read the page,
-whose key verifies, and whether both match.
-
-## Enforcement hook (opt-in)
-
-```yaml
-        require_passkey: true
-        authority_patterns:
-          - "^terminal .*- (rm|curl|scp|dd|mv /)"
-          - "^\\w+ .*credential"       # tools whose args mention credentials
+```bash
+hermes passkey-gate audit-notarize --to ~/gate-notary.log   # anchor the current head
+hermes passkey-gate audit-verify --notary ~/gate-notary.log # check the chain against it
 ```
 
-Matching tool calls **block** with exact instructions (a JSON template of the
-call the challenge must bind), **allow** only when an approved-and-unconsumed
-challenge covers that exact binding, and consume that challenge (single use).
-The block text tells the model, verbatim, how to mint the right challenge —
-and to push back on the human if it thinks the pattern is a false alarm.
-This hook gates tool calls that pass through it while enforcement is on; it
-is not a boundary against an agent that can edit the plugin, its config, or
-the gate data — that needs the
-[deployment controls below](#deployment-requirements-for-real-boundaries).
+The chain alone detects edits to part of the log. Someone who can write to
+the data directory could rewrite the whole log consistently, so anchor the
+head now and then to a file **outside** that directory, somewhere agents
+can't write. `audit-verify` then reports `INTACT AND NOTARIZED`,
+`GROWN SINCE NOTARIZATION`, or `DIVERGED` (rewritten or truncated). Set
+`audit_notary_path` once to drop the flags.
 
-## Deployment requirements for real boundaries
+## Reference
 
-What this plugin **is**: a tamper-evident human-approval ceremony. The human
-reads the exact bound action text and tool call on the approval page and
-signs it with a passkey; the signature is verified locally with real
-cryptography against a pinned key; challenges are single-use and expiry-bound;
-and every step lands in a hash-chained audit log that can be anchored
-externally. When the human actually signed, the record proves it.
+### Commands
 
-What this plugin **is not**: a boundary against an agent that controls the
-host it runs on. No in-process check can constrain an agent that can edit the
-plugin code, the gate database, the config, the pin files, or invoke the
-`bootstrap`/`pin` ceremonies itself. In such a deployment approvals are
-advisory — an honest record, not a fence.
+All commands are `hermes passkey-gate <command>`.
 
-For the ceremony to be a real boundary, the deployment must keep the trust
-anchors outside the agent's write/control reach:
+| Command | What it does |
+|---|---|
+| `setup` | Guided first run (see [Quick start](#quick-start)). |
+| `service install` · `status` · `logs` · `start` · `stop` · `restart` · `uninstall` | Run the gate in the background as a per-user service: a systemd user unit on Linux, a LaunchAgent on macOS. |
+| `serve` | Run the gate in the foreground. |
+| `status` | Can I rely on this gate right now? Reachability, owner key, enforcement, backends. |
+| `expose [auto\|tailscale]` | Set up and verify the HTTPS address. |
+| `bootstrap` | Print a one-time passkey registration link and QR code (15 minutes, single use). |
+| `credentials` | List registered passkeys with their confirmation codes. |
+| `pin --code <code>` | Pin the passkey whose code your phone showed as the owner key. Also `pin --credential <id-prefix>`, or `pin <pem-file> [owner]` for a key you got another way, or a peer's key. |
+| `show <challenge-id>` | Print a pending request's link and QR code. |
+| `set <key> <value> [--approve <id>]` · `get` | Change or show settings. |
+| `mint-token` | Print the bearer token for remote minting. |
+| `audit-verify [--notary <file>]` · `audit-notarize [--to <file>]` | Check and anchor the audit log. |
 
-- install the plugin root-owned and read-only where practical;
-- make the gate data directory, audit log, config, and pin files
-  operator-owned, with the agent denied write access;
-- run the gate/verifier under a separate service account (or host) the agent
-  cannot edit;
-- treat `bootstrap` and `pin` as out-of-band operator ceremonies, run from an
-  operator terminal — never through the agent;
-- have the final executor enforce the same canonical `dispatch_binding`
-  immediately before execution (downstream execution is not enforced by the
-  plugin — see Honest limits).
+The background service runs as you, with `HERMES_HOME` pinned to the profile
+you installed it from, and restarts on crashes. On Linux it runs while
+you're logged in; to keep it running after logout and across reboots, an
+administrator runs `loginctl enable-linger <user>` once. `service install`
+tells you if that's needed and never runs it for you.
 
-The full trust model, including the residuals this plugin deliberately does
-not claim to solve, is
-[docs/security-review/threat-model.md](docs/security-review/threat-model.md).
+### Settings
 
-## Honest limits
+Under `plugins.entries.passkey-gate.settings` in your Hermes config, in the
+Desktop app's plugin settings, or via `set`. 🔒 marks settings where
+weakening needs a passkey approval.
 
-- The audit log is a hash chain **inside the gate data dir**: it detects
-  partial edits and accidental corruption, but anyone with write access to
-  that directory can rewrite the whole log and recompute a self-consistent
-  chain that passes `audit-verify`'s internal check. Internal consistency is
-  **not** tamper evidence against a full rewrite. Periodically run
-  `hermes passkey-gate audit-notarize --to <path>` (operator-owned file
-  outside that directory — or set `audit_notary_path` once); then
-  `audit-verify --notary <path>` compares the chain against the anchored
-  heads and reports INTACT AND NOTARIZED / GROWN SINCE NOTARIZATION /
-  DIVERGED (a notarized head no longer matching the chain — evidence of
-  rewriting or truncation).
-- The passkey flow protects what the human *reads on the approval page* —
-  action_text quality is on the agent, hence the specificity floor. Garbage
-  in, garbage signed.
-- The HTTP service binds localhost; TLS termination is your job
-  (`tailscale serve` recommended — WebAuthn requires HTTPS origins in
-  real authenticators).
-- `pre_tool_call` sees model tool calls, not internal Hermes subsystem
-  activity. Layer it WITH Hermes's approval modes, not instead of them.
-- Enforced calls require the model to resubmit identical args; if the
-  binding mismatches (say the command changed), the hook blocks with the
-  canonical mismatch and the model re-challenges. That's fail-closed by design.
-- Downstream execution is **not enforced** by the plugin. The gate binds and
-  verifies the approved call and exposes the canonical `dispatch_binding`;
-  whatever finally executes (middleware, connectors, another executor) must
-  itself enforce that exact binding, or a separate broker must own that
-  boundary. `verified: true` says the record matches the request — nothing
-  more.
-- Approval URLs are **bearer-readable**: anyone holding the high-entropy
-  challenge ID (leaked into chat logs, proxies, browser history) can read
-  the action text and cryptographic evidence on `/a/<id>` and the minimized
-  `/verify` record. Reading cannot approve, but a deployment that needs
-  confidentiality must add an authenticated viewing channel — the plugin has
-  no operator-authenticated channel to issue one from.
-- Everything above presumes the
-  [deployment boundary](#deployment-requirements-for-real-boundaries): on a
-  host the agent controls, pins, config, and records are agent-writable and
-  no local cryptographic check can rescue that deployment. The gate is then
-  an honest record-keeper, not a fence.
+| Setting | Default | Meaning |
+|---|---|---|
+| `origin` 🔒 | `""` | HTTPS address of the gate. `setup`/`expose` fill it in. |
+| `rp_id` 🔒 | origin's host | WebAuthn relying-party ID. |
+| `port` | `8655` | Local port the gate listens on (`127.0.0.1` only). |
+| `challenge_ttl` 🔒 | `600` | Seconds a request stays open (1–86400). |
+| `require_passkey` 🔒 | `false` | Block tool calls matching `authority_patterns` until approved. |
+| `authority_patterns` 🔒 | `[]` | Regexes over `tool_name + canonical JSON args`. Max 100, 200 characters each. |
+| `parent_gate_allowlist` 🔒 | `[]` | Exact origins of peer gates this gate may fetch to re-check a parent approval. Empty means it never fetches. |
+| `audit_notary_path` | `""` | Default notary file for `audit-notarize` / `audit-verify`. |
+
+### Tools the agent gets
+
+| Tool | Purpose |
+|---|---|
+| `gate_challenge` | Create an approval request and return its link. Takes `action_text` (40–4000 characters, written so a human can judge it), `requester`, and optionally `tool_call`, `requester_owner`, `why` and `parent_approval`. |
+| `gate_verify` | Wait for the human (optional `wait`, up to 120 s), then verify locally. Optional `max_age` rejects stale approvals. |
+| `gate_status` | Is the gate reachable? Is an owner key pinned? Which peer keys are pinned? Is the audit chain consistent? |
+
+## Security model
+
+**What it is:** a tamper-evident ceremony for human approval. You read the
+exact action, and the exact call if one is bound. You sign it with a passkey
+the agent can't use. The signature is verified locally against a key you
+pinned, and the record proves what you approved.
+
+**What it isn't:** a fence against an agent that controls the machine the
+gate runs on. An agent that can edit the plugin, its config, the gate's
+database or the pin files, or run `setup`, `bootstrap` or `pin` itself, can
+subvert the ceremony around the signature without forging it. In that
+setup, approvals are an honest record, not a boundary.
+
+**To make it a real boundary:**
+
+- run the gate under a separate account (or on a separate host) that the
+  agent can't modify;
+- make the plugin files, config, data directory and pins operator-owned and
+  read-only to the agent;
+- do `setup`, `bootstrap` and `pin` from your own terminal, never through an
+  agent;
+- have whatever finally executes the action enforce the same
+  `dispatch_binding` that was approved.
+
+**Known limits:**
+
+- **Single use is per kind.** Approvals for enforced tool calls and for
+  settings changes are consumed when used. A text-only approval (no bound
+  call) stays verifiable until it expires.
+- **The plugin doesn't execute anything.** `verified: true` means the record
+  matches this exact request. Whatever runs the action has to enforce the
+  binding itself.
+- **The hook sees model tool calls only**, not Hermes's internal activity.
+  Use it alongside Hermes's own approval modes, not instead of them.
+- **You sign what the agent wrote.** The page shows the action text
+  faithfully, but a vague request gets a vague approval; the 40-character,
+  six-word minimum only goes so far.
+- **Approval links can be read by anyone who has them.** Reading a request
+  can't approve it, but anyone holding the link can see the action text.
+- **Request flooding is capped** at 10 open requests per agent and 100 in
+  total.
+
+The full threat model, including the risks deliberately left out of scope,
+is in [docs/security-review/threat-model.md](docs/security-review/threat-model.md).
+Independent reviews and the record of every finding and fix are in
+[docs/security-review/](docs/security-review/).
+
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---|---|
+| `hermes passkey-gate setup` isn't recognised | An older version is installed. Reinstall with `hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin --force`, then `hermes gateway restart`. |
+| Setup says the port is used by "a program that isn't this gate" | Something else, or an older `passkey-gate serve`, holds the port. Accept the suggested free port, or stop the other program. |
+| The phone can't open the link | The phone isn't on your tailnet, or Tailscale HTTPS certificates aren't enabled. |
+| "This setup link has expired or was already used" | Registration links last 15 minutes and work once. Run `setup` again for a fresh QR code. |
+| The code you type doesn't match | You're reading a different passkey's code. Nothing is pinned until it matches; run `setup` again if in doubt. |
+| `status` says nothing is listening | The gate isn't running: `hermes passkey-gate service status`, or start `serve`. |
+| The block message mentions the pinned owner key | No key is pinned, or the wrong one is. Check `hermes passkey-gate credentials`. |
+
+## Development
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest tests/ -q
+```
+
+`scripts/e2e_hermes.py` runs the whole flow through a real Hermes install
+in a throwaway Hermes home: the CLI ceremony, plugin loading, the hook
+blocking a call, an approval from a software authenticator standing in for
+your phone, local verification, one allowed execution, the replay blocked,
+and the audit check. Its docstring has the commands. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-MIT — see LICENSE.
+MIT. See [LICENSE](LICENSE).

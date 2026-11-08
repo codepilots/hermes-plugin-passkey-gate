@@ -4,6 +4,31 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- README rewritten: a plain-language pitch with phone screenshots
+  (`docs/images/`), a quick start built around `setup` with its requirements
+  listed (Tailscale on computer and phone, HTTPS certificates enabled), a
+  sequence diagram, and reference tables for commands, settings and tools.
+  The security model is stated once (what it is, what it isn't, how to make
+  it a real boundary, known limits), and a troubleshooting table is new. The
+  install section no longer tells you to set `origin`/`rp_id` by hand.
+- The approval page matches the registration page: a "From" card with a
+  status pill and countdown, the action under "What it wants to do", and the
+  bound command in a framed warning box (its heading is still "THE EXACT
+  COMMAND YOU ARE APPROVING"). The hash and request ID move under
+  "Technical details". After approving or denying, the page says what happens
+  next. The Approve button is disabled while the passkey prompt is open, and
+  a cancel says so plainly.
+
+### Fixed
+
+- In the "Already signed by another human?" box, the verdict was forced onto
+  its own line (a CSS rule made every bold word a block), leaving the rest of
+  the sentence dangling.
+
 ## [0.7.1] - 2026-11-08
 
 ### Fixed
