@@ -55,7 +55,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const token = location.hash.slice(1);
     history.replaceState(null, "", location.pathname);  // drop the token from the address bar
     if (!token) { msg("This link has no registration token. Ask for a fresh one (gate.py bootstrap).", "err"); g.remove(); }
-    else g.onclick = () => register(token).then(j => { g.remove(); msg("Registered. Credential " + j.credential_id.slice(0, 12) + "…", "ok"); })
+    else g.onclick = () => register(token).then(j => { g.remove(); msg("Registered. Credential " + j.credential_id.slice(0, 12) + "… — key fingerprint " + j.fingerprint + ". On the computer, run 'hermes passkey-gate credentials' and pin the entry with this SAME fingerprint.", "ok"); })
                                            .catch(e => msg("Registration failed: " + e.message, "err"));
   }
 });

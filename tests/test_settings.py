@@ -361,3 +361,51 @@ def test_status_with_nothing_listening_says_start_serve():
     out = json.loads(_cli(ctx, "status"))
     assert "nothing is listening" in out["gate"]["error"]
     assert "serve" in out["gate"]["next_step"]
+
+
+# ------------------- pinning from the registered credential (phone run UX)
+def _fake_creds(n=1):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from passkey_gate import gate_core
+    out = []
+    for i in range(n):
+        pem = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+        out.append({"credential_id": f"cred{i}abcdefghijkl", "registered_at": 1_700_000_000 + i,
+                    "spki_pem": pem, "fingerprint": gate_core.key_fingerprint(pem)})
+    return out
+
+
+def test_credentials_lists_fingerprints_and_pin_by_id(monkeypatch, tmp_path):
+    from passkey_gate import gate_core, local_verify
+    creds = _fake_creds(1)
+    monkeypatch.setattr(gate_core, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(gate_core, "list_credentials", lambda: creds)
+    out = _cli(FakeCtx(), "credentials")
+    assert creds[0]["fingerprint"] in out and "pin --credential" in out
+    out = _cli(FakeCtx(), "pin --credential cred0abc")
+    assert "pinned owner key" in out and creds[0]["fingerprint"] in out, out
+    assert local_verify.pinned(tmp_path).strip() == creds[0]["spki_pem"].strip()
+    assert "[PINNED owner key]" in _cli(FakeCtx(), "credentials")
+
+
+def test_pin_by_id_refuses_ambiguous_or_short_prefix(monkeypatch, tmp_path):
+    from passkey_gate import gate_core
+    creds = _fake_creds(2)
+    monkeypatch.setattr(gate_core, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(gate_core, "list_credentials", lambda: creds)
+    out = _cli(FakeCtx(), "pin --credential cred0abc")
+    assert "pinned owner key" in out  # unique prefix still works with two registered
+    assert "at least 6" in _cli(FakeCtx(), "pin --credential cre")
+    out = _cli(FakeCtx(), "pin --credential cred0abcdefgh_nope")
+    assert "REFUSED: 0 registered passkeys match" in out
+    out = _cli(FakeCtx(), "credentials")
+    assert "2 passkeys are registered" in out and out.count("[PINNED owner key]") == 1
+
+
+def test_key_fingerprint_is_stable_and_matches_registration(monkeypatch):
+    from passkey_gate import gate_core
+    pem = _fake_creds(1)[0]["spki_pem"]
+    fp = gate_core.key_fingerprint(pem)
+    assert fp == gate_core.key_fingerprint(pem) and len(fp.split(":")) == 8

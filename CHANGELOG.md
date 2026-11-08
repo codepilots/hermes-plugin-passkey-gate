@@ -4,6 +4,19 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-11-08
+
+### Fixed
+
+- **The pin step had no real-world path.** The registration page only said
+  "Registered. Credential abc…" and nothing exported the public key, so an
+  operator with a phone passkey had no PEM to hand to `pin`. The page now
+  shows the key's fingerprint; `hermes passkey-gate credentials` lists every
+  registered passkey with its fingerprint (and flags extra ones you did not
+  register); `hermes passkey-gate pin --credential <id-prefix>` pins the
+  entry whose fingerprint you matched. `pin <pem-file>` still works.
+  `scripts/e2e_hermes.py` now follows this exact flow. [H16]
+
 ## [0.6.2] - 2026-11-08
 
 ### Security

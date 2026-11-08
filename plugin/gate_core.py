@@ -765,6 +765,29 @@ def credential_count() -> int:
     return db().execute("select count(*) from credentials").fetchone()[0]
 
 
+def key_fingerprint(spki_pem: str) -> str:
+    """Short, human-comparable fingerprint of a public key: the first 16
+    bytes of SHA-256 over its DER SubjectPublicKeyInfo, as colon-separated
+    hex. Shown on the registration page AND by `hermes passkey-gate
+    credentials`, so the human can match the key they just made on their
+    phone against the one they are about to pin."""
+    der = serialization.load_pem_public_key(spki_pem.encode()).public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    h = hashlib.sha256(der).hexdigest()[:32].upper()
+    return ":".join(h[i:i + 4] for i in range(0, 32, 4))
+
+
+def list_credentials() -> list[dict]:
+    """Registered credentials, oldest first: id, registration time, SPKI PEM,
+    fingerprint. Read-only — pinning stays an explicit operator step."""
+    out = []
+    for r in db().execute("select id, public_key, created_at from credentials order by created_at"):
+        pem = pubkey_pem(r["public_key"])
+        out.append({"credential_id": r["id"], "registered_at": r["created_at"],
+                    "spki_pem": pem, "fingerprint": key_fingerprint(pem)})
+    return out
+
+
 # ---------------------------------------------------------------- HTTP mint token
 MINT_TOKEN_NAME = "mint-token"
 
@@ -861,7 +884,9 @@ def registration_finish(token: str, session_id: str, credential: dict):
     c.execute("delete from reg_sessions where token_hash=?", (th,))
     audit("credential_registered", credential_id=cid,
           public_key_sha256=hashlib.sha256(v.credential_public_key).hexdigest())
-    return {"status": "registered", "credential_id": cid, "spki_pem": pubkey_pem(v.credential_public_key)}
+    pem = pubkey_pem(v.credential_public_key)
+    return {"status": "registered", "credential_id": cid, "spki_pem": pem,
+            "fingerprint": key_fingerprint(pem)}
 
 
 # ---------------------------------------------------------------- HTTP service (serve CLI)

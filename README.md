@@ -118,9 +118,13 @@ hermes passkey-gate serve
 #    only); never send it through chat, never run it from an agent session
 hermes passkey-gate bootstrap
 
-# 3) (Out of band) pin your owner key: the agent independently checks every
-#    signature against this exact public key
-hermes passkey-gate pin /path/to/pinned_autumn.pem
+# 3) Pin your owner key: every signature is checked against this exact
+#    public key. The registration page showed a key fingerprint — find the
+#    SAME fingerprint here and pin that entry (never one you didn't just see
+#    on your own phone):
+hermes passkey-gate credentials
+hermes passkey-gate pin --credential <first characters of its id>
+#    (or, with a PEM you got some other way: hermes passkey-gate pin <pem-file>)
 
 # 4) Audit the log: internal chain check, plus — if you keep a notary file —
 #    comparison against the operator-anchored heads (the only real tamper

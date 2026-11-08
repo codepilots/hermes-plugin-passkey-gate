@@ -7,6 +7,10 @@
   expose [backend]   set up HTTPS exposure (your configured origin > tailscale
                      serve > honest instructions) and persist origin + rp_id
                      into plugin settings
+  credentials        list registered passkeys with key fingerprints
+  pin --credential <id-prefix>
+                     pin the registered passkey whose fingerprint your
+                     registration page showed
   pin <pem> [owner]  pin an owner public key locally (out-of-band first sight);
                      name the owner to pin PEER keys for parent-approval chains
   show <challenge>   print a pending challenge's URL + QR — the human-lifts-
@@ -59,7 +63,7 @@ from . import gate_core, expose, local_verify, netfetch, tools
 logger = logging.getLogger(__name__)
 
 USAGE = ("usage: hermes passkey-gate "
-         "<serve|bootstrap|expose|pin|show|set|get|status|mint-token|audit-verify|audit-notarize> [args]")
+         "<serve|bootstrap|expose|credentials|pin|show|set|get|status|mint-token|audit-verify|audit-notarize> [args]")
 
 # keys exactly as declared in plugin.yaml config_schema (drift-tested)
 SETTINGS_SPEC = {
@@ -292,9 +296,50 @@ def cmd_expose(ctx, rest):
     return "\n".join(x for x in lines if x)
 
 
+def cmd_credentials(ctx, rest):
+    """List registered passkeys with their key fingerprints, so the operator
+    can pin the one whose fingerprint their registration page showed."""
+    creds = gate_core.list_credentials()
+    if not creds:
+        return ("no passkeys registered yet — run 'hermes passkey-gate bootstrap' "
+                "and register on your phone first")
+    try:
+        pinned_pem = local_verify.pinned(gate_core.data_dir())
+    except ValueError:
+        pinned_pem = None
+    lines = []
+    for c in creds:
+        when = datetime.fromtimestamp(c["registered_at"], timezone.utc).isoformat(timespec="seconds")
+        mark = "  [PINNED owner key]" if pinned_pem and pinned_pem.strip() == c["spki_pem"].strip() else ""
+        lines.append(f"{c['credential_id'][:12]}…  registered {when}  fingerprint {c['fingerprint']}{mark}")
+    lines += ["", "pin the one whose fingerprint matches what your registration page showed:",
+              "  hermes passkey-gate pin --credential <first characters of its id>"]
+    if len(creds) > 1:
+        lines += ["", f"NOTE: {len(creds)} passkeys are registered. If you only registered one, "
+                  "the others are not yours — never pin a key you did not just see on your own phone."]
+    return "\n".join(lines)
+
+
 def cmd_pin(ctx, rest):
     if not rest:
-        return "usage: hermes passkey-gate pin <pem-file> [owner-label]"
+        return ("usage: hermes passkey-gate pin <pem-file> [owner-label]\n"
+                "   or: hermes passkey-gate pin --credential <id-prefix>  "
+                "(see 'hermes passkey-gate credentials')")
+    if rest[0] == "--credential":
+        if len(rest) < 2 or len(rest[1]) < 6:
+            return "usage: hermes passkey-gate pin --credential <at least 6 characters of the id>"
+        matches = [c for c in gate_core.list_credentials() if c["credential_id"].startswith(rest[1])]
+        if len(matches) != 1:
+            return (f"REFUSED: {len(matches)} registered passkeys match {rest[1]!r} — give enough "
+                    "of the id to pick exactly one (see 'hermes passkey-gate credentials')")
+        c = matches[0]
+        try:
+            path = local_verify.pin(gate_core.data_dir(), c["spki_pem"], None)
+        except (OSError, ValueError) as exc:
+            return f"REFUSED: pin ceremony failed: {exc}"
+        return (f"pinned owner key {c['fingerprint']} (credential {c['credential_id'][:12]}…) "
+                f"to {path}. Check this fingerprint is the one your phone's registration "
+                "page showed. Approvals are now verified against it locally.")
     try:
         pem = Path(rest[0]).read_text()
     except OSError as exc:
@@ -906,6 +951,7 @@ _COMMANDS = {
     "bootstrap": cmd_bootstrap,
     "expose": cmd_expose,
     "pin": cmd_pin,
+    "credentials": cmd_credentials,
     "show": cmd_show,
     "set": cmd_set,
     "get": cmd_show_settings,

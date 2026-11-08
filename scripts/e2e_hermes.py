@@ -99,9 +99,13 @@ try:
     s, o = post("/register/options", {"token": tok.group(1)})
     s, r = post("/register/finish", {"token": tok.group(1), "session_id": o["session_id"], "credential": human.create(o)})
     step("passkey registration", s == 200 and r.get("status") == "registered", r)
-    pem_path = os.path.join(H, "owner.pem"); open(pem_path, "w").write(r["spki_pem"])
-    rc, out = hermes("pin", pem_path)
-    step("hermes passkey-gate pin", rc == 0 and "REFUSED" not in out, out[-200:])
+    # the human's flow: the registration page shows a fingerprint; the
+    # operator finds the same fingerprint in `credentials` and pins it
+    rc, out = hermes("credentials")
+    step("hermes passkey-gate credentials shows the page's fingerprint", r.get("fingerprint") in out, out[-300:])
+    rc, out = hermes("pin", "--credential", r["credential_id"][:12])
+    step("hermes passkey-gate pin --credential", rc == 0 and "REFUSED" not in out
+         and r["fingerprint"] in out, out[-200:])
     for k, v in (("require_passkey", "true"), ("authority_patterns", "^terminal .*rm -rf")):
         rc, out = hermes("set", k, v)
         step(f"hermes passkey-gate set {k} (strengthening, no approval needed)", rc == 0 and "REFUSED" not in out, out[-200:])

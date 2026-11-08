@@ -11,7 +11,7 @@ tier: community
 category: tools
 requires_hermes: ">=0.21.5"
 docs_url: https://github.com/codepilots/hermes-plugin-passkey-gate
-version: "0.6.2"
+version: "0.6.3"
 platforms: [linux, macos, windows]
 capabilities:
   provides_tools:
