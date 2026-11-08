@@ -1,6 +1,6 @@
 name: passkey-gate
 
-version: 0.6.1
+version: 0.6.2
 
 description: >
   Passkey (WebAuthn) authorization gate for high-authority agent actions.
@@ -31,12 +31,12 @@ config_schema:
     type: str
     default: ""
     label: "Gate origin"
-    description: "HTTPS origin of the gate service, e.g. https://your-host.ts.net:8445. Leave empty to run the verifier in offline-check-only mode against an already-fetched record."
+    description: "HTTPS origin of the gate service, e.g. https://your-host.ts.net:8445. Leave empty to run the verifier in offline-check-only mode against an already-fetched record. Setting it the first time is free; changing an origin that is already set needs a passkey approval (`set origin ... --approve`)."
   rp_id:
     type: str
     default: ""
     label: "RP ID"
-    description: "WebAuthn RP ID — usually the domain name the gate origin is served on (e.g. yourhost.ts.net)."
+    description: "WebAuthn RP ID — usually the domain name the gate origin is served on (e.g. yourhost.ts.net). Defaults to the origin's hostname. Changing an RP ID that is already set needs a passkey approval."
   port:
     type: int
     default: 8655
@@ -46,7 +46,7 @@ config_schema:
     type: int
     default: 600
     label: "Challenge TTL"
-    description: "Seconds a challenge stays pending after creation (must be an integer from 1 to 86400)."
+    description: "Seconds a challenge stays pending after creation (must be an integer from 1 to 86400). Lowering it is free; raising it keeps approvals spendable longer, so it needs a passkey approval."
   require_passkey:
     type: bool
     default: false

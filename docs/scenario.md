@@ -14,8 +14,7 @@ ips, key ids or token values are reproduced here.*
   presence-dependent work; cannot be reached reliably and drops off the mesh
   for hours (sleep, travel).
 - **Autumn** — one human, operator of both agents. Present at exactly one
-  keyboard at a time, and — the day this was written — about to leave the
-  country for five days.
+  keyboard at a time, and often away from both.
 
 ## The task that exposed the problem
 

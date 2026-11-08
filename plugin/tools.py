@@ -288,12 +288,55 @@ def _fetch_verify(base: str, cid: str, sha: str):
         return {"status": "error", "error": f"gate not reachable: {type(exc).__name__}"}
 
 
+def gate_unreachable_reason(base: str, exc: Exception | None = None) -> dict:
+    """Plain-English reason the gate could not be reached, plus the next
+    step — what a first-time operator (or a judge) sees from `status`."""
+    if not base:
+        return {"error": "origin not configured",
+                "next_step": "run 'hermes passkey-gate expose' (tailscale) or "
+                             "'hermes passkey-gate set origin https://<your-host>'"}
+    out = _unreachable_text(base, exc)
+    if exc is not None:
+        out["error_type"] = type(exc).__name__
+    return out
+
+
+def _unreachable_text(base: str, exc) -> dict:
+    import socket
+    import ssl
+    import urllib.error
+    reason = getattr(exc, "reason", exc)
+    if isinstance(exc, netfetch.RedirectBlocked):
+        return {"error": f"the gate at {base} tried to redirect, and redirects are refused",
+                "next_step": "point the origin straight at passkey-gate (no redirecting proxy)"}
+    if isinstance(exc, urllib.error.HTTPError):
+        return {"error": f"the gate at {base} answered HTTP {exc.code}",
+                "next_step": "check that the origin points at passkey-gate, not another service"}
+    if isinstance(reason, ConnectionRefusedError):
+        return {"error": f"nothing is listening at {base}",
+                "next_step": "start the gate: 'hermes passkey-gate serve'"}
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return {"error": f"timed out reaching {base}",
+                "next_step": "check the gate is running and the tailscale serve rule exists"}
+    if isinstance(reason, ssl.SSLError):
+        return {"error": f"TLS failed for {base} ({reason})",
+                "next_step": "check the HTTPS terminator (tailscale serve) for this origin"}
+    if isinstance(reason, socket.gaierror):
+        return {"error": f"cannot resolve the host in {base}",
+                "next_step": "check the origin's hostname (is this machine on the tailnet?)"}
+    if isinstance(exc, ValueError):
+        return {"error": f"origin {base!r} is not a valid gate origin ({exc})",
+                "next_step": "set an https origin: 'hermes passkey-gate set origin https://<host>'"}
+    return {"error": f"could not reach {base} ({type(exc).__name__}: {reason})",
+            "next_step": "check 'hermes passkey-gate serve' is running and the origin is right"}
+
+
 def _fetch_health(base: str):
     try:
         with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
             return json.loads(r.read())
     except Exception as exc:
-        return {"status": "unreachable", "error": f"{type(exc).__name__}"}
+        return {"status": "unreachable", **gate_unreachable_reason(base, exc)}
 
 
 # ---------------------------------------------------------------- enforcement

@@ -365,11 +365,12 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
     try:
         allow = [str(x) for x in allowlist] if isinstance(allowlist, (list, tuple)) else []
         base = str(parent["base"]).strip().rstrip("/")
-        problem = netfetch.base_not_fetchable(base, allow)
+        problem, address = netfetch.fetch_target(base, allow)
         if problem:
             return f"unverified ({problem})"
         url = f"{base}/verify/{parent['challenge_id']}?action_sha256={parent['action_sha256']}"
-        with netfetch.open_no_redirect(url, timeout=timeout) as r:
+        # dial the address that was just checked — never re-resolve (rebinding)
+        with netfetch.open_pinned(url, address, timeout=timeout) as r:
             rec = json.loads(r.read())
     except netfetch.RedirectBlocked as exc:
         return (f"unverified (parent gate answered with a redirect ({exc.code}) — "

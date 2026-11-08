@@ -219,3 +219,45 @@ def test_http_challenge_endpoint_throttles_with_429(gate_env):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ------------------- fresh-review F5: GET cap + connection ceiling
+def test_get_requests_are_capped_gate_wide(monkeypatch):
+    monkeypatch.setattr(gate_core, "GET_RATE_MAX", 3)
+    monkeypatch.setattr(gate_core, "_get_hits", __import__("collections").deque())
+    srv = gate_core.BoundedHTTPServer(("127.0.0.1", 0), gate_core.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        codes = []
+        for _ in range(5):
+            try:
+                with urllib.request.urlopen(base + "/verify/x?action_sha256=0", timeout=5) as r:
+                    codes.append(r.status)
+            except urllib.error.HTTPError as e:
+                codes.append(e.code)
+        assert codes[:3] == [200, 200, 200] and codes[3:] == [429, 429], codes
+        with urllib.request.urlopen(base + "/static/app.js", timeout=5) as r:
+            assert r.status == 200  # static assets are not counted
+    finally:
+        srv.shutdown()
+
+
+def test_connection_ceiling_closes_extra_connections():
+    import socket
+    srv = gate_core.BoundedHTTPServer(("127.0.0.1", 0), gate_core.Handler, max_connections=1)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        addr = srv.server_address
+        hog = socket.create_connection(addr, timeout=5)   # holds the only slot, sends nothing
+        time.sleep(0.3)
+        extra = socket.create_connection(addr, timeout=5)
+        extra.settimeout(5)
+        assert extra.recv(10) == b""                     # closed at once, no thread spent
+        extra.close()
+        hog.close()
+        time.sleep(0.5)                                  # slot released when the hog goes
+        with urllib.request.urlopen(f"http://{addr[0]}:{addr[1]}/health", timeout=5) as r:
+            assert r.status == 200
+    finally:
+        srv.shutdown()

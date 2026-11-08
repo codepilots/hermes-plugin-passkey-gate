@@ -70,9 +70,13 @@ def test_numeric_settings_reject_out_of_range_without_persistence():
 
 
 def test_numeric_settings_accept_range_boundaries():
-    ctx = FakeCtx()
+    # fresh config per value: raising challenge_ttl is a gate-weakening
+    # change (H11), so the max is checked from a config already at the max
     for key, low, high in (("challenge_ttl", 1, 86400), ("port", 1, 65535)):
         for value in (low, high):
+            ctx = FakeCtx()
+            if key == "challenge_ttl" and value == high:
+                ctx.store[key] = high
             out = _cli(ctx, f"set {key} {value}")
             assert ctx.store[key] == value, out
 
@@ -156,6 +160,7 @@ def test_set_origin_is_parsed_not_prefix_checked():
     accepted = ["https://fine.example.ts.net", "https://real.example.ts.net:8445",
                 "http://localhost:8655", "http://127.0.0.1:8655"]
     for good in accepted:
+        ctx = FakeCtx()  # first-time setup each time (moving an origin needs approval, H11)
         out = _cli(ctx, f"set origin {good}")
         assert ctx.store["origin"] == good, out
 
@@ -300,3 +305,59 @@ def test_set_authority_patterns_length_and_count_caps():
     assert ctx.store.get("authority_patterns") is None
     out = _cli(ctx, f"set authority_patterns {json.dumps(['p%d' % i for i in range(100)])}")
     assert len(ctx.store["authority_patterns"]) == 100  # exactly at the cap
+
+
+
+# ------------------- H11: TTL increases and origin/rp_id moves are gated
+def test_raising_challenge_ttl_needs_approval_lowering_is_free():
+    ctx = FakeCtx()
+    ctx.store["challenge_ttl"] = 600
+    out = _cli(ctx, "set challenge_ttl 86400")
+    assert "REFUSED" in out and "weakens" in out
+    assert ctx.store["challenge_ttl"] == 600
+    out = _cli(ctx, "set challenge_ttl 120")
+    assert ctx.store["challenge_ttl"] == 120, out
+
+
+def test_first_origin_is_free_moving_it_needs_approval():
+    ctx = FakeCtx()
+    out = _cli(ctx, "set origin https://real.example.ts.net:8445")
+    assert ctx.store["origin"] == "https://real.example.ts.net:8445", out
+    out = _cli(ctx, "set origin https://evil.example.ts.net")
+    assert "REFUSED" in out and "weakens" in out and "out of band" in out
+    assert ctx.store["origin"] == "https://real.example.ts.net:8445"
+    out = _cli(ctx, "set rp_id real.example.ts.net")
+    assert ctx.store["rp_id"] == "real.example.ts.net", out
+    out = _cli(ctx, "set rp_id example.ts.net")
+    assert "REFUSED" in out and ctx.store["rp_id"] == "real.example.ts.net"
+
+
+def test_expose_does_not_move_an_established_origin(monkeypatch):
+    from passkey_gate import expose
+    ctx = FakeCtx()
+    ctx.store.update(origin="https://real.example.ts.net:8445", rp_id="real.example.ts.net")
+    monkeypatch.setattr(expose, "tailscale_expose", lambda port: {
+        "ok": True, "backend": "tailscale", "url": "https://other.example.ts.net:8443",
+        "rp_id": "other.example.ts.net", "persistent": True})
+    out = _cli(ctx, "expose tailscale")
+    assert "NOT saved" in out and "set origin" in out
+    assert ctx.store["origin"] == "https://real.example.ts.net:8445"
+    assert ctx.store["rp_id"] == "real.example.ts.net"
+
+
+# ------------------- status explains an unreachable gate in plain English
+def test_status_without_origin_says_origin_not_configured():
+    out = json.loads(_cli(FakeCtx(), "status"))
+    assert out["gate"]["reachable"] is False
+    assert out["gate"]["error"] == "origin not configured"
+    assert "expose" in out["gate"]["next_step"]
+
+
+def test_status_with_nothing_listening_says_start_serve():
+    import socket
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    ctx = FakeCtx()
+    ctx.store["origin"] = f"http://127.0.0.1:{port}"
+    out = json.loads(_cli(ctx, "status"))
+    assert "nothing is listening" in out["gate"]["error"]
+    assert "serve" in out["gate"]["next_step"]

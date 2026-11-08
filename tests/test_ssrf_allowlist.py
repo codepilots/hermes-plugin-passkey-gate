@@ -283,7 +283,7 @@ def test_verify_and_health_fetches_never_follow_redirects(redirector, canary):
     assert "RedirectBlocked" in rec.get("error", ""), rec
     health = tools._fetch_health(rbase)
     assert health.get("status") == "unreachable", health
-    assert health.get("error") == "RedirectBlocked", health
+    assert health.get("error_type") == "RedirectBlocked", health
     assert len(csrv.hits) == before
 
 
@@ -298,7 +298,7 @@ def test_status_and_tls_probe_never_follow_redirects(redirector, canary):
 
     out = json.loads(cli.cmd_status(Ctx(), None))
     assert out["gate"].get("reachable") is False, out["gate"]
-    assert out["gate"].get("error") == "RedirectBlocked", out["gate"]
+    assert out["gate"].get("error_type") == "RedirectBlocked", out["gate"]
     ok, note = expose._tls_probe(f"{rbase}/health")
     assert ok is False and "RedirectBlocked" in note
     assert len(csrv.hits) == before
@@ -403,3 +403,66 @@ def test_private_network_problem_rules():
         raise socket_mod.gaierror("dns gone")
 
     assert "does not resolve" in netfetch.private_network_problem(host, host, resolver=boom)
+
+
+# ------------------- fresh-review F4: DNS rebinding between check and connect
+def test_parent_fetch_dials_the_checked_address_not_a_second_lookup(monkeypatch, pinned_dir):
+    """The SSRF check resolved the host once and the fetch resolved it AGAIN:
+    a DNS answer that flips to an internal address in between (rebinding)
+    steered the fetch inside. Now the fetch dials exactly the address that
+    was checked, and the hostname is resolved only once."""
+    from passkey_gate import netfetch
+    base = "https://peer-gate.example.test"
+    lookups = []
+
+    def rebinding(host, port):
+        lookups.append(host)
+        addr = "93.184.216.34" if len(lookups) == 1 else "127.0.0.1"
+        return [(socket_mod.AF_INET, 1, 6, "", (addr, 443))]
+
+    dialed = []
+
+    def fake_connect(address, port, timeout):
+        dialed.append((address, port))
+        raise ConnectionRefusedError("test: no network")
+
+    monkeypatch.setattr(socket_mod, "getaddrinfo", rebinding)
+    monkeypatch.setattr(netfetch, "_connect", fake_connect)
+    verdict = local_verify.verify_parent_approval(_parent(base), pinned_dir, allowlist=[base])
+    assert "unreachable" in verdict, verdict
+    assert dialed == [("93.184.216.34", 443)]   # the checked public address
+    assert lookups == ["peer-gate.example.test"]  # resolved once, never again
+
+
+class _Stub(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/hop"):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/elsewhere")
+            self.end_headers()
+            return
+        body = json.dumps({"host": self.headers.get("Host"), "path": self.path}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_open_pinned_fetches_via_the_given_address_and_refuses_redirects():
+    from passkey_gate import netfetch
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        with netfetch.open_pinned(f"http://localhost:{port}/verify/x?action_sha256=0",
+                                  "127.0.0.1") as r:
+            got = json.loads(r.read())
+        assert got == {"host": f"localhost:{port}", "path": "/verify/x?action_sha256=0"}
+        with pytest.raises(netfetch.RedirectBlocked):
+            netfetch.open_pinned(f"http://localhost:{port}/hop", "127.0.0.1")
+    finally:
+        srv.shutdown()

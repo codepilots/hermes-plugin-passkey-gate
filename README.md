@@ -139,6 +139,11 @@ hermes passkey-gate audit-notarize --to /root/gate-notary.log
 #      hermes passkey-gate set authority_patterns ^terminal .*(rm |curl )
 #      hermes passkey-gate set origin https://your-host.ts.net:8447
 #      hermes passkey-gate get
+#    Changes that WEAKEN the gate — require_passkey off, removing a pattern,
+#    adding a parent-gate allowlist entry, raising challenge_ttl, or moving
+#    an origin/rp_id that is already set — are refused until your passkey
+#    signs the exact change; the refusal prints the approval link and the
+#    --approve re-run. Strengthening, and first-time setup, are free.
 ```
 
 ### Check it end to end

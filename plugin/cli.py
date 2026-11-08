@@ -16,7 +16,9 @@
                      re-apply immediately; same namespace the Desktop form
                      uses). Weakening a security-critical setting — turning
                      require_passkey off, removing an authority pattern,
-                     adding a parent-gate allowlist entry — is REFUSED unless
+                     adding a parent-gate allowlist entry, raising
+                     challenge_ttl, or moving an already-set origin/rp_id
+                     — is REFUSED unless
                      --approve names a passkey approval of the exact
                      server-derived phrase; strengthening is free; both are
                      audited (finding 16).
@@ -86,7 +88,11 @@ DEFAULTS = {
 # terminal access could disarm any of them with one unauthenticated `set`, so
 # weakening one requires a passkey approval of an exact server-derived
 # phrase; strengthening is free; every change is audited.
-SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist")
+SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist",
+                 # H11: a longer TTL keeps signed approvals spendable longer,
+                 # and moving origin/rp_id re-points where approvals are
+                 # minted and what they are verified against
+                 "challenge_ttl", "origin", "rp_id")
 
 _ctx_ref = None
 _cfg_cache = None
@@ -271,7 +277,14 @@ def cmd_expose(ctx, rest):
         return json.dumps(result, indent=2)
     url, rp_id = result["url"], result["rp_id"]
     lines = [f"exposure ready: {url} (rp_id {rp_id})", result.get("note", "")]
-    if result.get("persistent") and ctx is not None:
+    if (result.get("persistent") and ctx is not None and
+            ((origin_cfg and url != origin_cfg) or (rp_cfg and rp_id != rp_cfg))):
+        # H11: moving an established origin/rp_id is a gate-weakening change
+        # — expose sets things up, it does not bypass the approval rule
+        lines.append(f"NOT saved: an origin is already configured ({origin_cfg}, rp_id "
+                     f"{rp_cfg or '(default)'}). Moving it needs a passkey approval — run "
+                     f"'hermes passkey-gate set origin {url}' and follow its instructions.")
+    elif result.get("persistent") and ctx is not None:
         ctx.set_config("origin", url)
         ctx.set_config("rp_id", rp_id)
         gate_core.configure(rp_id=rp_id, origin=url)
@@ -399,6 +412,19 @@ def _change_weakens(key, old, new):
         if not (isinstance(old_n, list) and isinstance(new_n, list)):
             return True
         return bool(set(new_n) - set(old_n))
+    if key == "challenge_ttl":
+        # raising the TTL keeps approvals live longer; lowering is free
+        try:
+            return int(new_n) > int(old_n if old_n is not None else DEFAULTS["challenge_ttl"])
+        except (TypeError, ValueError):
+            return True
+    if key in ("origin", "rp_id"):
+        # first-time setup (nothing configured yet) is free; moving an
+        # established origin/RP ID is not
+        old_s = (old_n or "").strip() if isinstance(old_n, str) or old_n is None else None
+        if old_s is None or not isinstance(new_n, str):
+            return True
+        return bool(old_s) and new_n.strip() != old_s
     return False
 
 
@@ -492,6 +518,12 @@ def _weakening_needs_approval(key, new_value, raw):
                       "then re-run this command"]
         lines += ["", "once they approve, re-run the same change with:",
                   f"  hermes passkey-gate set {key} {raw} --approve {c['challenge_id']}"]
+    if key in ("origin", "rp_id"):
+        lines += ["", "if the CURRENT origin no longer works (so no approval can be "
+                  "signed on it), the operator can change it out of band by editing "
+                  "plugins.entries.passkey-gate.settings in the Hermes config file "
+                  "directly — then re-register the passkey, since credentials are "
+                  "bound to the RP ID"]
     return "\n".join(lines)
 
 
@@ -670,11 +702,14 @@ def cmd_status(ctx, rest):
     """One-screen answer to 'can I rely on this gate right now?'"""
     out = {"gate": {"reachable": False}}
     base = ((ctx.get_config("origin", default="") or "").strip()).rstrip("/") if ctx is not None else ""
-    try:
-        with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
-            out["gate"] = {**json.loads(r.read()), "reachable": r.status == 200}
-    except Exception as exc:
-        out["gate"] = {"reachable": False, "error": f"{type(exc).__name__}"}
+    if not base:
+        out["gate"] = {"reachable": False, **tools.gate_unreachable_reason(base)}
+    else:
+        try:
+            with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
+                out["gate"] = {**json.loads(r.read()), "reachable": r.status == 200}
+        except Exception as exc:
+            out["gate"] = {"reachable": False, **tools.gate_unreachable_reason(base, exc)}
     out["origin_configured"] = bool(base)
     out["backends_detected"] = expose.detect_backends()
     out["owner_key_pinned"] = local_verify.pinned(gate_core.data_dir()) is not None

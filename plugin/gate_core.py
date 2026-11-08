@@ -15,6 +15,7 @@ Changes vs the original standalone service (kept minimal on purpose):
   - consumed challenges: an enforcement hook flips status approved -> consumed
     once the action fires, so a signature authorises one deliberate action.
 """
+import collections
 import contextlib
 import hashlib
 import hmac
@@ -939,6 +940,52 @@ REGISTER_PAGE = PAGE.format(title="Register passkey", body="""
 <p id="msg"></p>""")
 
 
+# fresh-review F5: bounds on the HTTP surface
+GET_RATE_WINDOW_S = 10      # sliding window for the gate-wide GET cap
+GET_RATE_MAX = 300          # GETs (non-static) per window, all clients together
+MAX_CONNECTIONS = 64        # concurrent connections; extra ones are closed
+_get_hits: "collections.deque[float]" = collections.deque()
+_get_hits_lock = threading.Lock()
+
+
+def _get_rate_ok() -> bool:
+    now = time.monotonic()
+    with _get_hits_lock:
+        while _get_hits and now - _get_hits[0] > GET_RATE_WINDOW_S:
+            _get_hits.popleft()
+        if len(_get_hits) >= GET_RATE_MAX:
+            return False
+        _get_hits.append(now)
+        return True
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a ceiling on concurrent connections: past
+    MAX_CONNECTIONS a new connection is closed at once instead of costing a
+    thread (each handler also times out after Handler.timeout seconds)."""
+    daemon_threads = True
+
+    def __init__(self, *a, max_connections=None, **kw):
+        self._slots = threading.BoundedSemaphore(max_connections or MAX_CONNECTIONS)
+        super().__init__(*a, **kw)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "passkey-gate/1"
     # a client that stops sending must not pin a server thread forever
@@ -979,6 +1026,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
+        if not p.startswith("/static/") and not _get_rate_ok():
+            # fresh-review F5: a gate-wide cap (behind tailscale serve every
+            # client is 127.0.0.1, so per-IP limits would mean nothing)
+            return self._send(429, {"error": "too many requests — slow down and retry"})
         if p == "/health":
             return self._send(200, {"status": "ok", "rp_id": rp_id(), "origin": origin(),
                                     "credentials": credential_count(),
@@ -1079,6 +1130,6 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host="127.0.0.1", http_port=None):
     bind_port = validate_port(http_port if http_port is not None else port())
     db()
-    srv = ThreadingHTTPServer((host, bind_port), Handler)
+    srv = BoundedHTTPServer((host, bind_port), Handler)
     print(f"passkey-gate on {host}:{srv.server_address[1]} rp_id={rp_id()} origin={origin()}", flush=True)
     srv.serve_forever()

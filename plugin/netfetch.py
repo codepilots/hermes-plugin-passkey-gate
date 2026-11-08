@@ -143,41 +143,120 @@ def _entry_names_literal_internal_host(entry_host: str) -> bool:
     return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
 
 
-def private_network_problem(host, allowlist_entry_host, resolver=None):
-    """After the allowlist match: resolve ``host`` and reject internal
-    addresses, unless the allowlist entry itself names that literal host.
-    Fail closed on resolution errors. Returns None (fine) or a reason."""
+def _resolve_checked(host, allowlist_entry_host, resolver=None):
+    """Resolve ``host`` ONCE and judge every address. Returns
+    (problem_or_None, address_to_dial_or_None). The address is what the
+    fetch must connect to — dialing the hostname again would resolve it a
+    second time, and a DNS answer that changes between the check and the
+    connect (rebinding) could steer the fetch to an internal address.
+    None for the address means 'the allowlist entry itself names this
+    literal internal host; dial it as written'."""
     if _entry_names_literal_internal_host(allowlist_entry_host):
-        return None
+        return None, None
     resolver = resolver or socket.getaddrinfo
     try:
         infos = resolver(host, None)
     except Exception:
-        return "parent gate host does not resolve"
+        return "parent gate host does not resolve", None
+    chosen = None
     for info in infos or []:
         try:
             raw = info[-1][0]
         except Exception:
-            return "parent gate host could not be resolved"
+            return "parent gate host could not be resolved", None
         problem = _address_problem(raw)
         if problem:
-            return f"parent gate host resolves to {problem}"
-    return None
+            return f"parent gate host resolves to {problem}", None
+        if chosen is None:
+            chosen = raw
+    if chosen is None:
+        return "parent gate host does not resolve", None
+    return None, chosen
 
 
-def base_not_fetchable(base, allowlist):
+def private_network_problem(host, allowlist_entry_host, resolver=None):
+    """After the allowlist match: resolve ``host`` and reject internal
+    addresses, unless the allowlist entry itself names that literal host.
+    Fail closed on resolution errors. Returns None (fine) or a reason."""
+    return _resolve_checked(host, allowlist_entry_host, resolver)[0]
+
+
+def fetch_target(base, allowlist):
     """The whole finding-5 gate on a parent base, checked BEFORE any network
-    I/O. Returns None when the base may be fetched, else the exact problem
-    string (the caller renders it as a visible 'unverified (...)' verdict)."""
+    I/O. Returns (problem_or_None, address_to_dial_or_None); pass the
+    address to ``open_pinned`` so the fetch dials exactly what was checked."""
     try:
         _, host, _ = parse_gate_origin(base)
     except ValueError as exc:
-        return f"parent gate base is not a valid gate origin ({exc})"
+        return f"parent gate base is not a valid gate origin ({exc})", None
     entry = origin_allowed(base, allowlist)
     if entry is None:
-        return "parent gate not on allowlist"
+        return "parent gate not on allowlist", None
     try:
         _, entry_host, _ = parse_gate_origin(entry)
     except ValueError:
-        return "parent gate not on allowlist"
-    return private_network_problem(host, entry_host)
+        return "parent gate not on allowlist", None
+    return _resolve_checked(host, entry_host)
+
+
+def base_not_fetchable(base, allowlist):
+    """Problem string from ``fetch_target`` (None when the base may be fetched)."""
+    return fetch_target(base, allowlist)[0]
+
+
+def _connect(address, port, timeout):
+    """Open a TCP socket to a literal, already-validated address — no name
+    resolution happens here."""
+    ip = ipaddress.ip_address(address)
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((address, port))
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def open_pinned(url, address, timeout=10):
+    """GET ``url`` while dialing ``address`` (from ``fetch_target``) instead
+    of re-resolving the hostname. TLS still verifies the certificate against
+    the URL's hostname (SNI + hostname check), Host is the URL's host, and a
+    3xx raises RedirectBlocked like every other fetch. ``address`` None
+    falls back to ``open_no_redirect`` (a literal host the admin allowlisted)."""
+    if address is None:
+        return open_no_redirect(url, timeout=timeout)
+    import http.client
+    import ssl
+    parts = urllib.parse.urlsplit(url)
+    scheme, host, port = parse_gate_origin(f"{parts.scheme}://{parts.netloc}")
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+    if scheme == "https":
+        ctx = ssl.create_default_context()
+
+        class _Conn(http.client.HTTPSConnection):
+            def connect(self):
+                self.sock = ctx.wrap_socket(_connect(address, port, timeout),
+                                            server_hostname=host)
+        conn = _Conn(host, port, timeout=timeout, context=ctx)
+    else:
+        class _Conn(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = _connect(address, port, timeout)
+        conn = _Conn(host, port, timeout=timeout)
+    try:
+        conn.request("GET", path, headers={"Accept": "application/json"})
+        resp = conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
+    if 300 <= resp.status < 400:
+        loc = resp.getheader("Location") or ""
+        conn.close()
+        raise RedirectBlocked(url, resp.status, loc)
+    if resp.status >= 400:
+        conn.close()
+        raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+    return resp

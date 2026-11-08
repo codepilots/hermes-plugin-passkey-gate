@@ -4,6 +4,36 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-08
+
+### Security
+
+- **More settings are gate-weakening:** raising `challenge_ttl` (approvals
+  stay spendable longer) and changing an `origin` or `rp_id` that is
+  already set now need a passkey approval of the exact change, like turning
+  enforcement off. Lowering the TTL and first-time setup stay free. `expose`
+  no longer overwrites an established origin; it says to use the approved
+  `set origin` path. If the current origin is dead, the operator can still
+  edit the Hermes config file directly. [H11]
+- **DNS rebinding closed on parent-gate fetches:** the host is resolved once,
+  every address is checked, and the fetch dials exactly the checked address
+  (TLS still verifies the certificate against the hostname). Previously the
+  fetch resolved the name a second time, so a DNS answer flipped between the
+  check and the connect could steer it to an internal address. [F4]
+- **HTTP surface bounded:** a gate-wide cap on non-static GETs (300 per 10 s,
+  429 beyond — gate-wide because behind `tailscale serve` every client is
+  127.0.0.1), and at most 64 concurrent connections (extra ones are closed
+  at once). Trade-off: a flood from inside the tailnet can briefly 429 the
+  approval page too, instead of slowing the whole host down. [F5]
+
+### Changed
+
+- `status` / `gate_status` explain an unreachable gate in plain English with
+  a next step ("origin not configured — run 'hermes passkey-gate expose'",
+  "nothing is listening at … — start 'hermes passkey-gate serve'", TLS,
+  DNS, redirect); the exception name moves to `error_type`.
+- `docs/scenario.md` no longer mentions the author's travel plans.
+
 ## [0.6.1] - 2026-11-08
 
 ### Fixed
