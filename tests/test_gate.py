@@ -923,7 +923,9 @@ def test_register_with_broken_config_fails_closed(monkeypatch):
         def register_hook(self, name, handler):
             registered.append(name)
 
-        def register_cli_command(self, name, fn):
+        # exact Hermes v0.23 PluginContext signature (a looser fake hid a
+        # real load failure: the plugin never registered in Hermes)
+        def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
             registered.append(name)
 
     passkey_gate.register(Ctx(fail_get=True))  # must not raise
@@ -1818,3 +1820,36 @@ def test_handlers_never_raise_on_bad_types():
     out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "a",
                                            "requester_owner": 7}))
     assert out["ok"] is False and "requester_owner" in out["error"]
+
+
+
+def test_cli_registers_with_hermes_signature_and_runs(monkeypatch, capsys):
+    """register() must use Hermes's register_cli_command(name, help,
+    setup_fn, handler_fn) contract, and the command must actually dispatch
+    when argparse drives it the way `hermes <name> ...` does."""
+    import argparse
+    import passkey_gate
+    reset_gate_config(monkeypatch)
+    seen = {}
+
+    class Ctx(FakeCtx):
+        def register_tool(self, **kw):
+            pass
+
+        def register_hook(self, name, handler):
+            pass
+
+        def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+            assert isinstance(help, str) and callable(setup_fn) and callable(handler_fn)
+            seen.update(name=name, setup_fn=setup_fn, handler_fn=handler_fn)
+
+    passkey_gate.register(Ctx())
+    assert seen["name"] == "passkey-gate"
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    p = sub.add_parser("passkey-gate")
+    seen["setup_fn"](p)
+    p.set_defaults(func=seen["handler_fn"])
+    args = parser.parse_args(["passkey-gate", "nonsense-subcommand"])
+    assert args.func(args) == 2
+    assert "usage: hermes passkey-gate" in capsys.readouterr().out

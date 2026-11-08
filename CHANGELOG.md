@@ -4,6 +4,26 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-08
+
+### Fixed
+
+- **The plugin failed to load in real Hermes (v0.23.0):** `register()`
+  called `register_cli_command(name, fn)`, but Hermes's signature is
+  `register_cli_command(name, help, setup_fn, handler_fn)`; the TypeError
+  aborted the whole plugin — no tools, no enforcement hook, no CLI. The
+  test suite's fake context accepted the wrong signature. The command now
+  registers with an argparse `setup_fn` + `handler_fn`, a CLI-registration
+  failure can no longer take the tools and hook down with it, and the fake
+  context matches Hermes's signature exactly. [H12]
+
+### Added
+
+- `scripts/e2e_hermes.py`: end-to-end check through real Hermes (plugin
+  manager, tool registry, `pre_tool_call` dispatch, `serve`, CLI ceremony)
+  with a software authenticator — 19 steps, all passing against Hermes
+  v0.23.0.
+
 ## [0.6.0] - 2026-11-08
 
 Hackathon-readiness release: closes the HIGH found by an independent code

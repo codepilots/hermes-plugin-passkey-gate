@@ -141,6 +141,15 @@ hermes passkey-gate audit-notarize --to /root/gate-notary.log
 #      hermes passkey-gate get
 ```
 
+### Check it end to end
+
+`scripts/e2e_hermes.py` drives the whole flow through a real Hermes install —
+CLI ceremony, plugin loading, the enforcement hook blocking, a passkey
+approval (software authenticator standing in for your phone), local
+verification against the pinned key, one allowed execution, the replay
+blocked, and the audit chain — in a throwaway Hermes home. Its docstring has
+the three commands to run it.
+
 ### Exposure backends
 
 | backend | persistence | what happens |

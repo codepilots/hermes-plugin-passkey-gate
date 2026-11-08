@@ -26,6 +26,7 @@ machines, tamper/attempts denied, audit chain intact.
 
 The full first-hand scenario behind this plugin: docs/scenario.md.
 """
+import argparse
 import logging
 
 from . import cli, gate_core, schemas, tools
@@ -52,6 +53,19 @@ def _on_pre_tool_call(tool_name: str, args: dict, task_id: str, **kwargs):
     return tools.hook_verdict(tool_name, args, cfg["patterns"], cfg["require_passkey"])
 
 
+def _setup_cli(parser):
+    parser.add_argument("argv", nargs=argparse.REMAINDER,
+                        help="subcommand and its arguments, e.g. 'status' or "
+                             "'set require_passkey true'")
+
+
+def _run_cli(ctx, args) -> int:
+    out = cli.dispatch(ctx, " ".join(getattr(args, "argv", None) or []))
+    if out:
+        print(out)
+    return 2 if isinstance(out, str) and out.startswith("usage:") else 0
+
+
 def register(ctx):
     cli._ctx_ref = ctx
     cli.invalidate_config_cache()
@@ -69,7 +83,20 @@ def register(ctx):
                       schema=schemas.GATE_STATUS, handler=tools.gate_status)
 
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
-    ctx.register_cli_command("passkey-gate", lambda args: cli.dispatch(ctx, args))
+    try:
+        # Hermes API: register_cli_command(name, help, setup_fn(subparser),
+        # handler_fn(args) -> exit code). A failure here must never take the
+        # tools and the enforcement hook down with it.
+        ctx.register_cli_command(
+            name="passkey-gate",
+            help="Passkey approval gate: serve, bootstrap, expose, pin, status, ...",
+            setup_fn=_setup_cli,
+            handler_fn=lambda args: _run_cli(ctx, args),
+            description=cli.__doc__ or "",
+        )
+    except Exception:
+        logger.exception("passkey-gate: CLI command registration failed; "
+                         "tools and the pre_tool_call hook remain registered")
 
     creds = None
     try:
