@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -1049,6 +1050,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- GET
     def do_GET(self):
+        _refresh_config()
         u = urlparse(self.path)
         p = u.path
         if not p.startswith("/static/") and not _get_rate_ok():
@@ -1083,6 +1085,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- POST
     def do_POST(self):
+        _refresh_config()
         p = urlparse(self.path).path
         # JSON only: a cross-site <form> can send text/plain or urlencoded
         # bodies without a CORS preflight, never application/json — so this
@@ -1150,6 +1153,20 @@ class Handler(BaseHTTPRequestHandler):
             audit("error", path=p.split("/")[1] if "/" in p else p, error=type(exc).__name__)
             return self._send(400, {"error": "rejected", "reason": type(exc).__name__})
         return self._send(404, {"error": "not found"})
+
+
+# Set by `hermes passkey-gate serve`: re-applies plugin settings when the
+# settings file changed (one stat per request, cached), so `expose` or `set
+# origin` take effect on a running gate without a restart.
+_config_refresh = None
+
+
+def _refresh_config():
+    if _config_refresh is not None:
+        try:
+            _config_refresh()
+        except Exception:
+            logging.getLogger(__name__).exception("passkey-gate: settings refresh failed")
 
 
 def serve(host="127.0.0.1", http_port=None):

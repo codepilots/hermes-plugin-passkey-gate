@@ -1,6 +1,6 @@
 [project]
 name = "hermes-plugin-passkey-gate"
-version = "0.6.3"
+version = "0.6.4"
 description = "Passkey (WebAuthn) authorization gate for high-authority Hermes agent actions"
 readme = "README.md"
 requires-python = ">=3.11"

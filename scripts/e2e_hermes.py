@@ -92,6 +92,10 @@ for _ in range(60):
 try:
     with urllib.request.urlopen(ORIGIN + "/health", timeout=3) as r:
         step("hermes passkey-gate serve → /health", json.loads(r.read())["status"] == "ok")
+    rc, out = hermes("set", "challenge_ttl", "300")   # lowering is free
+    with urllib.request.urlopen(ORIGIN + "/health", timeout=3) as r:
+        ttl = json.loads(r.read()).get("challenge_ttl_s")
+    step("running serve picks up a settings change live (no restart)", ttl == 300, f"ttl={ttl}")
     rc, out = hermes("bootstrap")
     tok = re.search(r"/register#([A-Za-z0-9_-]{20,})", out)
     step("hermes passkey-gate bootstrap prints a registration link", tok, out[-300:])

@@ -234,6 +234,8 @@ def apply_config_safe():
 
 # ---------------------------------------------------------------- commands
 def cmd_serve(ctx, rest):
+    # settings changed by `expose` / `set` in another terminal apply live
+    gate_core._config_refresh = apply_config_safe
     gate_core.serve()
     return "serve returned"
 

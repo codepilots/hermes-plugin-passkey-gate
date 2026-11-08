@@ -4,6 +4,17 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-11-08
+
+### Fixed
+
+- A running `serve` now re-applies settings when the settings file changes
+  (one cached stat per request). Before, it kept the settings it started
+  with, so the origin saved by `expose` never reached it and passkey
+  registration failed its origin check until a restart. [H17]
+- README first-run order: `serve` comes before `expose` (expose proves the
+  URL with a real TLS `/health` probe, which needs the gate running).
+
 ## [0.6.3] - 2026-11-08
 
 ### Fixed

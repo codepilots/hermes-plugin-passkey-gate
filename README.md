@@ -100,18 +100,20 @@ plugins:
 ## First run
 
 ```bash
-# 0) Publish a HTTPS URL, in this order: explicit config origin >
-#    tailscale serve --bg. With tailscale installed it picks a free HTTPS
-#    serve port on your tailnet (private to your devices — nothing is put
-#    on the public internet), derives origin + RP id from tailscale status --json (no shell string
-#    parsing; the serve map is re-read and the new entry located), and saves
-#    both back into plugin settings so challenges mint to the right origin
-#    from the next session on.
-hermes passkey-gate expose            # or: expose tailscale
-
-# 1) Serve the gate locally (needed for the HTTP service; `expose` does NOT
-#    start it — tailscaled forwards to it from afar)
+# 0) Serve the gate locally — leave this running in its own terminal. It
+#    binds 127.0.0.1 only; tailscale forwards to it. Settings you change
+#    from another terminal (expose, set) apply to it live.
 hermes passkey-gate serve
+
+# 1) Publish a HTTPS URL (in a second terminal, with serve running — expose
+#    proves the URL works with a real TLS /health probe), in this order:
+#    explicit config origin > tailscale serve --bg. With tailscale installed
+#    it picks a free HTTPS serve port on your tailnet (private to your
+#    devices — nothing is put on the public internet), derives origin + RP
+#    id from tailscale status --json (no shell string parsing; the serve map
+#    is re-read and the new entry located), and saves both back into plugin
+#    settings so challenges mint to the right origin from then on.
+hermes passkey-gate expose            # or: expose tailscale
 
 # 2) Register passkey -- mint the one-time registration link. OPERATOR
 #    ceremony: run it in a terminal you, the human, control (prints there
