@@ -9,12 +9,25 @@ button{flex:1;font-size:1.05em;padding:14px;border-radius:8px;border:0;cursor:po
 .approve{background:#4f8a3c;color:#fff}.deny{background:#5a2b2b;color:#fff}
 .ok{color:#9fd18b}.err{color:#f08080}
 
-/* ---- v0.4: cross-human collaboration blocks ---- */
+/* ---- v0.4: cross-human collaboration blocks (dark, to match the page) ---- */
 p.why { margin: 1.1em 0; padding: .7em .9em; border-left: 3px solid #7a9e7e;
-  background: #f0f5ef; border-radius: 0 6px 6px 0; }
-div.parent { margin: 1.2em 0; padding: .8em 1em; border: 1px solid #d0d0d0;
-  border-radius: 8px; background: #fafafa; font-size: .95em; }
+  background: #1b2619; border-radius: 0 6px 6px 0; }
+div.parent { margin: 1.2em 0; padding: .8em 1em; border: 1px solid #3d5a34;
+  border-radius: 8px; background: #172015; font-size: .95em; }
 div.parent b { display: block; margin-bottom: .3em; }
-span.owner { color: #556; }
-p.hint { color: #556; font-size: .9em; margin-top: .7em; }
+span.owner { color: #b8c7b0; }
+p.hint, details.hint { color: #9aab92; font-size: .9em; margin-top: .7em; }
 p.why b, div.parent b { font-weight: 600; }
+
+/* ---- registration: numbered steps and the confirmation code ---- */
+[hidden] { display: none !important; }
+ol.steps { padding-left: 1.3em; }
+ol.steps li { margin: .5em 0; }
+button:disabled { opacity: .55; cursor: wait; }
+p.code-label { margin: 1.4em 0 .3em; color: #b8c7b0; text-transform: uppercase;
+  letter-spacing: .08em; font-size: .85em; }
+p.code { margin: 0 0 1em; padding: 18px 10px; text-align: center; background: #1b2619;
+  border: 2px solid #9fd18b; border-radius: 10px; color: #fff;
+  font: 700 2.2em/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em;
+  word-break: break-all; user-select: all; }
+details.hint code { font-size: .85em; word-break: break-all; }

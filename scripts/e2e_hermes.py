@@ -103,13 +103,17 @@ try:
     s, o = post("/register/options", {"token": tok.group(1)})
     s, r = post("/register/finish", {"token": tok.group(1), "session_id": o["session_id"], "credential": human.create(o)})
     step("passkey registration", s == 200 and r.get("status") == "registered", r)
-    # the human's flow: the registration page shows a fingerprint; the
-    # operator finds the same fingerprint in `credentials` and pins it
+    # the human's flow: the registration page shows a short code; the
+    # operator types it and the matching key is pinned
+    step("registration returns the confirmation code the phone shows",
+         re.fullmatch(r"[0-9A-Z]{5}-[0-9A-Z]{5}", r.get("code") or ""), r)
     rc, out = hermes("credentials")
-    step("hermes passkey-gate credentials shows the page's fingerprint", r.get("fingerprint") in out, out[-300:])
-    rc, out = hermes("pin", "--credential", r["credential_id"][:12])
-    step("hermes passkey-gate pin --credential", rc == 0 and "REFUSED" not in out
-         and r["fingerprint"] in out, out[-200:])
+    step("hermes passkey-gate credentials lists that code", r.get("code") in out, out[-300:])
+    rc, out = hermes("pin", "--code", r["code"].lower())
+    step("hermes passkey-gate pin --code", rc == 0 and "REFUSED" not in out
+         and r["code"] in out, out[-200:])
+    rc, out = hermes("service", "status")
+    step("hermes passkey-gate service status sees the running gate", "answering" in out, out[-300:])
     for k, v in (("require_passkey", "true"), ("authority_patterns", "^terminal .*rm -rf")):
         rc, out = hermes("set", k, v)
         step(f"hermes passkey-gate set {k} (strengthening, no approval needed)", rc == 0 and "REFUSED" not in out, out[-200:])

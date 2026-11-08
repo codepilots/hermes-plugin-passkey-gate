@@ -142,6 +142,9 @@ def autumn(base):
     s, r = call(base, "/register/finish", {"token": tok, "session_id": opts["session_id"], "credential": a.create(opts)})
     assert s == 200, r
     a.pem = r["spki_pem"]
+    # the phone shows this code; the operator types it into setup / pin --code
+    assert r["code"] == gate_core.key_confirmation_code(a.pem)
+    assert any(c["code"] == r["code"] for c in gate_core.list_credentials())
     # token is single use
     s, _ = call(base, "/register/options", {"token": tok})
     assert s == 403

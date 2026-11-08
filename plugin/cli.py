@@ -1,5 +1,12 @@
 """CLI commands — everything under `hermes passkey-gate <cmd> [args]`.
 
+  setup              guided first run: start the gate (optionally in the
+                     background), publish its HTTPS address, register your
+                     phone's passkey, and pin it by typing the code the phone
+                     shows. Safe to re-run; finished steps are skipped
+  service <install|uninstall|start|stop|restart|status|logs>
+                     run the gate in the background as a per-user service
+                     (systemd --user on Linux, a LaunchAgent on macOS)
   serve              run the HTTP gate service (binds 127.0.0.1:<port>; TLS is
                      terminated by tailscale serve or your own reverse proxy)
   bootstrap          mint the one-time passkey registration link (QR + link
@@ -8,9 +15,11 @@
                      serve > honest instructions) and persist origin + rp_id
                      into plugin settings
   credentials        list registered passkeys with key fingerprints
+  pin --code <XXXXX-XXXXX>
+                     pin the registered passkey whose confirmation code your
+                     phone showed after registering
   pin --credential <id-prefix>
-                     pin the registered passkey whose fingerprint your
-                     registration page showed
+                     pin a registered passkey by credential id
   pin <pem> [owner]  pin an owner public key locally (out-of-band first sight);
                      name the owner to pin PEER keys for parent-approval chains
   show <challenge>   print a pending challenge's URL + QR — the human-lifts-
@@ -58,12 +67,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import gate_core, expose, local_verify, netfetch, tools
+from . import gate_core, expose, local_verify, netfetch, service, tools
 
 logger = logging.getLogger(__name__)
 
 USAGE = ("usage: hermes passkey-gate "
-         "<serve|bootstrap|expose|credentials|pin|show|set|get|status|mint-token|audit-verify|audit-notarize> [args]")
+         "<setup|service|serve|bootstrap|expose|credentials|pin|show|set|get|status|mint-token|"
+         "audit-verify|audit-notarize> [args]\n"
+         "new here? run: hermes passkey-gate setup")
 
 # keys exactly as declared in plugin.yaml config_schema (drift-tested)
 SETTINGS_SPEC = {
@@ -249,17 +260,57 @@ def cmd_mint_token(ctx, rest):
             "mint in-process via gate_challenge and do not need it.\n\n" + tok)
 
 
-def cmd_bootstrap(ctx, rest):
-    url = gate_core.mint_bootstrap_token()
+def qr_text(data: str) -> str:
+    """Terminal QR code for `data` ('' when qrcode is unavailable)."""
     try:
+        import io
         import qrcode
         q = qrcode.QRCode(border=1)
-        q.add_data(url)
-        q.print_ascii(invert=True)
+        q.add_data(data)
+        buf = io.StringIO()
+        q.print_ascii(out=buf, invert=True)
+        return buf.getvalue()
     except Exception:
-        pass
+        return ""
+
+
+def cmd_bootstrap(ctx, rest):
+    url = gate_core.mint_bootstrap_token()
+    print(qr_text(url), flush=True)
     return (f"One-time registration link ({gate_core.bootstrap_ttl() // 60} min, single use). "
-            f"Do not paste it anywhere — the QR above is enough for your phone:\n\n{url}")
+            f"Do not paste it anywhere — the QR above is enough for your phone.\n"
+            f"After you create the passkey, the phone shows a 10-character code; pin it with:\n"
+            f"  hermes passkey-gate pin --code <that code>\n\n{url}")
+
+
+def cmd_setup(ctx, rest):
+    from . import setup_wizard
+    return setup_wizard.cmd_setup(ctx, rest)
+
+
+SERVICE_USAGE = ("usage: hermes passkey-gate service "
+                 "<install|uninstall|start|stop|restart|status|logs>")
+
+
+def cmd_service(ctx, rest):
+    action = rest[0].strip().lower() if rest else "status"
+    try:
+        port = gate_core.validate_port(ctx.get_config("port", default=8655) if ctx is not None else 8655)
+    except ValueError as exc:
+        return f"REFUSED: {exc}"
+    if action == "install":
+        _, text = service.install(port)
+    elif action == "uninstall":
+        _, text = service.uninstall()
+    elif action in ("start", "stop", "restart"):
+        _, text = service.control(action)
+    elif action == "status":
+        _, text = service.status(port)
+    elif action == "logs":
+        _, text = service.logs()
+    else:
+        return SERVICE_USAGE
+    return text
 
 
 def cmd_expose(ctx, rest):
@@ -313,20 +364,48 @@ def cmd_credentials(ctx, rest):
     for c in creds:
         when = datetime.fromtimestamp(c["registered_at"], timezone.utc).isoformat(timespec="seconds")
         mark = "  [PINNED owner key]" if pinned_pem and pinned_pem.strip() == c["spki_pem"].strip() else ""
-        lines.append(f"{c['credential_id'][:12]}…  registered {when}  fingerprint {c['fingerprint']}{mark}")
-    lines += ["", "pin the one whose fingerprint matches what your registration page showed:",
-              "  hermes passkey-gate pin --credential <first characters of its id>"]
+        lines.append(f"code {c['code']}  registered {when}  id {c['credential_id'][:12]}…  "
+                     f"fingerprint {c['fingerprint']}{mark}")
+    lines += ["", "pin the one whose code your phone showed after registering:",
+              "  hermes passkey-gate pin --code <the code from your phone>"]
     if len(creds) > 1:
         lines += ["", f"NOTE: {len(creds)} passkeys are registered. If you only registered one, "
                   "the others are not yours — never pin a key you did not just see on your own phone."]
     return "\n".join(lines)
 
 
+def _pin_credential(c):
+    try:
+        path = local_verify.pin(gate_core.data_dir(), c["spki_pem"], None)
+    except (OSError, ValueError) as exc:
+        return f"REFUSED: pin ceremony failed: {exc}"
+    try:
+        gate_core.audit("owner_key_pinned", via="cli", credential_id=c["credential_id"],
+                        fingerprint=c["fingerprint"])
+    except Exception:
+        pass
+    return (f"pinned owner key, code {c['code']} (fingerprint {c['fingerprint']}, credential "
+            f"{c['credential_id'][:12]}…) to {path}. Check this code is the one your phone "
+            "showed. Approvals are now verified against it locally.")
+
+
 def cmd_pin(ctx, rest):
     if not rest:
-        return ("usage: hermes passkey-gate pin <pem-file> [owner-label]\n"
+        return ("usage: hermes passkey-gate pin --code <code your phone showed>\n"
                 "   or: hermes passkey-gate pin --credential <id-prefix>  "
-                "(see 'hermes passkey-gate credentials')")
+                "(see 'hermes passkey-gate credentials')\n"
+                "   or: hermes passkey-gate pin <pem-file> [owner-label]")
+    if rest[0] == "--code":
+        code = gate_core.normalize_confirmation_code(" ".join(rest[1:]))
+        if not code:
+            return ("usage: hermes passkey-gate pin --code <XXXXX-XXXXX> — the 10-character "
+                    "code your phone showed after creating the passkey")
+        matches = [c for c in gate_core.list_credentials() if c["code"] == code]
+        if len(matches) != 1:
+            return (f"REFUSED: {len(matches) or 'no'} registered passkey(s) have code {code}. "
+                    "Check the code on your phone (see 'hermes passkey-gate credentials'); "
+                    "if it isn't listed, that passkey did not register on this gate.")
+        return _pin_credential(matches[0])
     if rest[0] == "--credential":
         if len(rest) < 2 or len(rest[1]) < 6:
             return "usage: hermes passkey-gate pin --credential <at least 6 characters of the id>"
@@ -334,14 +413,7 @@ def cmd_pin(ctx, rest):
         if len(matches) != 1:
             return (f"REFUSED: {len(matches)} registered passkeys match {rest[1]!r} — give enough "
                     "of the id to pick exactly one (see 'hermes passkey-gate credentials')")
-        c = matches[0]
-        try:
-            path = local_verify.pin(gate_core.data_dir(), c["spki_pem"], None)
-        except (OSError, ValueError) as exc:
-            return f"REFUSED: pin ceremony failed: {exc}"
-        return (f"pinned owner key {c['fingerprint']} (credential {c['credential_id'][:12]}…) "
-                f"to {path}. Check this fingerprint is the one your phone's registration "
-                "page showed. Approvals are now verified against it locally.")
+        return _pin_credential(matches[0])
     try:
         pem = Path(rest[0]).read_text()
     except OSError as exc:
@@ -949,6 +1021,8 @@ def cmd_audit_notarize(ctx, rest):
 
 
 _COMMANDS = {
+    "setup": cmd_setup,
+    "service": cmd_service,
     "serve": cmd_serve,
     "bootstrap": cmd_bootstrap,
     "expose": cmd_expose,
@@ -971,6 +1045,6 @@ def dispatch(ctx, args_str: str):
     fn = _COMMANDS.get(cmd)
     if fn is None:
         return USAGE
-    if cmd in ("set", "get", "show-settings", "status") and ctx is None:
+    if cmd in ("set", "get", "show-settings", "status", "setup") and ctx is None:
         return "that command needs a hermes runtime context — run inside hermes"
     return fn(ctx, parts[1:])

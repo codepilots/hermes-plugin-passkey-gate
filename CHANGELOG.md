@@ -4,6 +4,46 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-11-08
+
+### Added
+
+- **`hermes passkey-gate setup`**: a guided first run. It starts the gate
+  (offering a background service), publishes the HTTPS address and checks
+  it answers, shows the registration QR, waits for the phone, then asks you
+  to type the code the phone shows, and pins only the passkey that matches.
+  Optionally it switches on enforcement. Re-running skips finished steps; a
+  port held by another program (an older approval-gate, another profile) is
+  detected and the wizard moves to a free one. [H18]
+- **`hermes passkey-gate service install|uninstall|start|stop|restart|status|logs`**:
+  run the gate in the background as a per-user systemd unit (Linux) or
+  LaunchAgent (macOS), with `HERMES_HOME` pinned to the installing profile.
+  It never runs `sudo`; it tells you when `loginctl enable-linger` is
+  needed to keep it up after logout. [H18]
+- **Confirmation codes**: every registered passkey has a 10-character code
+  (`XXXXX-XXXXX`, Crockford base32 of the key's SHA-256, so no I/L/O/U
+  look-alikes). `pin --code <code>` pins by it, and `credentials` lists it.
+  `pin --credential` and `pin <pem>` still work. [H18]
+- `/health` reports `service` and a non-revealing `instance` id so tools can
+  tell this gate from another program on the same port.
+
+### Changed
+
+- **The phone registration page is rewritten.** Before you tap, it says what
+  will happen in three numbered steps. Afterwards it shows only "Passkey
+  created" and the confirmation code in large type, with one instruction:
+  type this code into the computer. The fingerprint moves under "Technical
+  details". Cancel, timeout, expired link and already-registered errors are
+  explained in plain words, and the button works again after a cancel. [H18]
+- `bootstrap` and the bare usage text point to `pin --code` and `setup`.
+- README First run leads with `setup` and a background-service section; the
+  manual steps stay as reference.
+
+### Fixed
+
+- The "Why this ask" and "Already signed" boxes on the approval page had
+  light backgrounds under the page's light text, which made them unreadable.
+
 ## [0.6.4] - 2026-11-08
 
 ### Fixed

@@ -172,6 +172,13 @@ def data_dir() -> Path:
     return Path(os.environ.get("GATE_DATA") or (_plugin_data_dir or Path(__file__).resolve().parent / "data"))
 
 
+def instance_id() -> str:
+    """Short, non-revealing id of THIS gate's data dir, served on /health so
+    `setup` and `service status` can tell this gate from another program on
+    the same port (an older approval-gate, a different Hermes profile)."""
+    return hashlib.sha256(str(data_dir().resolve()).encode()).hexdigest()[:16]
+
+
 REG_TTL = 300
 MIN_ACTION_CHARS = 40
 MIN_ACTION_WORDS = 6
@@ -778,6 +785,36 @@ def key_fingerprint(spki_pem: str) -> str:
     return ":".join(h[i:i + 4] for i in range(0, 32, 4))
 
 
+# Crockford base32: no I, L, O or U, so a code read off a phone screen can't
+# be mistyped as a look-alike letter
+_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_CODE_LOOKALIKES = str.maketrans({"O": "0", "I": "1", "L": "1"})
+
+
+def key_confirmation_code(spki_pem: str) -> str:
+    """The short code the registration page shows in large type and the
+    operator TYPES into `setup` (or `pin --code`): 10 Crockford-base32
+    characters (50 bits) of SHA-256 over the key's DER SubjectPublicKeyInfo,
+    as XXXXX-XXXXX. Typing it moves the key's identity from the phone into
+    the terminal, which is what the pin is trusted on — the operator no
+    longer has to compare a long fingerprint by eye."""
+    der = serialization.load_pem_public_key(spki_pem.encode()).public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    n = int.from_bytes(hashlib.sha256(der).digest()[:7], "big") >> 6  # top 50 bits
+    chars = "".join(_CODE_ALPHABET[(n >> (5 * i)) & 31] for i in range(9, -1, -1))
+    return f"{chars[:5]}-{chars[5:]}"
+
+
+def normalize_confirmation_code(text: str) -> str:
+    """What the operator typed, in canonical XXXXX-XXXXX form (case, spaces
+    and dashes ignored; O/I/L read as 0/1), or '' if it can't be a code."""
+    raw = "".join(ch for ch in str(text or "").upper() if ch not in " -_\t")
+    raw = raw.translate(_CODE_LOOKALIKES)
+    if len(raw) != 10 or any(ch not in _CODE_ALPHABET for ch in raw):
+        return ""
+    return f"{raw[:5]}-{raw[5:]}"
+
+
 def list_credentials() -> list[dict]:
     """Registered credentials, oldest first: id, registration time, SPKI PEM,
     fingerprint. Read-only — pinning stays an explicit operator step."""
@@ -785,7 +822,8 @@ def list_credentials() -> list[dict]:
     for r in db().execute("select id, public_key, created_at from credentials order by created_at"):
         pem = pubkey_pem(r["public_key"])
         out.append({"credential_id": r["id"], "registered_at": r["created_at"],
-                    "spki_pem": pem, "fingerprint": key_fingerprint(pem)})
+                    "spki_pem": pem, "fingerprint": key_fingerprint(pem),
+                    "code": key_confirmation_code(pem)})
     return out
 
 
@@ -887,7 +925,7 @@ def registration_finish(token: str, session_id: str, credential: dict):
           public_key_sha256=hashlib.sha256(v.credential_public_key).hexdigest())
     pem = pubkey_pem(v.credential_public_key)
     return {"status": "registered", "credential_id": cid, "spki_pem": pem,
-            "fingerprint": key_fingerprint(pem)}
+            "fingerprint": key_fingerprint(pem), "code": key_confirmation_code(pem)}
 
 
 # ---------------------------------------------------------------- HTTP service (serve CLI)
@@ -958,11 +996,32 @@ You are the only one who can sign this &mdash; agents cannot, and no relay of
     return PAGE.format(title="Approval request", body=body)
 
 
-REGISTER_PAGE = PAGE.format(title="Register passkey", body="""
-<h1>Register approval passkey</h1>
-<p>This registers a passkey that agents can never use themselves. Use your own authenticator
-(phone / security key) &mdash; not a shared vault.</p>
-<div class="buttons"><button id="register" class="approve">Register passkey</button></div>
+REGISTER_PAGE = PAGE.format(title="Set up your approval passkey", body="""
+<section id="intro">
+<h1>Set up your approval passkey</h1>
+<p>Your agents will sometimes ask you to approve an important action. You approve
+it here, on this phone, with your face, fingerprint or screen lock. This page creates
+the passkey that does that. Agents can never use it themselves.</p>
+<ol class="steps">
+<li>Tap <b>Create passkey</b>.</li>
+<li>Your phone asks to save a passkey. Allow it. If it offers a choice, save it on
+<b>this phone</b>, not in a password manager you share with anyone.</li>
+<li>This page then shows a <b>10-character code</b>. Type that code into the computer
+where the setup is waiting. That is the only thing you need to copy.</li>
+</ol>
+<div class="buttons"><button id="register" class="approve">Create passkey</button></div>
+</section>
+<section id="done" hidden>
+<h1 class="ok">&#10003; Passkey created</h1>
+<p>Last step: go back to the computer and type this code where it asks for it.</p>
+<p class="code-label">Your confirmation code</p>
+<p class="code" id="code"></p>
+<p class="hint">The code proves to the computer that the passkey it is about to trust is
+the one on this phone. You can close this page once the computer says it is done.</p>
+<details class="hint"><summary>Technical details</summary>
+<p>Key fingerprint <code id="fp"></code><br>Credential <code id="credid"></code></p>
+</details>
+</section>
 <p id="msg"></p>""")
 
 
@@ -1058,7 +1117,8 @@ class Handler(BaseHTTPRequestHandler):
             # client is 127.0.0.1, so per-IP limits would mean nothing)
             return self._send(429, {"error": "too many requests — slow down and retry"})
         if p == "/health":
-            return self._send(200, {"status": "ok", "rp_id": rp_id(), "origin": origin(),
+            return self._send(200, {"status": "ok", "service": "passkey-gate",
+                                    "instance": instance_id(), "rp_id": rp_id(), "origin": origin(),
                                     "credentials": credential_count(),
                                     "challenge_ttl_s": challenge_ttl(), "audit_head": audit_head()})
         if p.startswith("/static/"):

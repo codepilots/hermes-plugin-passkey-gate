@@ -373,7 +373,8 @@ def _fake_creds(n=1):
         pem = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
         out.append({"credential_id": f"cred{i}abcdefghijkl", "registered_at": 1_700_000_000 + i,
-                    "spki_pem": pem, "fingerprint": gate_core.key_fingerprint(pem)})
+                    "spki_pem": pem, "fingerprint": gate_core.key_fingerprint(pem),
+                    "code": gate_core.key_confirmation_code(pem)})
     return out
 
 
@@ -383,7 +384,7 @@ def test_credentials_lists_fingerprints_and_pin_by_id(monkeypatch, tmp_path):
     monkeypatch.setattr(gate_core, "data_dir", lambda: tmp_path)
     monkeypatch.setattr(gate_core, "list_credentials", lambda: creds)
     out = _cli(FakeCtx(), "credentials")
-    assert creds[0]["fingerprint"] in out and "pin --credential" in out
+    assert creds[0]["fingerprint"] in out and creds[0]["code"] in out and "pin --code" in out
     out = _cli(FakeCtx(), "pin --credential cred0abc")
     assert "pinned owner key" in out and creds[0]["fingerprint"] in out, out
     assert local_verify.pinned(tmp_path).strip() == creds[0]["spki_pem"].strip()

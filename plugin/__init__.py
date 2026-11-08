@@ -89,7 +89,7 @@ def register(ctx):
         # tools and the enforcement hook down with it.
         ctx.register_cli_command(
             name="passkey-gate",
-            help="Passkey approval gate: serve, bootstrap, expose, pin, status, ...",
+            help="Passkey approval gate: setup (start here), service, serve, pin, status, ...",
             setup_fn=_setup_cli,
             handler_fn=lambda args: _run_cli(ctx, args),
             description=cli.__doc__ or "",

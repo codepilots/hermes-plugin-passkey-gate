@@ -100,10 +100,56 @@ plugins:
 ## First run
 
 ```bash
-# 0) Serve the gate locally — leave this running in its own terminal. It
-#    binds 127.0.0.1 only; tailscale forwards to it. Settings you change
-#    from another terminal (expose, set) apply to it live.
-hermes passkey-gate serve
+hermes passkey-gate setup
+```
+
+The wizard takes about three minutes and needs your phone. It checks each
+step before moving on, and re-running it skips what's already done:
+
+1. **Start the gate.** Offers to run it as a background service (so no
+   terminal has to stay open), or tells you to run `serve` and waits. If
+   another program already holds the port (say an older approval-gate), it
+   notices and moves to a free one.
+2. **Give it an HTTPS address.** Publishes it on your tailnet with
+   `tailscale serve` (private to your own devices), or checks the origin you
+   configured, and proves it answers before going on.
+3. **Create your passkey.** Prints a QR code. Scan it, tap **Create passkey**
+   and confirm with your face, fingerprint or screen lock.
+4. **Confirm it's yours.** The phone then shows one large 10-character code
+   (like `7KQ2M-X9D4R`). Type it into the terminal. Only the passkey with
+   that code is pinned as the owner key, so the key you trust is provably
+   the one on your phone. That code is the only thing you copy.
+5. **Optionally** switch on enforcement with a sensible default pattern.
+
+Run it in your own terminal, never through an agent: like `bootstrap` and
+`pin`, it is an operator ceremony.
+
+### Run it in the background
+
+```bash
+hermes passkey-gate service install     # start now and at every login
+hermes passkey-gate service status      # running? answering on 127.0.0.1?
+hermes passkey-gate service logs        # recent output
+hermes passkey-gate service restart     # also: start, stop, uninstall
+```
+
+This installs a per-user service: a systemd user unit on Linux
+(`~/.config/systemd/user/passkey-gate.service`) or a LaunchAgent on macOS.
+It runs `hermes passkey-gate serve` as you, with `HERMES_HOME` pinned to the
+profile you installed it from, and restarts it if it crashes. Nothing needs
+root. On Linux it runs while you're logged in; to keep it up after logout
+and across reboots, run `sudo loginctl enable-linger $USER` once (the
+installer tells you if that's needed, and never runs it for you). For a real
+trust boundary, run it under a separate account instead (see
+[Deployment requirements](#deployment-requirements-for-real-boundaries)).
+
+### Manual setup (what `setup` does, step by step)
+
+```bash
+# 0) Run the gate: in the background (see above), or in its own terminal
+#    with `serve`. It binds 127.0.0.1 only; tailscale forwards to it.
+#    Settings you change from another terminal (expose, set) apply live.
+hermes passkey-gate service install     # or: hermes passkey-gate serve
 
 # 1) Publish a HTTPS URL (in a second terminal, with serve running — expose
 #    proves the URL works with a real TLS /health probe), in this order:
@@ -121,11 +167,11 @@ hermes passkey-gate expose            # or: expose tailscale
 hermes passkey-gate bootstrap
 
 # 3) Pin your owner key: every signature is checked against this exact
-#    public key. The registration page showed a key fingerprint — find the
-#    SAME fingerprint here and pin that entry (never one you didn't just see
-#    on your own phone):
-hermes passkey-gate credentials
-hermes passkey-gate pin --credential <first characters of its id>
+#    public key. After registering, your phone shows a 10-character
+#    confirmation code (like 7KQ2M-X9D4R) — type it here and the passkey it
+#    belongs to is pinned (never pin a code you didn't just see on your own
+#    phone). `credentials` lists every registered passkey with its code.
+hermes passkey-gate pin --code <the code your phone shows>
 #    (or, with a PEM you got some other way: hermes passkey-gate pin <pem-file>)
 
 # 4) Audit the log: internal chain check, plus — if you keep a notary file —

@@ -45,6 +45,20 @@ async function register(token) {
   }});
 }
 
+// Plain-language reasons for the ways registration usually fails on a phone.
+function registrationError(e) {
+  const m = (e && e.message) || "";
+  if (e && e.name === "NotAllowedError")
+    return "The passkey wasn't created: it was cancelled or timed out. Tap Create passkey to try again.";
+  if (e && e.name === "InvalidStateError")
+    return "This phone already has a passkey for this gate. Nothing else to do here. If the computer is still waiting, run setup again there.";
+  if (e && e.name === "SecurityError")
+    return "Your browser refused to create a passkey for this address. Open the link from the QR code exactly as shown (it must start with https://).";
+  if (/token invalid|expired|used/.test(m))
+    return "This setup link has expired or was already used. On the computer, run 'hermes passkey-gate setup' again and scan the new QR code.";
+  return "Something went wrong (" + m + "). Tap Create passkey to try again, or run setup again on the computer.";
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const cidEl = document.getElementById("cid");
   const a = document.getElementById("approve"), d = document.getElementById("deny"), g = document.getElementById("register");
@@ -54,8 +68,22 @@ document.addEventListener("DOMContentLoaded", () => {
   if (g) {
     const token = location.hash.slice(1);
     history.replaceState(null, "", location.pathname);  // drop the token from the address bar
-    if (!token) { msg("This link has no registration token. Ask for a fresh one (gate.py bootstrap).", "err"); g.remove(); }
-    else g.onclick = () => register(token).then(j => { g.remove(); msg("Registered. Credential " + j.credential_id.slice(0, 12) + "… — key fingerprint " + j.fingerprint + ". On the computer, run 'hermes passkey-gate credentials' and pin the entry with this SAME fingerprint.", "ok"); })
-                                           .catch(e => msg("Registration failed: " + e.message, "err"));
+    if (!token) {
+      msg("This link is missing its setup code. On the computer, run 'hermes passkey-gate setup' again and scan the new QR code.", "err");
+      g.remove();
+    } else g.onclick = () => {
+      g.disabled = true;
+      register(token).then(j => {
+        document.getElementById("intro").hidden = true;
+        document.getElementById("code").textContent = j.code;
+        document.getElementById("fp").textContent = j.fingerprint;
+        document.getElementById("credid").textContent = j.credential_id.slice(0, 12) + "…";
+        document.getElementById("done").hidden = false;
+        msg("");
+      }).catch(e => {
+        g.disabled = false;
+        msg(registrationError(e), "err");
+      });
+    };
   }
 });
