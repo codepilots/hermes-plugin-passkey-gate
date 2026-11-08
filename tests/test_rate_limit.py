@@ -188,7 +188,8 @@ def test_concurrent_minters_cannot_overshoot_the_cap(gate_env):
 def _post(base, body):
     req = urllib.request.Request(base + "/challenge", method="POST",
                                  data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + gate_core.mint_api_token()})
     try:
         with urllib.request.urlopen(req) as r:
             return r.status, json.loads(r.read())

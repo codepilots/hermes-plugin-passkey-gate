@@ -105,9 +105,12 @@ def parent_gate():
 
 
 def call(base, path, body=None):
+    headers = {"Content-Type": "application/json"}
+    if path == "/challenge":
+        headers["Authorization"] = "Bearer " + gate_core.mint_api_token()
     req = urllib.request.Request(base + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Content-Type": "application/json"})
+                                 headers=headers)
     try:
         with urllib.request.urlopen(req) as r:
             raw = r.read()

@@ -15,6 +15,7 @@ Changes vs the original standalone service (kept minimal on purpose):
   - consumed challenges: an enforcement hook flips status approved -> consumed
     once the action fires, so a signature authorises one deliberate action.
 """
+import contextlib
 import hashlib
 import hmac
 import html
@@ -30,6 +31,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import local_verify, netfetch
+
+try:  # cross-process audit-log lock (POSIX)
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # cross-process audit-log lock (Windows)
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 from webauthn import (generate_authentication_options, generate_registration_options,
                       options_to_json, verify_authentication_response,
@@ -178,6 +188,35 @@ MAX_PENDING_CHALLENGES_TOTAL = 100
 _lock = threading.Lock()
 
 
+@contextlib.contextmanager
+def _audit_lock():
+    """Serialize audit-log access across THREADS and PROCESSES (fresh-review
+    F3): the agent process and the `serve` process both append, and a
+    process-local lock let them read the same tail and write duplicate seq
+    numbers or read a half-written line. An advisory lock on a sibling lock
+    file (fcntl on POSIX, msvcrt on Windows) covers every writer and the
+    readers that need a consistent tail."""
+    with _lock:
+        lock_path = data_dir() / "audit.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no cover - Windows only
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            yield
+        finally:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover - Windows only
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(fd)
+
+
 # ---------------------------------------------------------------- storage
 def db():
     d = data_dir()
@@ -226,7 +265,7 @@ def audit(event, **fields):
     self-consistent chain — the head must be anchored out of band
     (`hermes passkey-gate audit-notarize`) to make that detectable."""
     path = data_dir() / "audit.jsonl"
-    with _lock:
+    with _audit_lock():
         prev, seq = "0" * 64, 0
         if path.exists():
             lines = path.read_text().splitlines()
@@ -246,9 +285,10 @@ def audit(event, **fields):
 
 def audit_head():
     path = data_dir() / "audit.jsonl"
-    if not path.exists():
-        return None
-    lines = path.read_text().splitlines()
+    with _audit_lock():
+        if not path.exists():
+            return None
+        lines = path.read_text().splitlines()
     return json.loads(lines[-1])["hash"] if lines else None
 
 
@@ -261,7 +301,9 @@ def audit_checkpoints():
     path = data_dir() / "audit.jsonl"
     prev = "0" * 64
     heads = []
-    for i, line in enumerate(path.read_text().splitlines() if path.exists() else []):
+    with _audit_lock():
+        lines = path.read_text().splitlines() if path.exists() else []
+    for i, line in enumerate(lines):
         rec = json.loads(line)
         h = rec.pop("hash")
         if rec["seq"] != i or rec["prev"] != prev:
@@ -395,7 +437,11 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     binding_json = canonical_binding_json(tool_call) if tool_call else None
     binding = sha256_hex(binding_json) if binding_json else None
     cid = secrets.token_urlsafe(24)
-    chal = bytes.fromhex(sha) + secrets.token_bytes(32)  # nonce = text sha256 + entropy
+    # nonce = sha256(text) ‖ entropy — and for a bound challenge,
+    # sha256(text) ‖ binding_sha256 ‖ entropy, so the human's signature
+    # covers the exact tool call, not just a DB column next to it
+    chal = (bytes.fromhex(sha) + bytes.fromhex(binding) + secrets.token_bytes(16)
+            if binding else bytes.fromhex(sha) + secrets.token_bytes(32))
     now = time.time()
     parent_json = json.dumps(parent, sort_keys=True, separators=(",", ":")) if parent else None
     pv = (local_verify.verify_parent_approval(parent, data_dir(),
@@ -565,6 +611,25 @@ def pending_for_binding(binding_sha: str) -> sqlite3.Row | None:
         "and expires_at>=?", (binding_sha, time.time())).fetchone()
 
 
+def challenge_covers_binding(challenge: bytes, binding_sha: str) -> bool:
+    """Does this signed nonce commit to binding_sha (bytes 32..64)?"""
+    try:
+        return (isinstance(challenge, (bytes, bytearray, memoryview)) and len(challenge) == 80
+                and bytes(challenge)[32:64] == bytes.fromhex(binding_sha))
+    except (TypeError, ValueError):
+        return False
+
+
+def approved_for_binding(binding_sha: str) -> list:
+    """Every approved, unexpired challenge covering this binding (oldest
+    first) — the hook falls back through these when the first one does not
+    verify against the pinned owner key, so a rogue approval cannot shadow
+    a genuine one."""
+    return db().execute(
+        "select * from challenges where binding_sha256=? and status='approved' "
+        "and expires_at>=? order by created_at", (binding_sha, time.time())).fetchall()
+
+
 def approve_options(cid: str) -> str | None:
     row = db().execute("select * from challenges where id=?", (cid,)).fetchone()
     if row is None or row["status"] != "pending" or time.time() > row["expires_at"]:
@@ -697,6 +762,38 @@ def deny(cid: str):
 
 def credential_count() -> int:
     return db().execute("select count(*) from credentials").fetchone()[0]
+
+
+# ---------------------------------------------------------------- HTTP mint token
+MINT_TOKEN_NAME = "mint-token"
+
+
+def mint_api_token() -> str:
+    """The bearer token that HTTP `POST /challenge` requires — created once
+    (0600, O_EXCL) in the gate data dir. The operator hands it to remote
+    agents that must mint on this gate; local agents mint in-process."""
+    path = data_dir() / MINT_TOKEN_NAME
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_text().strip()
+    try:
+        tok = secrets.token_urlsafe(32)
+        os.write(fd, tok.encode())
+    finally:
+        os.close(fd)
+    audit("mint_token_created")
+    return tok
+
+
+def mint_token_ok(header) -> bool:
+    if not isinstance(header, str) or not header.startswith("Bearer "):
+        return False
+    path = data_dir() / MINT_TOKEN_NAME
+    if not path.exists():
+        return False
+    expected = path.read_text().strip()
+    return bool(expected) and hmac.compare_digest(header[7:].strip().encode(), expected.encode())
 
 
 # ---------------------------------------------------------------- registration (bootstrap)
@@ -844,6 +941,8 @@ REGISTER_PAGE = PAGE.format(title="Register passkey", body="""
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "passkey-gate/1"
+    # a client that stops sending must not pin a server thread forever
+    timeout = 30
 
     def log_message(self, fmt, *args):
         pass  # never log paths/queries (ids are bearer-like)
@@ -871,8 +970,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self):
         n = int(self.headers.get("Content-Length") or 0)
-        if n > 64 * 1024:
-            raise ValueError("body too large")
+        if n < 0 or n > 64 * 1024:
+            # negative lengths would make rfile.read() wait for EOF
+            raise ValueError("bad body length")
         return json.loads(self.rfile.read(n) or b"{}")
 
     # ---- GET
@@ -908,6 +1008,20 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST
     def do_POST(self):
         p = urlparse(self.path).path
+        # JSON only: a cross-site <form> can send text/plain or urlencoded
+        # bodies without a CORS preflight, never application/json — so this
+        # stops CSRF against /a/<id>/deny and the other POST endpoints.
+        if self.headers.get_content_type() != "application/json":
+            return self._send(415, {"error": "Content-Type must be application/json"})
+        if p == "/challenge" and not mint_token_ok(self.headers.get("Authorization")):
+            # Minting over HTTP needs the gate's mint token: the exposed
+            # origin is reachable by more than this host's agents, and an
+            # anonymous minter could post phishing pages on the trusted
+            # origin or fill the pending-challenge cap. Local agents mint
+            # in-process through gate_challenge and never need it.
+            return self._send(401, {"error": "minting over HTTP needs the gate mint token "
+                                    "(Authorization: Bearer <token>; see "
+                                    "'hermes passkey-gate mint-token')"})
         try:
             body = self._json()
         except Exception:

@@ -1,12 +1,12 @@
 """CLI commands — everything under `hermes passkey-gate <cmd> [args]`.
 
   serve              run the HTTP gate service (binds 127.0.0.1:<port>; TLS is
-                     terminated by tailscale serve / cloudflared / nginx)
+                     terminated by tailscale serve or your own reverse proxy)
   bootstrap          mint the one-time passkey registration link (QR + link
                      printed only to THIS terminal; never send it through chat)
-  expose [backend]   auto-set up public HTTPS exposure (tailscale > cloudflared
-                     > your configured origin > honest instructions) and persist
-                     origin + rp_id into plugin settings
+  expose [backend]   set up HTTPS exposure (your configured origin > tailscale
+                     serve > honest instructions) and persist origin + rp_id
+                     into plugin settings
   pin <pem> [owner]  pin an owner public key locally (out-of-band first sight);
                      name the owner to pin PEER keys for parent-approval chains
   show <challenge>   print a pending challenge's URL + QR — the human-lifts-
@@ -21,6 +21,9 @@
                      server-derived phrase; strengthening is free; both are
                      audited (finding 16).
   get                show all settings
+  mint-token         print the bearer token HTTP POST /challenge requires
+                     (for remote agents minting on this gate; local agents
+                     mint in-process and never need it)
   audit-verify [--notary <path>]
                      (1) check the internal hash chain, then (2) if a notary
                      file exists (--notary, or the audit_notary_path setting),
@@ -43,6 +46,8 @@
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,7 +57,7 @@ from . import gate_core, expose, local_verify, netfetch, tools
 logger = logging.getLogger(__name__)
 
 USAGE = ("usage: hermes passkey-gate "
-         "<serve|bootstrap|expose|pin|show|set|get|status|audit-verify|audit-notarize> [args]")
+         "<serve|bootstrap|expose|pin|show|set|get|status|mint-token|audit-verify|audit-notarize> [args]")
 
 # keys exactly as declared in plugin.yaml config_schema (drift-tested)
 SETTINGS_SPEC = {
@@ -107,7 +112,7 @@ def apply_config(ctx):
     if not isinstance(allow, list):  # fail closed on unexpected typing
         allow = []
     gate_core.configure(data_dir=str(plugin_data(ctx)),
-                        rp_id=rp_id_c or os_default_rp_id(),
+                        rp_id=rp_id_c or os_default_rp_id(origin),
                         origin=origin or None,
                         port=int(port),
                         challenge_ttl=int(ttl),
@@ -116,10 +121,15 @@ def apply_config(ctx):
             "patterns": ctx.get_config("authority_patterns", default=[]) or []}
 
 
-def os_default_rp_id():
-    """Best-effort default for hosts that never ran `expose`."""
+def os_default_rp_id(origin: str = ""):
+    """Best-effort RP ID when none is configured: the configured origin's own
+    hostname (always a valid RP ID for that origin), else this machine's
+    tailscale DNS name, else localhost."""
+    host = expose.rp_id_from_origin(origin)
+    if host:
+        return host
     try:
-        out = shutil.which("tailscale") and __import__("subprocess").run(
+        out = shutil.which("tailscale") and subprocess.run(
             ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5)
         if out and out.returncode == 0:
             host = (json.loads(out.stdout).get("Self") or {}).get("DNSName", "")
@@ -218,6 +228,15 @@ def cmd_serve(ctx, rest):
     return "serve returned"
 
 
+def cmd_mint_token(ctx, rest):
+    tok = gate_core.mint_api_token()
+    return ("Gate mint token — HTTP POST /challenge requires it as "
+            "'Authorization: Bearer <token>'. Give it only to remote agents that "
+            "must mint approval requests on THIS gate (a token lets its holder put "
+            "requests in front of the human, never approve them). Local agents "
+            "mint in-process via gate_challenge and do not need it.\n\n" + tok)
+
+
 def cmd_bootstrap(ctx, rest):
     url = gate_core.mint_bootstrap_token()
     try:
@@ -233,8 +252,8 @@ def cmd_bootstrap(ctx, rest):
 
 def cmd_expose(ctx, rest):
     backend = rest[0].strip().lower() if rest else "auto"
-    if backend not in ("auto", "tailscale", "cloudflare", "none"):
-        return "usage: hermes passkey-gate expose [auto|tailscale|cloudflare|none]"
+    if backend not in ("auto", "tailscale", "none"):
+        return "usage: hermes passkey-gate expose [auto|tailscale|none]"
     origin_cfg = (ctx.get_config("origin", default="") or "").strip() if ctx is not None else ""
     rp_cfg = (ctx.get_config("rp_id", default="") or "").strip() if ctx is not None else ""
     try:
@@ -245,8 +264,6 @@ def cmd_expose(ctx, rest):
         result = expose.auto_expose(gate_port, origin_cfg, rp_cfg)
     elif backend == "tailscale":
         result = expose.tailscale_expose(gate_port)
-    elif backend == "cloudflare":
-        result = expose.cloudflare_expose(gate_port)
     else:
         result = {"ok": False, "backend": "none",
                   "error": "none requested: set plugins.entries.passkey-gate.settings.origin to your HTTPS origin"}
@@ -259,11 +276,6 @@ def cmd_expose(ctx, rest):
         ctx.set_config("rp_id", rp_id)
         gate_core.configure(rp_id=rp_id, origin=url)
         lines.append("saved origin + rp_id to plugin settings (persists across sessions)")
-    if backend == "cloudflare":
-        lines.append("holding the quick-tunnel process open — Ctrl+C stops the public URL")
-        proc = result.get("process")
-        if proc is not None:
-            proc.wait()
     return "\n".join(x for x in lines if x)
 
 
@@ -866,6 +878,7 @@ _COMMANDS = {
     "status": cmd_status,
     "audit-verify": cmd_audit_verify,
     "audit-notarize": cmd_audit_notarize,
+    "mint-token": cmd_mint_token,
 }
 
 

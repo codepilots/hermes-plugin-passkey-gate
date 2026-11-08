@@ -112,9 +112,12 @@ def base():
 
 
 def call(base, path, body=None):
+    headers = {"Content-Type": "application/json"}
+    if path == "/challenge":
+        headers["Authorization"] = "Bearer " + gate_core.mint_api_token()
     req = urllib.request.Request(base + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Content-Type": "application/json"})
+                                 headers=headers)
     try:
         with urllib.request.urlopen(req) as r:
             raw = r.read()
@@ -203,6 +206,7 @@ def test_approve_and_verify_locally(base, autumn):
 def test_enforcement_blocking_and_consumption(base, autumn):
     """The hook story, executed against the real gate: block when unapproved,
     allow exactly once when an approved bound challenge exists, fail closed after."""
+    pin_once(gate_core.data_dir(), autumn.pem)
     patterns = [r"ssh git@100"]  # the subject is: tool_name + canonical args JSON
     # unapproved -> block
     v = tools.hook_verdict("terminal", {"command": "ssh git@100.64.0.10 -p 2222 grant-sorrel"},
@@ -487,6 +491,7 @@ def test_concurrent_hook_race_allows_exactly_one(base, autumn, monkeypatch):
     """Finding 3 (hook): two identical tool calls that both look up the same
     approved challenge before either claims it — only ONE may execute; the
     loser must be blocked, not silently allowed."""
+    pin_once(gate_core.data_dir(), autumn.pem)
     call = _bound_call("hook-race")
     c = new_challenge(base, tool_call=call)
     approve(base, autumn, c["challenge_id"])
@@ -576,6 +581,7 @@ def test_hook_fails_closed_on_error(base, autumn, monkeypatch):
     assert v is not None and v["action"] == "block"
     monkeypatch.setattr(gate_core, "pending_for_binding", real_pending)
     # approval in hand, but the claim itself explodes -> block, approval intact
+    pin_once(gate_core.data_dir(), autumn.pem)
     c = new_challenge(base, tool_call=call)
     approve(base, autumn, c["challenge_id"])
     monkeypatch.setattr(gate_core, "consume", boom)
@@ -1671,3 +1677,144 @@ def test_block_message_carries_the_pattern_only_as_delimited_data():
     cap = tools.PATTERN_DISPLAY_CAP
     assert ("rule authority_patterns[0]: `" + long_pat[:cap] + "…`") in v["message"]
     assert "a" * (cap + 10) not in v["message"]  # the untruncated tail never reaches the agent
+
+
+# ------------------------- hook re-verifies approvals against the pinned key
+def test_hook_refuses_approval_from_unpinned_credential(base, autumn):
+    """An approval signed by a credential other than the pinned owner key —
+    e.g. a software key an agent registered through a bootstrap token it
+    minted itself — must never let an enforced call through. The DB row
+    saying 'approved' is not proof; the hook re-verifies against the pin."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    rogue = SoftAuthenticator()
+    tok = mint_token()
+    s, opts = call(base, "/register/options", {"token": tok})
+    assert s == 200
+    s, r = call(base, "/register/finish", {"token": tok, "session_id": opts["session_id"],
+                                           "credential": rogue.create(opts)})
+    assert s == 200, r
+    bound = _bound_call("rogue-credential")
+    c = new_challenge(base, tool_call=bound, requester="rogue-probe")
+    s, r = approve(base, rogue, c["challenge_id"])
+    assert s == 200 and r.get("status") == "approved", r  # the gate accepted it...
+    v = tools.hook_verdict(bound["tool"], bound["args"], [r"ssh git@100"], require_passkey=True)
+    assert v is not None and v["action"] == "block"  # ...the hook does not
+    assert "pinned owner key" in v["message"]
+    row = gate_core.db().execute("select status from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["status"] == "approved"  # refused, not spent
+    # and the genuine owner's approval of the same call still works
+    c2 = new_challenge(base, tool_call=bound, requester="rogue-probe")
+    approve(base, autumn, c2["challenge_id"])
+    assert tools.hook_verdict(bound["tool"], bound["args"], [r"ssh git@100"],
+                              require_passkey=True) is None
+
+
+def test_hook_blocks_when_no_owner_key_pinned(monkeypatch, base, autumn):
+    """With no pin there is nothing to verify against: fail closed."""
+    bound = _bound_call("no-pin")
+    c = new_challenge(base, tool_call=bound, requester="nopin-probe")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(local_verify, "pinned", lambda *a, **k: None)
+    v = tools.hook_verdict(bound["tool"], bound["args"], [r"ssh git@100"], require_passkey=True)
+    assert v is not None and v["action"] == "block" and "no owner key is pinned" in v["message"]
+
+
+# ------------------------------------------------ HTTP surface hardening
+def _raw_post(base, path, body: bytes, headers: dict):
+    req = urllib.request.Request(base + path, method="POST", data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def test_http_challenge_requires_mint_token(base):
+    """The exposed origin is reachable by more than this host's agents:
+    anonymous HTTP minting is refused; the operator's mint token works."""
+    body = json.dumps({"action_text": ACTION, "requester": "stranger"}).encode()
+    s, r = _raw_post(base, "/challenge", body, {"Content-Type": "application/json"})
+    assert s == 401 and "mint token" in r["error"]
+    s, r = _raw_post(base, "/challenge", body, {"Content-Type": "application/json",
+                                                 "Authorization": "Bearer wrong-token"})
+    assert s == 401
+    s, r = _raw_post(base, "/challenge", body, {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + gate_core.mint_api_token()})
+    assert s == 201 and r["challenge_id"]
+
+
+def test_mint_token_is_stable_and_private(base):
+    t1, t2 = gate_core.mint_api_token(), gate_core.mint_api_token()
+    assert t1 == t2 and len(t1) >= 40
+    mode = (gate_core.data_dir() / gate_core.MINT_TOKEN_NAME).stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_cross_site_form_post_to_deny_is_refused(base):
+    """A cross-site <form> can only send simple content types; the gate
+    accepts JSON only, so a text/plain deny never reaches the handler."""
+    c = new_challenge(base, tool_call=_bound_call("csrf-deny"), requester="csrf-probe")
+    s, r = _raw_post(base, f"/a/{c['challenge_id']}/deny", b"{}", {"Content-Type": "text/plain"})
+    assert s == 415
+    row = gate_core.db().execute("select status from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert row["status"] == "pending"
+
+
+def test_negative_content_length_does_not_hang(base):
+    """rfile.read(-1) would wait for EOF and pin a server thread."""
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(base)
+    with socket.create_connection((u.hostname, u.port), timeout=5) as sock:
+        sock.sendall(b"POST /a/x/deny HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: -1\r\n\r\n")
+        sock.settimeout(5)
+        reply = sock.recv(200)
+    assert reply.startswith(b"HTTP/1.0 400") or reply.startswith(b"HTTP/1.1 400"), reply
+
+
+def test_signature_covers_tool_call_binding(base, autumn):
+    """H5: the binding is part of the signed nonce. Rewriting an approved
+    row's tool_call + binding_sha256 in the DB (a consistent tamper the
+    stored-call re-hash cannot see) must not yield an executable approval."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    signed_call = _bound_call("signed-binding")
+    c = new_challenge(base, tool_call=signed_call, requester="h5-probe")
+    row = gate_core.db().execute("select challenge from challenges where id=?",
+                                 (c["challenge_id"],)).fetchone()
+    assert gate_core.challenge_covers_binding(row["challenge"], c["binding_sha256"])
+    approve(base, autumn, c["challenge_id"])
+    evil = {"tool": "terminal", "args": {"command": "ssh git@100.64.0.10 -p 2222 drop-everything"}}
+    evil_json = gate_core.canonical_binding_json(evil)
+    gate_core.db().execute("update challenges set tool_call=?, binding_sha256=? where id=?",
+                           (evil_json, gate_core.sha256_hex(evil_json), c["challenge_id"]))
+    v = tools.hook_verdict(evil["tool"], evil["args"], [r"ssh git@100"], require_passkey=True)
+    assert v is not None and v["action"] == "block"
+    assert "does not cover this tool-call binding" in v["message"]
+
+
+def test_gate_verify_tolerates_surrounding_whitespace(monkeypatch, base, autumn):
+    """The gate signs the stripped text; a trailing newline in the caller's
+    copy must still verify (it used to fail 'action_sha256 does not match')."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, requester="ws-probe")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
+                                        "action_text": "  " + ACTION + "\n"}))
+    assert out["verified"] is True, out
+
+
+def test_handlers_never_raise_on_bad_types():
+    """Hermes handler contract: same JSON shape on error, never an exception."""
+    out = json.loads(tools.gate_verify({"challenge_id": "x", "action_text": ACTION,
+                                        "wait_seconds": "abc"}))
+    assert out["ok"] is False and "wait_seconds" in out["error"]
+    out = json.loads(tools.gate_verify({"challenge_id": 5, "action_text": ACTION}))
+    assert out["ok"] is False
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "a",
+                                           "requester_owner": 7}))
+    assert out["ok"] is False and "requester_owner" in out["error"]

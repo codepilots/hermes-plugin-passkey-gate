@@ -54,15 +54,34 @@ are hardening. Full report frozen at
 |---|---|---|---|---|
 | F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | ✅ | commit `6373ff4`; 159 passed; reviewer probe re-run + parent 4-process/phrase/expiry probe green |
 | F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | ✅ | code `9c22772`, pin `baf1f30`; fresh-clone at the pin: 161 passed; catalog honest |
-| F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ⬜ | organic 2-process repro, chain broken |
+| F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ✅ | v0.6.0: flock/msvcrt cross-process lock on appends + chain reads; `test_two_processes_appending_keep_chain_intact` fails pre-fix (chain broken at line 2), passes after |
 | F4 | DNS-rebinding TOCTOU: SSRF check resolves once, fetch dials again | LOW | ⬜ | stateful getaddrinfo fake, loopback dial demonstrated |
-| F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ⬜ | 30 wedged threads leaked |
-| F6 | `os_default_rp_id` dead code — `import shutil` missing | LOW | ⬜ | stub probe returns localhost |
-| F7 | `gate_verify` raises on `wait_seconds='abc'` (never-raise contract) | INFO | ⬜ | direct call raises ValueError |
+| F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ✅ partial | v0.6.0: negative length → 400, 30 s handler socket timeout; `test_negative_content_length_does_not_hang`. GET rate limits remain open |
+| F6 | `os_default_rp_id` dead code — `import shutil` missing | LOW | ✅ | v0.6.0; import added + RP ID now defaults to the configured origin's host; `test_cli_default_rp_id_prefers_configured_origin_host` |
+| F7 | `gate_verify` raises on `wait_seconds='abc'` (never-raise contract) | INFO | ✅ | v0.6.0: typed refusals in gate_verify/gate_challenge; `test_handlers_never_raise_on_bad_types` |
 | C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | ✅ | accurate "single-use when applied" wording, `9c22772` |
 | C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | ✅ | scoped honestly to parent-gate fetches, `9c22772` |
 | C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | ✅ | parse_gate_origin at both sites, `9c22772`; parent probe 7 hostile origins/0 fetches |
 | C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | ✅ | bumped to v0.5.0, `9c22772` |
+
+## Hackathon-readiness review (8 Nov 2026) — new items
+
+Independent code review + install test against Hermes v0.23.0's plugin
+scanner. Fixed items shipped in v0.6.0.
+
+| Item | Finding | Severity | Status | Evidence |
+|---|---|---|---|---|
+| H1 | enforcement hook trusted DB `approved` status without checking the pinned owner key — an agent that registered its own software credential could self-approve enforced calls; a rogue approval could also shadow a genuine one for the same binding | HIGH | ✅ v0.6.0 | hook re-verifies via `local_verify.check` against the pin, falls through to any other approved row that verifies; reviewer PoC now blocked; `test_hook_refuses_approval_from_unpinned_credential`, `test_hook_blocks_when_no_owner_key_pinned`; 169 passed at v0.6.0 |
+| H2 | Hermes install scanner verdict `caution` (12 HIGH): cloudflared backend + absolute `rm -rf` doc examples — non-interactive install refused | HIGH (release) | ✅ v0.6.0 | cloudflare quick-tunnel backend removed (tailscale serve + configured origin remain); doc examples relativized; CI pip self-upgrade dropped; scanner verdict `safe` (0 HIGH, 82 medium/low informational) |
+| H3 | README install command installs the repo root (no plugin.yaml) | HIGH (release) | ✅ v0.6.0 | now `owner/repo#plugin`; isolated install lands as `passkey-gate` |
+| H4 | 46 commits (all of v0.5.0) unpushed; catalog pin `9c22772` absent from GitHub; CI never ran; GitHub repo description still says "agent-uncircumventable" | HIGH (release) | ⬜ | needs commit + push + tag, then re-pin catalog sha; edit repo description |
+| H5 | tool-call binding not covered by the signature (nonce = sha256(action_text) + entropy; binding lives only in DB) | MEDIUM | ✅ v0.6.0 | nonce = sha256(text) ‖ binding ‖ 16B entropy; hook + gate_verify check it; `test_signature_covers_tool_call_binding` fails pre-fix |
+| H6 | unauthenticated `POST /challenge` on exposed origin — arbitrary requester names, can fill global pending cap | MEDIUM | ✅ v0.6.0 | `POST /challenge` needs `Bearer <mint token>` (`mint-token` CLI); `test_http_challenge_requires_mint_token` |
+| H7 | `gate_verify` hashes raw action_text but lookup uses stripped text — trailing whitespace never verifies | LOW | ✅ v0.6.0 | verify the stripped text the gate signed; `test_gate_verify_tolerates_surrounding_whitespace` |
+| H8 | real tailnet hostname in tests/test_expose.py fixtures (`REAL_HOST`) | LOW (privacy) | ✅ v0.6.0 (working tree) | fixtures use `gate-host.example-tailnet.ts.net`; the old name remains in already-public git history (not rewritten) |
+| H9 | no end-to-end run inside a real Hermes since v0.5.0 (tests use a mocked ctx); no demo media in README | release | ⬜ | isolated `--no-deps` install verified; real-Hermes smoke run in progress; phone-passkey run + recording needs the human |
+| H10 | CSRF: `/a/<id>/deny` accepted cross-site `text/plain` posts | LOW | ✅ v0.6.0 | POSTs require application/json (415); `test_cross_site_form_post_to_deny_is_refused` |
+| H11 | `challenge_ttl` (up to 24 h), `origin`, `rp_id` changeable without passkey approval | LOW | ⬜ | reviewer code reading |
 
 ## Log
 

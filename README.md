@@ -59,17 +59,19 @@ out. "Pinned" means only as much as the boundary protecting the pins — see
 agent wants a high-authority action
   └─ gate_challenge(action_text, tool_call?)     → approval URL + challenge id
 human opens URL (over TLS, e.g. tailscale serve) → passes passkey with UV
-  └─ WebAuthn nonce == sha256(action_text) + ent: signed to that EXACT text
+  └─ WebAuthn nonce == sha256(action_text) [+ binding_sha256] + entropy:
+     the signature covers that EXACT text and, when bound, that EXACT call
 agent act-check:
   └─ gate_verify(challenge_id, action_text)      → LOCAL crypto verification
-        sha256(action_text) == signed challenge
+        sha256(action_text) [+ binding] == signed challenge
         signature over authenticatorData‖sha256(clientDataJSON) vs PINNED pubkey
         user-presence + user-verification flags, origin/rp_id match
   └─ verified: true (problems: [])  →  record is sound + matches request
 optional enforcement hook (require_passkey):
   └─ pre_tool_call blocks calls matching authority patterns unless a challenge
-     bound to that exact canonical tool call is approved — and CONSUMES it,
-     so each approval authorises exactly one deliberate execution.
+     bound to that exact canonical tool call is approved AND re-verifies
+     against the pinned owner key — then CONSUMES it, so each approval
+     authorises exactly one deliberate execution.
 ```
 
 Design provenance: the core is a port of a field-proven prototype
@@ -80,7 +82,7 @@ independently, tamper and replay attempts denied, audit chain intact.
 ## Install
 
 ```bash
-hermes plugins install codepilots/hermes-plugin-passkey-gate
+hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin
 ```
 
 Then set the two settings that locate your gate (Desktop → Settings → Plugins,
@@ -98,14 +100,14 @@ plugins:
 ## First run
 
 ```bash
-# 0) Publish a HTTPS URL — auto-detects what you have, in this order:
-#    explicit config origin > tailscale serve --bg > cloudflared quick tunnel.
-#    Detects tailscale/cloudflared themselves, picks a free HTTPS serve port,
-#    derives origin + RP id from tailscale status --json (no shell string
+# 0) Publish a HTTPS URL, in this order: explicit config origin >
+#    tailscale serve --bg. With tailscale installed it picks a free HTTPS
+#    serve port on your tailnet (private to your devices — nothing is put
+#    on the public internet), derives origin + RP id from tailscale status --json (no shell string
 #    parsing; the serve map is re-read and the new entry located), and saves
 #    both back into plugin settings so challenges mint to the right origin
 #    from the next session on.
-hermes passkey-gate expose            # or: expose tailscale / expose cloudflare
+hermes passkey-gate expose            # or: expose tailscale
 
 # 1) Serve the gate locally (needed for the HTTP service; `expose` does NOT
 #    start it — tailscaled forwards to it from afar)
@@ -143,9 +145,13 @@ hermes passkey-gate audit-notarize --to /root/gate-notary.log
 
 | backend | persistence | what happens |
 |---|---|---|
-| tailscale (default pick) | survives restarts | `tailscale serve --bg --https=<port> http://127.0.0.1:<gate>`; URL is your machine's `https://<host>.ts.net[:port]`; every candidate port is VERIFIED with a real TLS `/health` probe before it's accepted (a rule being accepted isn't proof it serves — nginx on 0.0.0.0:443 can shadow it), rejected ports are un-ruled automatically |
-| cloudflare | only while running | `cloudflared tunnel --url` quick tunnel; **URL is ephemeral** — the process must stay alive and re-registering a passkey is needed after URL changes. For stability use a named tunnel (`cloudflared tunnel login` + your own domain) and set `origin` to it |
-| configured origin | yours | set `plugins.entries.passkey-gate.settings.origin` + `rp_id` directly and `expose` just validates |
+| tailscale (default pick) | survives restarts | `tailscale serve --bg --https=<port> http://127.0.0.1:<gate>`; URL is your machine's `https://<host>.ts.net[:port]`; every candidate port is VERIFIED with a real TLS `/health` probe before it's accepted (a rule being accepted isn't proof it serves — an nginx listening on every interface at :443 can shadow it), rejected ports are un-ruled automatically |
+| configured origin | yours | set `plugins.entries.passkey-gate.settings.origin` (and optionally `rp_id`, which otherwise defaults to the origin's host) to an HTTPS origin you already terminate TLS for — e.g. an nginx/caddy reverse proxy to `127.0.0.1:<gate>` — and `expose` just validates |
+
+Why tailscale and no public tunnel: the approval page only has to reach
+*your* phone, and a tailnet does that over TLS without publishing the gate
+to the internet. If the human's phone is on your tailnet, the approval link
+just works from anywhere.
 
 WebAuthn RP-ID detail: default RP is the full origin hostname — always valid.
 If you already registered a passkey credential under a broader suffix (e.g.
@@ -181,6 +187,11 @@ document, not a favour:
   `hermes passkey-gate pin peer-key.pem <owner>`.
 - Your message to them should be one line: who's asking, what it does, the
   link. The page carries the rest.
+- Minting on *another* machine's gate over HTTP (`POST /challenge`) needs
+  that gate's mint token (`Authorization: Bearer <token>`); its operator
+  prints it with `hermes passkey-gate mint-token`. A token lets its holder
+  put a request in front of the human — never approve one. Agents on the
+  gate's own host mint in-process through `gate_challenge` and need nothing.
 
 **For the human signing** — what you see on the page, in one place:
 

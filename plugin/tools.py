@@ -25,6 +25,36 @@ def _base_url() -> str:
     return _origin().rstrip("/")
 
 
+def _pinned_owner_problems(row) -> str | None:
+    """None when the approved challenge row verifies locally against the
+    pinned owner key; otherwise a short reason. Never raises."""
+    try:
+        pinned = local_verify.pinned(gate_core.data_dir())
+        if pinned is None:
+            return ("no owner key is pinned — pin it out of band with "
+                    "'hermes passkey-gate pin <pem-file>'")
+        rec = gate_core.challenge_status(row["id"], row["action_sha256"])
+        problems = local_verify.check(dict(rec), row["action_text"], gate_core.origin(),
+                                      gate_core.rp_id(), pinned)
+        # check() proved the signature covers row["challenge"]; the nonce
+        # must in turn commit to the binding being executed
+        if row["binding_sha256"] and not gate_core.challenge_covers_binding(
+                row["challenge"], row["binding_sha256"]):
+            problems.append("the signed challenge does not cover this tool-call binding")
+        return "; ".join(problems) if problems else None
+    except Exception as exc:
+        return f"local verification failed ({type(exc).__name__})"
+
+
+def _stored_call_matches(row, tool_name, args, binding) -> bool:
+    """The row's stored canonical call re-hashes to binding and equals this call."""
+    try:
+        stored = gate_core.canonical_binding_json(json.loads(row["tool_call"]))
+    except (TypeError, ValueError, KeyError):
+        return False
+    return stored == canonical_for_hook(tool_name, args) and gate_core.sha256_hex(stored) == binding
+
+
 def gate_challenge(args: dict, **kwargs) -> str:
     text = args.get("action_text")
     requester = args.get("requester") or "unknown"
@@ -32,6 +62,10 @@ def gate_challenge(args: dict, **kwargs) -> str:
     owner = args.get("requester_owner")
     why = args.get("why")
     parent = args.get("parent_approval")
+    bad = [k for k, v in (("requester", requester), ("requester_owner", owner), ("why", why))
+           if v is not None and not isinstance(v, str)]
+    if bad:
+        return json.dumps({"ok": False, "error": f"{', '.join(bad)} must be a string"})
     cross_human = bool(owner) and owner.strip().lower() != requester.strip().lower()
     parent = parent if isinstance(parent, dict) else None
     if parent and not str(parent.get("owner") or "").strip():
@@ -113,7 +147,15 @@ def gate_challenge(args: dict, **kwargs) -> str:
 def gate_verify(args: dict, **kwargs) -> str:
     cid = args.get("challenge_id") or ""
     text = args.get("action_text") or ""
-    wait_s = min(max(int(args.get("wait_seconds") or 0), 0), 120)
+    if not isinstance(cid, str) or not isinstance(text, str):
+        return json.dumps({"ok": False, "error": "challenge_id and action_text must be strings"})
+    # the gate signs the STRIPPED text (create_challenge strips it), so verify
+    # the same bytes — a trailing newline must not fail a genuine approval
+    text = text.strip()
+    try:
+        wait_s = min(max(int(args.get("wait_seconds") or 0), 0), 120)
+    except (TypeError, ValueError):
+        return json.dumps({"ok": False, "error": "wait_seconds must be an integer (0-120)"})
     max_age = args.get("max_age")
 
     if not cid or not text:
@@ -168,6 +210,10 @@ def gate_verify(args: dict, **kwargs) -> str:
             except (TypeError, ValueError):
                 problems.append("approved tool call record is malformed")
         approved_binding = local_row["binding_sha256"] if local_row is not None else None
+        if approved_binding:
+            signed = local_verify._b64u_or_none(rec.get("challenge_b64url"))
+            if not gate_core.challenge_covers_binding(signed, approved_binding):
+                problems.append("the signed challenge does not cover the bound tool call")
         requested_tool_call = args.get("tool_call")
         if requested_tool_call is not None:
             if not isinstance(requested_tool_call, dict):
@@ -379,6 +425,27 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
                 "Passkey gate: the approved bound tool call is malformed; refusing "
                 "dispatch. Request a fresh approval."
             )}
+        # The DB saying 'approved' is not proof: any credential registered on
+        # this gate could have produced it. Re-verify the stored assertion
+        # locally against the PINNED owner key — the same check gate_verify
+        # and `set --approve` run — so an approval signed by an unpinned
+        # (e.g. agent-registered software) credential never executes. A
+        # failing row must not shadow a genuine one for the same call either:
+        # fall through to any other approved row that does verify.
+        pin_problem = _pinned_owner_problems(row)
+        if pin_problem:
+            for alt in gate_core.approved_for_binding(binding):
+                if (alt["id"] != row["id"] and alt["binding_sha256"] == binding
+                        and _stored_call_matches(alt, tool_name, args, binding)
+                        and _pinned_owner_problems(alt) is None):
+                    row, pin_problem = alt, None
+                    break
+        if pin_problem:
+            return {"action": "block", "message": (
+                "Passkey gate: this tool call has an approval on record, but it did "
+                f"not verify against the pinned owner key ({pin_problem}); refusing "
+                "dispatch. Only an approval signed by the human's pinned passkey can "
+                "authorise this call — tell the human; do not retry.")}
         if not gate_core.consume(row["id"], binding):
             # Lost the claim race to an identical tool call, or the approval
             # aged past expires_at between lookup and claim. Either way this

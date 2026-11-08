@@ -100,7 +100,7 @@ def test_notarize_without_to_prints_head_and_instructions(data, tmp_path):
     # teaches real places to keep it that the agent cannot write
     assert "password manager" in out.lower() or "another host" in out.lower()
     # nothing was written anywhere — the ceremony is print-only in this mode
-    assert sorted(p.name for p in data.iterdir()) == ["audit.jsonl"]
+    assert sorted(p.name for p in data.iterdir() if p.name != "audit.lock") == ["audit.jsonl"]
 
 
 def test_notarize_refuses_notary_inside_gate_data_dir(data, audit_log):
@@ -238,3 +238,43 @@ def test_audit_notary_path_is_not_a_security_key():
     in SECURITY_KEYS (finding 16 protects gate-enforcement settings only)."""
     assert "audit_notary_path" in cli.SETTINGS_SPEC
     assert "audit_notary_path" not in cli.SECURITY_KEYS
+
+
+# ------------------- fresh-review F3: multi-process appends keep the chain intact
+_WRITER = r'''
+import os, sys
+os.environ["GATE_DATA"] = sys.argv[1]
+sys.path.insert(0, sys.argv[2])
+import conftest  # loads the plugin as passkey_gate
+from passkey_gate import gate_core
+for i in range(int(sys.argv[3])):
+    gate_core.audit("concurrent", writer=os.getpid(), i=i)
+'''
+
+
+@pytest.mark.skipif(getattr(gate_core, "fcntl", True) is None, reason="POSIX flock path")
+def test_two_processes_appending_keep_chain_intact(tmp_path):
+    """The agent process and the `serve` process both append to the log. A
+    thread-only lock let them write duplicate seq numbers (chain broken) and
+    read torn lines; the cross-process lock must keep every line chained."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    d = tmp_path / "gate-data"
+    d.mkdir()
+    script = tmp_path / "writer.py"
+    script.write_text(_WRITER)
+    tests_dir = str(Path(__file__).resolve().parent)
+    n = 150
+    procs = [subprocess.Popen([sys.executable, str(script), str(d), tests_dir, str(n)])
+             for _ in range(2)]
+    assert all(p.wait(timeout=120) == 0 for p in procs)
+    lines = (d / "audit.jsonl").read_text().splitlines()
+    assert len(lines) == 2 * n
+    prev = "0" * 64
+    for i, line in enumerate(lines):
+        rec = json.loads(line)
+        h = rec.pop("hash")
+        assert rec["seq"] == i and rec["prev"] == prev, f"chain broken at line {i}"
+        assert hashlib.sha256(json.dumps(rec, sort_keys=True, separators=(",", ":")).encode()).hexdigest() == h
+        prev = h

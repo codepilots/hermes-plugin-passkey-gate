@@ -4,6 +4,61 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-08
+
+Hackathon-readiness release: closes the HIGH found by an independent code
+review, clears every HIGH finding from Hermes's install-time plugin scanner
+(verdict `safe`), and works through the open fresh-review backlog. Ledger:
+[docs/security-review/remediation.md](docs/security-review/remediation.md)
+(items H1–H9, F3–F7).
+
+### Removed
+
+- **Breaking:** the cloudflared quick-tunnel exposure backend (`expose
+  cloudflare`). `expose` now uses `tailscale serve` (tailnet-private HTTPS)
+  or validates an HTTPS origin you configure yourself. This also clears the
+  scanner's tunnel-service findings, so the plugin installs with a `safe`
+  verdict instead of needing confirmation.
+
+### Security
+
+- The `pre_tool_call` enforcement hook re-verifies every approval locally
+  against the **pinned owner key** before consuming it, as `gate_verify`
+  and `set --approve` already did. Previously an approval signed by any
+  registered credential (e.g. one an agent registered itself) satisfied
+  the hook. A rogue approval can no longer shadow a genuine approval of the
+  same call. [H1]
+- **The signature now covers the tool call.** A bound challenge's nonce is
+  `sha256(action_text) ‖ binding_sha256 ‖ entropy`; the hook and
+  `gate_verify` refuse an approval whose signed nonce does not commit to the
+  binding being executed, so rewriting a row's stored call cannot redirect a
+  signature. Text-only challenges are unchanged. Bound challenges minted by
+  0.5.0 and still pending at upgrade are refused (fail closed; they expire
+  within the TTL). [H5]
+- **Breaking — HTTP minting needs a token:** `POST /challenge` requires
+  `Authorization: Bearer <mint token>` (`hermes passkey-gate mint-token`).
+  Anyone who could reach the exposed origin could previously post requests
+  under any name or fill the pending cap. In-process `gate_challenge` is
+  unaffected. [H6]
+- POST endpoints accept `application/json` only (415 otherwise), closing
+  cross-site form posts to `/a/<id>/deny`. [reviewer, low]
+- Negative `Content-Length` is rejected and handler sockets time out after
+  30 s, so one connection cannot pin a server thread. [F5]
+- Audit-log appends and chain reads take a cross-process lock (flock on
+  POSIX, msvcrt on Windows); the agent and `serve` processes appending
+  together no longer break the chain. [F3]
+
+### Fixed
+
+- The default RP ID is the configured origin's hostname when `rp_id` is
+  unset (a missing import made it silently fall back to `localhost`). [F6]
+- `gate_verify` verifies the stripped action text the gate actually signed,
+  so surrounding whitespace no longer fails a genuine approval. [H7]
+- `gate_verify` / `gate_challenge` return the error JSON instead of raising
+  on non-integer `wait_seconds` or non-string fields. [F7]
+- README install command points at the `plugin/` subdirectory
+  (`owner/repo#plugin`); test fixtures use a fictional tailnet hostname.
+
 ## [0.5.0] - 2026-11-07
 
 Security release. This version closes out the campaign against the

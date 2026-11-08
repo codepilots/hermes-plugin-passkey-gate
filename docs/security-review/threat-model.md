@@ -1,6 +1,6 @@
 # Passkey-gate threat model and residual architectural limitations
 
-**Applies to:** passkey-gate v0.5.0, security review dated 5 November 2026
+**Applies to:** passkey-gate v0.6.0, security review dated 5 November 2026
 (`bec3b78d` review context; remediation campaign D9). This document preserves
 and qualifies findings **2 (CRITICAL), 15 (HIGH), and 20 (MEDIUM)**. It is a
 residual-risk statement, not a claim that those findings are eliminated.
@@ -76,6 +76,14 @@ and keep the gate and registration data outside the agent's control. For a
 stronger deployment, use an operator-controlled bootstrap code/approval and
 require an existing credential for additions or replacement; implement that as
 an independently authenticated ceremony or broker, not as an in-process claim.
+
+**v0.6.0 mitigation (hackathon-readiness review H1).** Registration is still
+not bound to an existing credential, but a credential registered through a
+token the agent minted itself no longer buys anything on its own: the
+enforcement hook, `gate_verify`, and `set --approve` all re-verify the signed
+assertion against the **pinned** owner key, so approvals signed by any other
+credential are refused. The residual is now the pin itself — keep
+`pin` an operator ceremony and the pin files outside the agent's write reach.
 
 ## Finding 15 — final dispatch substitution (HIGH)
 
