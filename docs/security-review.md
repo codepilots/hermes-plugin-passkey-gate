@@ -1,4 +1,4 @@
-# Adversarial security review — passkey-gate (as of pin `bec3b78d`, v0.4.0)
+# Adversarial security review — passkey-gate (as of pin `69bcd7e6`, v0.4.0)
 
 Reviewed by an adversarial pass over the full source (gate_core, local_verify,
 tools, cli, expose, schemas, static/app.js), plus two independent reviewers

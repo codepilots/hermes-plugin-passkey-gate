@@ -1,7 +1,7 @@
 # Passkey-gate threat model and residual architectural limitations
 
 **Applies to:** passkey-gate v0.6.0, security review dated 5 November 2026
-(`bec3b78d` review context; remediation campaign D9). This document preserves
+(`69bcd7e6` review context; remediation campaign D9). This document preserves
 and qualifies findings **2 (CRITICAL), 15 (HIGH), and 20 (MEDIUM)**. It is a
 residual-risk statement, not a claim that those findings are eliminated.
 

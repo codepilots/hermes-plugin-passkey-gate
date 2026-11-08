@@ -8,8 +8,8 @@ logged here with evidence. Status legend: ⬜ queued · 🔄 delegated ·
 ✅ fixed+verified · 📝 addressed-by-documentation (residual limitation
 explicitly stated) · ⛔ blocked.
 
-Baseline: commit `efc3bb8` ("docs: catalog entry updated for 0.4.0"),
-review as of `bec3b78` (v0.4.0). Test suite baseline: **29 passed**
+Baseline: commit `cea3fa4` ("docs: catalog entry updated for 0.4.0"),
+review as of `69bcd7e` (v0.4.0). Test suite baseline: **29 passed**
 (`.venv/bin/python -m pytest tests/ -q`, verified 5 Nov 2026).
 
 Coupled findings are fixed in one delegation where the review itself says
@@ -20,29 +20,29 @@ fold into items below (9→D3, 10→D11, 11→D12, 12→D8, 13→D13).
 
 | # | Findings | Severity | Status | Evidence |
 |---|----------|----------|--------|----------|
-| D1 | 1 — approval page never shows the bound tool call | CRITICAL | ✅ | commit `4956b48`; 33 passed; exploit probe green |
-| D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `36a193e`; 39 passed; 8-way race probe green |
-| D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `dcbdb4a`; 41 passed; replay probe green |
-| D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `f618f0e`; 47 passed; corruption probe green |
-| D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `506e8d9`; 61 passed; live SSRF probe green |
-| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `89d2264`; 66 passed; fabricated-record probe green |
-| D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `a5a0cf9`; 78 passed; 19/19 exploit probe green |
-| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `a763ad6`; 84 passed; pin probe green |
-| D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `32805bc`; 87 passed; DB-tamper probe green |
-| D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `7bfceee`; 102 passed; wholesale-rewrite probe green |
-| D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `ac5c577`; 107 passed; stamp/migration probe green |
-| D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `6ade254`; 114 passed; race probe green |
-| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `c3e6261`; 120 passed; live-ceremony probe green |
-| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `1f51122`; 125 passed; fence/caps probe green |
-| D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `8d9ec70`; 130 passed; grandchild-deadlock probe green after follow-up |
-| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `a7994bb`; 142 passed; 5-scenario rule probe green after follow-up |
-| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ✅ | commit `0fe4ec7`; 148 passed; independent collision/migration probe green |
-| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ✅ partial | commit `e924660`; 149 passed; minimized-record probe green; authenticated channel remains deployment residual |
-| D19 | 28 — numeric setting range validation | LOW | ✅ | commit `76f0622`; 155 passed; independent range/legacy/backend/bind probe green |
+| D1 | 1 — approval page never shows the bound tool call | CRITICAL | ✅ | commit `c564930`; 33 passed; exploit probe green |
+| D2 | 3+4 — consume race + approval expiry (atomic claim-and-consume) | CRITICAL+HIGH | ✅ | commit `4b4ace3`; 39 passed; 8-way race probe green |
+| D3 | 14+9 — assertion↔challenge binding; local_verify never-raise | HIGH+LOW | ✅ | commit `61df75e`; 41 passed; replay probe green |
+| D4 | 17+7 — config-load failure fail-open; stale config reload | HIGH+MEDIUM | ✅ | commit `ab86055`; 47 passed; corruption probe green |
+| D5 | 5+23 — SSRF: parent allowlist, strict URL parse, no redirects | HIGH+MEDIUM | ✅ | commit `970dea6`; 61 passed; live SSRF probe green |
+| D6 | 6+19 — parent approval: full local signature verify + hash equality | HIGH | ✅ | commit `1836faa`; 66 passed; fabricated-record probe green |
+| D7 | 16 — enforcement config agent-mutable | HIGH | ✅ | commit `8819729`; 78 passed; 19/19 exploit probe green |
+| D8 | 18+12 — pin ceremony: no silent overwrite, O_EXCL/no-follow, PEM validation | HIGH | ✅ | commit `823c601`; 84 passed; pin probe green |
+| D9 | 2+20+15 — threat model, bootstrap hardening, dispatch limitation | CRITICAL (arch) | ✅ (partial, honest) | commit `74568a1`; 87 passed; DB-tamper probe green |
+| D10 | 8 — audit chain: honest claim + head notarization | MEDIUM | ✅ | commit `3503e0d`; 102 passed; wholesale-rewrite probe green |
+| D11 | 10 — consumed_at column, preserve decided_at | LOW | ✅ | commit `e2c5b45`; 107 passed; stamp/migration probe green |
+| D12 | 11 — challenge creation rate limit | LOW | ✅ | commit `1ec2ae2`; 114 passed; race probe green |
+| D13 | 21+13 — sign-count validation + clone-detection limits | MEDIUM | ✅ | commit `23c29d5`; 120 passed; live-ceremony probe green |
+| D14 | 22 — regex pattern validation + safe block-message display | MEDIUM | ✅ | commit `64cc439`; 125 passed; fence/caps probe green |
+| D15 | 24 — cloudflared reader deadline | MEDIUM | ✅ | commit `32b7eaa`; 130 passed; grandchild-deadlock probe green after follow-up |
+| D16 | 25 — tailscale exact-rule cleanup | MEDIUM | ✅ | commit `8122027`; 142 passed; 5-scenario rule probe green after follow-up |
+| D17 | 26 — owner-slug collision-resistant pin filenames | LOW/MED | ✅ | commit `be6d632`; 148 passed; independent collision/migration probe green |
+| D18 | 27 — bearer-readable verify records: minimize + document | LOW/MED | ✅ partial | commit `180447c`; 149 passed; minimized-record probe green; authenticated channel remains deployment residual |
+| D19 | 28 — numeric setting range validation | LOW | ✅ | commit `567d772`; 155 passed; independent range/legacy/backend/bind probe green |
 
 ## Fresh independent review of v0.5.0 — new backlog
 
-A fresh adversarial review (no campaign context) of HEAD `dcc66b7` judged
+A fresh adversarial review (no campaign context) of HEAD `d572e02` judged
 the release **safe-with-residuals**: the core WebAuthn ceremony is sound, no
 path approves or executes without the human's passkey, and the honest-claims
 documentation was verified accurate. Two HIGH findings are release blockers
@@ -52,17 +52,17 @@ are hardening. Full report frozen at
 
 | Item | Finding | Severity | Status | Evidence |
 |---|---|---|---|---|
-| F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | ✅ | commit `6373ff4`; 159 passed; reviewer probe re-run + parent 4-process/phrase/expiry probe green |
-| F2 | catalog entry pins pre-remediation `bec3b78`, version 0.2.0 | HIGH | ✅ | code `9c22772`, pin `baf1f30`; fresh-clone at the pin: 161 passed; catalog honest |
+| F1 | gate-weakening `set --approve` approvals replayable (never consumed) | HIGH | ✅ | commit `1f39755`; 159 passed; reviewer probe re-run + parent 4-process/phrase/expiry probe green |
+| F2 | catalog entry pins pre-remediation `69bcd7e`, version 0.2.0 | HIGH | ✅ | code `c2e56f1`, pin `7d6e509`; fresh-clone at the pin: 161 passed; catalog honest |
 | F3 | audit chain self-corrupts under multi-process writes (process-local lock) | MEDIUM | ✅ | v0.6.0: flock/msvcrt cross-process lock on appends + chain reads; `test_two_processes_appending_keep_chain_intact` fails pre-fix (chain broken at line 2), passes after |
 | F4 | DNS-rebinding TOCTOU: SSRF check resolves once, fetch dials again | LOW | ⬜ | stateful getaddrinfo fake, loopback dial demonstrated |
 | F5 | HTTP surface: negative Content-Length wedges threads; no GET rate limits | LOW | ✅ partial | v0.6.0: negative length → 400, 30 s handler socket timeout; `test_negative_content_length_does_not_hang`. GET rate limits remain open |
 | F6 | `os_default_rp_id` dead code — `import shutil` missing | LOW | ✅ | v0.6.0; import added + RP ID now defaults to the configured origin's host; `test_cli_default_rp_id_prefers_configured_origin_host` |
 | F7 | `gate_verify` raises on `wait_seconds='abc'` (never-raise contract) | INFO | ✅ | v0.6.0: typed refusals in gate_verify/gate_challenge; `test_handlers_never_raise_on_bad_types` |
-| C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | ✅ | accurate "single-use when applied" wording, `9c22772` |
-| C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | ✅ | scoped honestly to parent-gate fetches, `9c22772` |
-| C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | ✅ | parse_gate_origin at both sites, `9c22772`; parent probe 7 hostile origins/0 fetches |
-| C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | ✅ | bumped to v0.5.0, `9c22772` |
+| C1 | "approvals are single-use" overclaim (plugin.yaml:11, schemas.py:24) | claim | ✅ | accurate "single-use when applied" wording, `c2e56f1` |
+| C2 | CHANGELOG "all fetches… private-network blocking" overclaim | claim | ✅ | scoped honestly to parent-gate fetches, `c2e56f1` |
+| C3 | origin accepted via prefix check in gate_verify/_verify_weakening_approval | claim | ✅ | parse_gate_origin at both sites, `c2e56f1`; parent probe 7 hostile origins/0 fetches |
+| C4 | threat-model.md header still says "Applies to: v0.4.0" | claim | ✅ | bumped to v0.5.0, `c2e56f1` |
 
 ## Hackathon-readiness review (8 Nov 2026) — new items
 
@@ -74,13 +74,14 @@ scanner. Fixed items shipped in v0.6.0.
 | H1 | enforcement hook trusted DB `approved` status without checking the pinned owner key — an agent that registered its own software credential could self-approve enforced calls; a rogue approval could also shadow a genuine one for the same binding | HIGH | ✅ v0.6.0 | hook re-verifies via `local_verify.check` against the pin, falls through to any other approved row that verifies; reviewer PoC now blocked; `test_hook_refuses_approval_from_unpinned_credential`, `test_hook_blocks_when_no_owner_key_pinned`; 169 passed at v0.6.0 |
 | H2 | Hermes install scanner verdict `caution` (12 HIGH): cloudflared backend + absolute `rm -rf` doc examples — non-interactive install refused | HIGH (release) | ✅ v0.6.0 | cloudflare quick-tunnel backend removed (tailscale serve + configured origin remain); doc examples relativized; CI pip self-upgrade dropped; scanner verdict `safe` (0 HIGH, 82 medium/low informational) |
 | H3 | README install command installs the repo root (no plugin.yaml) | HIGH (release) | ✅ v0.6.0 | now `owner/repo#plugin`; isolated install lands as `passkey-gate` |
-| H4 | 46 commits (all of v0.5.0) unpushed; catalog pin `9c22772` absent from GitHub; CI never ran; GitHub repo description still says "agent-uncircumventable" | HIGH (release) | ✅ | pushed; tags `v0.6.0` (`90df5e3`, does not load in Hermes — see H12) and `v0.6.1` (`86dcb4e`); CI green on GitHub at `86dcb4e` (170 passed); fresh GitHub clone at the pin: 170 passed, `hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin --ref 86dcb4e…` installs with no scanner prompt, documented `scripts/e2e_hermes.py` run 19/19; catalog pinned to `86dcb4e`; repo description updated |
+| H4 | 46 commits (all of v0.5.0) unpushed; catalog pin `c2e56f1` absent from GitHub; CI never ran; GitHub repo description still says "agent-uncircumventable" | HIGH (release) | ✅ | pushed; tags `v0.6.0` (`ef760bb`, does not load in Hermes — see H12) and `v0.6.1` (`5fbc509`); CI green on GitHub at `5fbc509` (170 passed); fresh GitHub clone at the pin: 170 passed, `hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin --ref 5fbc509…` installs with no scanner prompt, documented `scripts/e2e_hermes.py` run 19/19; catalog pinned to `5fbc509`; repo description updated |
 | H5 | tool-call binding not covered by the signature (nonce = sha256(action_text) + entropy; binding lives only in DB) | MEDIUM | ✅ v0.6.0 | nonce = sha256(text) ‖ binding ‖ 16B entropy; hook + gate_verify check it; `test_signature_covers_tool_call_binding` fails pre-fix |
 | H6 | unauthenticated `POST /challenge` on exposed origin — arbitrary requester names, can fill global pending cap | MEDIUM | ✅ v0.6.0 | `POST /challenge` needs `Bearer <mint token>` (`mint-token` CLI); `test_http_challenge_requires_mint_token` |
 | H7 | `gate_verify` hashes raw action_text but lookup uses stripped text — trailing whitespace never verifies | LOW | ✅ v0.6.0 | verify the stripped text the gate signed; `test_gate_verify_tolerates_surrounding_whitespace` |
 | H8 | real tailnet hostname in tests/test_expose.py fixtures (`REAL_HOST`) | LOW (privacy) | ✅ v0.6.0 (working tree) | fixtures use `gate-host.example-tailnet.ts.net`; the old name remains in already-public git history (not rewritten) |
 | H9 | no end-to-end run inside a real Hermes since v0.5.0 (tests use a mocked ctx); no demo media in README | release | ✅ partial | v0.6.1: `scripts/e2e_hermes.py` — 19/19 PASS through real Hermes v0.23.0 (plugin manager, registry, pre_tool_call dispatch, serve, CLI ceremony; software authenticator). Open: a phone-passkey run over tailscale + a demo recording for the README (needs the human) |
 | H12 | plugin FAILED TO LOAD in real Hermes: `register_cli_command(name, fn)` vs Hermes's `(name, help, setup_fn, handler_fn)` — no tools, no hook; hidden by a loose test fake | CRITICAL (release) | ✅ v0.6.1 | found by the real-Hermes smoke run (`Failed to load plugin 'passkey-gate': ... missing 1 required positional argument: 'setup_fn'`); strict fake + `test_cli_registers_with_hermes_signature_and_runs`; e2e 19/19 |
+| H13 | PII in git history: real tailnet hostname (test fixtures), a real tailnet IP (test fixtures), home/profile paths (docs), and a full shell-environment dump with Discord user/chat/message IDs, session key, user name and hostname in one commit message (a backticked `set` the shell executed) | MEDIUM (privacy) | ✅ | history rewritten 8 Nov 2026 with git-filter-repo (fixtures → `gate-host.example-tailnet.ts.net` / `100.64.0.10`, paths generalized, message restored to its intended text); every commit hash changed — references in these docs and the catalog pin remapped; tags `v0.6.0`/`v0.6.1` moved to the rewritten commits; full-history re-scan finds none of the strings |
 | H10 | CSRF: `/a/<id>/deny` accepted cross-site `text/plain` posts | LOW | ✅ v0.6.0 | POSTs require application/json (415); `test_cross_site_form_post_to_deny_is_refused` |
 | H11 | `challenge_ttl` (up to 24 h), `origin`, `rp_id` changeable without passkey approval | LOW | ⬜ | reviewer code reading |
 
@@ -106,13 +107,13 @@ scanner. Fixed items shipped in v0.6.0.
   at BOTH sites with zero fetches; valid https and both loopback-http forms
   pass the origin gate. Static scans clean (one hit was the new test's
   hostile-input fixture string, not a secret).
-- **Pin and validation:** work committed as `9c22772` (code-complete
+- **Pin and validation:** work committed as `c2e56f1` (code-complete
   v0.5.0); catalog sha pinned to
-  `9c227722992661dbd966d426a8144e73868d0b81` in `baf1f30`. The catalog's
+  `c2e56f10f60cf2f253d7698d1912ca2ed5051be2` in `7d6e509`. The catalog's
   mandated fresh-clone validation ran against exactly the pinned commit:
   local clone, clean venv, `pip install -r requirements.txt pytest`,
   161 passed in 20.48 s.
-- **Commits:** `9c22772` (F2 + C1-C4), `baf1f30` (pin).
+- **Commits:** `c2e56f1` (F2 + C1-C4), `7d6e509` (pin).
 
 ### F1 — fresh-review HIGH: gate-weakening approvals single-use ✅
 
@@ -135,7 +136,7 @@ scanner. Fixed items shipped in v0.6.0.
   unclaimable; a real 4-process race produced exactly one WIN with the
   row terminal; exactly one challenge_consumed audit record per burned
   approval and none for refusals.
-- **Commit:** `6373ff4`.
+- **Commit:** `1f39755`.
 
 ### Publication prep — v0.5.0 ✅ (post-campaign, user-approved closing task)
 
@@ -164,7 +165,7 @@ scanner. Fixed items shipped in v0.6.0.
   "cannot" uses are legitimate deployment-control statements; static scans
   clean.
 - **Standing follow-up (NOT for this release):** `catalog-entry/passkey-gate.yaml`
-  is a stale draft — version 0.2.0, pinning `bec3b78` (the pre-remediation
+  is a stale draft — version 0.2.0, pinning `69bcd7e` (the pre-remediation
   commit the review graded unsafe), with outdated description language.
   It must be rewritten and repointed at the fresh-review-passed commit
   before any catalog PR; it is deliberately untouched here.
@@ -185,7 +186,7 @@ scanner. Fixed items shipped in v0.6.0.
   refuse without saving, exact low/high boundaries are accepted, malformed
   runtime state fails closed with explicit range errors, invalid expose ports
   do not invoke a backend, and HTTP serve refuses before binding.
-- **Commit:** `76f0622`.
+- **Commit:** `567d772`.
 
 ### D18 — finding 27 (LOW/MEDIUM): minimize bearer-readable verify records ✅ partial
 
@@ -210,7 +211,7 @@ scanner. Fixed items shipped in v0.6.0.
   operator channel from which to issue a safe viewing token; deployment must
   provide an authenticated broker/session or equivalent short-lived,
   authenticated token issuance. This is documented in `threat-model.md`.
-- **Commit:** `e924660`.
+- **Commit:** `180447c`.
 
 ### D17 — finding 26 (LOW/MEDIUM): collision-resistant pin filenames ✅
 
@@ -232,7 +233,7 @@ scanner. Fixed items shipped in v0.6.0.
   ambiguity fails closed naming both files; legacy lookup works and
   legacy/new coexistence fails closed; same-key overwrite is refused.
   `git diff --check` and added-line security scans found no issues.
-- **Commit:** `0fe4ec7`.
+- **Commit:** `be6d632`.
 
 ### D16 — finding 25 (MEDIUM): tailscale exact-rule cleanup ✅ (after follow-up)
 
@@ -261,7 +262,7 @@ scanner. Fixed items shipped in v0.6.0.
   follow-up edge closed); total failure cleans only this run's partial
   rules, clears the record, foreign rules byte-identical throughout; no
   forbidden command shapes (--http=, bare off, reset) ever issued.
-- **Commits:** `a7994bb` (both rounds + requirements.txt).
+- **Commits:** `8122027` (both rounds + requirements.txt).
 
 ### D15 — finding 24 (MEDIUM): cloudflared reader deadline ✅ (after follow-up)
 
@@ -289,7 +290,7 @@ scanner. Fixed items shipped in v0.6.0.
   refused. One orphaned probe stub (my pkill pattern artifact, not a plugin
   leak — the success path hands the child back alive by design) killed and
   confirmed clean.
-- **Commits:** `8d9ec70` (both rounds, one atomic finding-24 commit).
+- **Commits:** `32b7eaa` (both rounds, one atomic finding-24 commit).
 
 ### D14 — finding 22 (MEDIUM): pattern validation + safe display ✅
 
@@ -312,7 +313,7 @@ scanner. Fixed items shipped in v0.6.0.
   collapsed); 201-char, 101-pattern, and non-string lists all refused whole.
 - **Deviations:** none material (no ReDoS detector invented — compile check
   + caps per the review's ask).
-- **Commit:** `1f51122`.
+- **Commit:** `64cc439`.
 
 ### D13 — findings 21 (MEDIUM) + 13 (MEDIUM): sign-count clone detection ✅
 
@@ -338,7 +339,7 @@ scanner. Fixed items shipped in v0.6.0.
   counter atomically 7.
 - **Deviations:** none material (guard gives the crypto failure its name
   first; the library call enforces the same rule generically).
-- **Commit:** `c3e6261`.
+- **Commit:** `23c29d5`.
 
 ### D12 — finding 11 (LOW): challenge rate limiting ✅
 
@@ -356,7 +357,7 @@ scanner. Fixed items shipped in v0.6.0.
   holds 10, no overshoot; global backstop trips with exactly 100 pending.
 - **Deviations accepted:** review named no numbers, so the suggested defaults
   (10 / 100) landed as module constants.
-- **Commit:** `6ade254`.
+- **Commit:** `1ec2ae2`.
 
 ### D11 — finding 10 (LOW): consumed_at column ✅
 
@@ -376,7 +377,7 @@ scanner. Fixed items shipped in v0.6.0.
   stays exactly the approval time; second claim refused (D2 atomicity
   untouched); record exposes both stamps.
 - **Deviations:** none material (migration loop now carries column types).
-- **Commit:** `ac5c577`.
+- **Commit:** `e2c5b45`.
 
 ### D10 — finding 8 (MEDIUM): audit chain honest claims + head notarization ✅
 
@@ -398,7 +399,7 @@ scanner. Fixed items shipped in v0.6.0.
   notarized head; truncated log DIVERGED; no-notary phrasing honest.
 - **Deviations accepted:** audit_notary_path as the default for --to/--notary;
   one shared chain implementation instead of two.
-- **Commit:** `7bfceee`.
+- **Commit:** `3503e0d`.
 
 ### D9 — findings 2 (CRITICAL arch) + 20 (MEDIUM) + 15 (HIGH): threat model ✅ (honest partial)
 
@@ -424,7 +425,7 @@ scanner. Fixed items shipped in v0.6.0.
   final executor enforces the same canonical binding hash or a separate
   broker owns that boundary. The threat-model doc records this — no "fully
   fixed" claim for an architectural finding.
-- **Commit:** `32805bc`.
+- **Commit:** `74568a1`.
 
 ### D8 — findings 18 (HIGH) + 12 (MEDIUM): pin ceremony ✅
 
@@ -443,7 +444,7 @@ scanner. Fixed items shipped in v0.6.0.
 - **Deviations:** none material. The owner-derived filename remains
   predictable by design; collision-resistant naming is explicitly deferred to
   D17.
-- **Commit:** `a763ad6`.
+- **Commit:** `823c601`.
 
 ### D7 — finding 16 (HIGH): enforcement config agent-mutable ✅
 
@@ -465,7 +466,7 @@ scanner. Fixed items shipped in v0.6.0.
   asserted the pre-fix unsafe behavior; one settings test was updated for the
   new fail-closed allowlist policy. The underlying reload contract remains
   covered.
-- **Commit:** `a5a0cf9`.
+- **Commit:** `8819729`.
 
 ### D6 — findings 6 (HIGH) + 19 (HIGH): parent-chain verification ✅
 
@@ -488,7 +489,7 @@ scanner. Fixed items shipped in v0.6.0.
 - **Deviations accepted:** 3 existing tests updated (they encoded the
   pre-fix vulnerable verdicts); challenge_id claim-matching added as an
   in-scope hardening.
-- **Commit:** `89d2264`.
+- **Commit:** `1836faa`.
 
 ### D5 — findings 5 (HIGH) + 23 (MEDIUM): SSRF + redirect fetches ✅
 
@@ -512,7 +513,7 @@ scanner. Fixed items shipped in v0.6.0.
 - **Bonus:** the child patched the hermes-plugin-development skill, whose
   origin-validation example was the exact prefix-check anti-pattern finding 23
   proved dangerous.
-- **Commit:** `506e8d9`.
+- **Commit:** `970dea6`.
 
 ### D4 — findings 17 (HIGH) + 7 (MEDIUM, stale-config half): fail-closed config ✅
 
@@ -536,7 +537,7 @@ scanner. Fixed items shipped in v0.6.0.
   next verdict without restart.
 - **Deviations:** none material (register() now seeds via apply_config_safe —
   fail-closed from the first moment).
-- **Commit:** `f618f0e`.
+- **Commit:** `ab86055`.
 
 ### D3 — findings 14 (HIGH) + 9 (LOW): challenge binding + never-raise ✅
 
@@ -555,7 +556,7 @@ scanner. Fixed items shipped in v0.6.0.
 - **Deviations accepted:** non-string action_text gets its own guard message;
   a last-resort except appends 'record malformed' rather than letting
   anything escape. Both strengthen the never-raise contract.
-- **Commit:** `dcbdb4a`. **Standing follow-up:** Autumn's personal
+- **Commit:** `61df75e`. **Standing follow-up:** Autumn's personal
   `verify_local.py` (the proved original, outside this repo) needs the same
   two fixes — offer to patch after the campaign.
 
@@ -575,7 +576,7 @@ scanner. Fixed items shipped in v0.6.0.
 - **Deviations:** none material. The fail-closed wrap also landed part of
   finding 7's fix here — D4's scope narrowed to config-load caching +
   config reload (no re-wrap needed).
-- **Commit:** `36a193e`. **Follow-up outside this repo:** Autumn's personal
+- **Commit:** `4b4ace3`. **Follow-up outside this repo:** Autumn's personal
   `verify_local.py` (the proved original the plugin's local_verify was
   ported from) shares the finding-14 gap fixed next in D3 — flag for a
   matching patch once D3 lands.
@@ -597,6 +598,6 @@ scanner. Fixed items shipped in v0.6.0.
 - **Deviations accepted:** /verify carries the canonical call as a byte-exact
   JSON string (hashable against binding_sha256); gate_challenge's pattern
   check matches action_text when no tool_call exists (only signal present).
-- **Commit:** `4956b48`. Deferred refinement (not blocking): deriving
+- **Commit:** `c564930`. Deferred refinement (not blocking): deriving
   action_text from the tool_call at mint time.
 

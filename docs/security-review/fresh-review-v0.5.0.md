@@ -1,11 +1,11 @@
 # Fresh independent security review — passkey-gate v0.5.0
 
-- **Reviewed at:** HEAD `dcc66b76a3ac0035186d90f1231a0a7dd04d3a95` (v0.5.0, clean tree)
+- **Reviewed at:** HEAD `d572e0235aa4009530a4219a5db1c1a7d3bf936d` (v0.5.0, clean tree)
 - **Reviewer:** independent subagent, no campaign context (delegation
   `deleg_11029514`, 32 API calls, 629 s; live transcript:
   `~/.hermes/profiles/<profile>/cache/delegation/live/deleg_11029514/task-0.log`)
 - **Method:** full source read of plugin/*.py + tests; special attention to
-  the diff since `bec3b78` (the previously reviewed snapshot); six live
+  the diff since `69bcd7e` (the previously reviewed snapshot); six live
   adversarial probes (`probe_freshreview_{replay,misc,dns,audit,audit_child}.py`
   in the profile scratch dir) run against a real software authenticator and a
   real HTTP gate; claims checked against code, not trusted.
@@ -60,7 +60,7 @@ record the consumed challenge id in the config_changed audit entry.
 ### F2 [HIGH] — Release artifact installs the known-unsafe pre-remediation snapshot
 
 `catalog-entry/passkey-gate.yaml:6` pins sha
-`bec3b78dc3ecc0b10418ac1291cfa0052fc4d81e` (the commit the archived
+`69bcd7e6166908a903362a3a561c3462d4dec528` (the commit the archived
 adversarial review judged not shippable — 28 findings incl. two stoppers);
 `:14` declares version 0.2.0.
 
@@ -70,8 +70,8 @@ claims v0.5.0 security properties (single-use approvals, hook consumption,
 parent re-checks) that the pinned snapshot does not implement.
 
 **Evidence:** read of the file at HEAD vs `docs/security-review.md:1-17` and
-`plugin/plugin.yaml:3`; 40 commits of security remediation between bec3b78
-and dcc66b7.
+`plugin/plugin.yaml:3`; 40 commits of security remediation between 69bcd7e
+and d572e02.
 
 **Recommendation:** before any PR/publication, re-pin the sha to the
 post-remediation release commit, bump version to 0.5.0, and re-run the
@@ -205,7 +205,7 @@ handlers.
 4. **STALE** — `docs/security-review/threat-model.md:3` states "Applies to:
    passkey-gate v0.4.0" while shipping inside the v0.5.0 release whose
    README/CHANGELOG cite it as the authoritative trust model.
-5. **SHIPPING CONTRADICTION** — the catalog entry (F2): pins bec3b78 and
+5. **SHIPPING CONTRADICTION** — the catalog entry (F2): pins 69bcd7e and
    declares 0.2.0 while asserting v0.5.0 properties.
 6. **VERIFIED ACCURATE (no action)** — the README "Honest limits" and
    "Deployment requirements" sections, plugin.yaml descriptions, and
