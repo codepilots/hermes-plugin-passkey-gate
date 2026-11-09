@@ -185,6 +185,75 @@ The block message tells the agent that reaching the same effect another way
 is a violation, which stops a well-behaved agent from wandering round the
 gate by accident; it can't stop a hostile one.
 
+### Choosing which chats need a passkey
+
+Enforcement can apply to every conversation or only some. Each agent turn
+starts in one of five **lanes**, and `gated_lanes` lists the ones that need
+your passkey. The default is all five, so nothing changes unless you narrow it.
+
+| Lane | What it covers |
+|---|---|
+| `local` | You at this computer: Hermes CLI, TUI, Desktop, or an ACP editor. |
+| `owner` | A chat from one of your own accounts, listed in `owner_senders` as `platform:user_id` (e.g. `telegram:123456789`). |
+| `others` | A chat from anyone else. Also scheduled jobs, webhooks, API runs, and any turn whose origin can't be told. |
+| `bots` | A chat message whose sender the chat platform marks as a bot. |
+| `agents` | Another agent talking to this one directly: an A2A session, or a Hermes peer DM (`hermes peer dm`). |
+
+`setup` asks which lanes to gate. Common choices:
+
+```bash
+hermes passkey-gate set gated_lanes agents,bots            # only other agents and bots
+hermes passkey-gate set gated_lanes owner,others,bots,agents  # everything except you at the keyboard
+hermes passkey-gate set owner_senders telegram:123456789    # so your own chats are "owner", not "others"
+```
+
+Narrowing `gated_lanes` or adding to `owner_senders` weakens the gate, so
+once enforcement is on, both need your passkey (see
+[Changing settings safely](#changing-settings-safely)). `setup` can set them
+freely only while it's switching enforcement on for the first time. A block
+message names the lane that caused it, for example *Gated lane: agents —
+another agent (A2A or a Hermes peer DM)*.
+
+How the lane is worked out: the plugin watches each admitted chat message
+(`post_gateway_admission`) and each turn's start (`pre_llm_call`) to record
+who started the turn, then the enforcement hook looks that up for each tool
+call. All three are documented Hermes plugin hooks.
+
+**Limits of lanes.** Lanes decide *whether* the patterns are checked for a
+turn. They're only as good as what Hermes and the chat platform report:
+
+- **Bot detection depends on the platform.** `bots` relies on the
+  platform's bot flag (Discord sets it) or on the platform's `bot_users`
+  list in your Hermes config (Matrix, Mattermost, Signal, IRC and others).
+  An agent using an ordinary user account looks like a person and lands in
+  `others`. If other agents can reach you through a chat platform, gate
+  `others` as well as `bots`.
+- **`owner` is only as safe as your chat account.** Anyone who controls
+  that account, or can send as it, gets your ungated lane. Leave `owner`
+  gated if that worries you.
+- **A session stays in the strictest lane it has seen.** Once another agent
+  or person speaks in a session, every later turn in that session counts
+  as theirs too, until the session ends or is reset. Subagents inherit
+  their parent's lanes.
+- **Messages that steer a running turn aren't seen.** A message sent while
+  the agent is mid-turn can be folded into that turn without starting a
+  new one, so the plugin doesn't see who sent it. In a group chat where
+  agents or other people post, gate `owner` too, or keep risky work out of
+  shared chats.
+- **When the origin is unknown, the call is gated.** A turn the plugin has
+  no record for counts as local only when Hermes reports a CLI, TUI,
+  Desktop or ACP session. Anything else, including the gateway's `local`
+  platform, which also carries peer DMs, is gated whenever any lane other
+  than `local` is. Records are kept in memory for the last 4096 sessions
+  and are lost when Hermes restarts; a session that loses its record is
+  treated as unknown, not as local.
+- **A2A and peer DMs are recognised by name.** `agents` covers the `a2a`
+  platform and Hermes's `api-peer` Bot Chat sender. Agent traffic that
+  arrives another way (for example a raw API run) lands in `others`.
+- **Lanes don't fix the patterns.** In a gated lane the usual pattern
+  limits apply (see [Enforcement](#enforcement)). For agent lanes, consider
+  the strict pattern.
+
 ### What you see on the approval page
 
 - **From:** the agent and whose agent it is (`bramble (agent of Autumn)`).
@@ -211,6 +280,8 @@ the gate **weaker** need your passkey first:
 - adding a parent-gate allowlist entry
 - raising `challenge_ttl`
 - moving an `origin` or `rp_id` that's already set
+- removing a lane from `gated_lanes`
+- adding an account to `owner_senders`
 
 The refusal prints an approval link and the exact `--approve <id>` command
 to re-run once you've signed. Making the gate stricter, and first-time
@@ -321,6 +392,8 @@ that check (see [Changing settings safely](#changing-settings-safely)).
 | `authority_patterns` 🔒 | `[]` | Regexes over `tool_name + canonical JSON args`. Max 100, 200 characters each. |
 | `parent_gate_allowlist` 🔒 | `[]` | Exact origins of peer gates this gate may fetch to re-check a parent approval. Empty means it never fetches. |
 | `audit_notary_path` | `""` | Default notary file for `audit-notarize` / `audit-verify`. |
+| `gated_lanes` 🔒 | all five | Which conversations enforcement applies to: `local`, `owner`, `others`, `bots`, `agents`. See [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey). |
+| `owner_senders` 🔒 | `[]` | Your own chat accounts as `platform:user_id`, so their chats fall in the `owner` lane. |
 
 ### Tools the agent gets
 
@@ -361,6 +434,9 @@ setup, approvals are an honest record, not a boundary.
 - **Patterns can be routed around.** They're a best-effort list over the
   text of a call (see [Enforcement](#enforcement)); gate whole tools for
   certainty.
+- **Lanes trust what Hermes and the chat platform report** about who started
+  a turn. Bot flags can be missing, and messages that steer a running turn
+  aren't attributed (see [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey)).
 - **An approval covers the command, not what it depends on.** If you
   approve `bash ./cleanup.sh`, the agent could change the script before
   running it. Prefer approving commands that say exactly what they do.

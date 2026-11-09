@@ -208,10 +208,32 @@ def test_wizard_rerun_skips_finished_steps(world, tmp_path):
 
 
 def test_wizard_turns_on_enforcement(world):
-    out, s, ctx = _run(world, ["", world["phone"]["code"], "y", ""])
+    out, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", ""])
     assert ctx.store["require_passkey"] is True
     assert ctx.store["authority_patterns"] == [setup_wizard.DEFAULT_PATTERN]
+    assert ctx.store["gated_lanes"] == ["local", "owner", "others", "bots", "agents"]
     assert "enforcement on" in out
+
+
+def test_wizard_can_gate_only_agents_and_bots(world):
+    out, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", "3"])
+    assert ctx.store["require_passkey"] is True
+    assert ctx.store["gated_lanes"] == ["bots", "agents"]
+    assert "Enforcement is on, for: bots, agents" in s.text
+
+
+def test_wizard_asks_for_owner_accounts_when_only_others_are_gated(world):
+    out, s, ctx = _run(world, ["", world["phone"]["code"], "y", "",
+                               "others,bots,agents", "telegram:123456789"])
+    assert ctx.store["gated_lanes"] == ["others", "bots", "agents"]
+    assert ctx.store["owner_senders"] == ["telegram:123456789"]
+    assert ctx.store["require_passkey"] is True
+
+
+def test_wizard_refuses_unknown_lane_and_leaves_enforcement_off(world):
+    out, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", "agnets"])
+    assert "unknown lane" in s.text
+    assert "require_passkey" not in ctx.store
 
 
 def test_wizard_without_background_service_waits_for_terminal(world, monkeypatch):

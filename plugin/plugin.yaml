@@ -1,6 +1,6 @@
 name: passkey-gate
 
-version: 0.7.2
+version: 0.8.0
 
 description: >
   Approve your agents' risky actions with your phone's passkey. An agent
@@ -22,6 +22,8 @@ provides_tools:
 
 provides_hooks:
   - pre_tool_call
+  - pre_llm_call
+  - post_gateway_admission
 
 config_schema:
   origin:
@@ -64,6 +66,16 @@ config_schema:
     default: ""
     label: "Audit anchor file"
     description: "A file outside the gate's data folder, where `audit-notarize` records the audit log's latest fingerprint and `audit-verify` checks against it. This is what detects the whole log being rewritten. Keep it somewhere agents can't write."
+  gated_lanes:
+    type: list
+    default: [local, owner, others, bots, agents]
+    label: "Which conversations need a passkey (lanes)"
+    description: "Which conversations enforcement applies to. local: you at this computer (CLI, TUI, Desktop). owner: chats from the senders in owner_senders. others: chats from anyone else, scheduled jobs, webhooks and anything whose origin can't be told. bots: chat messages from senders the platform marks as bots. agents: another agent talking to this one (A2A, Hermes peer DMs). The default gates all five. Once an agent or other sender speaks in a session, that session stays in their lane. Removing a lane needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
+  owner_senders:
+    type: list
+    default: []
+    label: "Your chat accounts (owner senders)"
+    description: "Your own chat accounts, as platform:user_id (e.g. telegram:123456789), so your chats fall in the owner lane instead of others. Only as trustworthy as the chat account itself. Adding an entry needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
 
 python_dependencies:
   - webauthn>=2,<4

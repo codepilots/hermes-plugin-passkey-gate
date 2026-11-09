@@ -29,7 +29,7 @@ The full first-hand scenario behind this plugin: docs/scenario.md.
 import argparse
 import logging
 
-from . import cli, gate_core, schemas, tools
+from . import cli, gate_core, lanes, schemas, tools
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,8 @@ def _on_pre_tool_call(tool_name: str, args: dict = None, task_id: str = "", **kw
     # an exception here would be a fail-OPEN. Anything unexpected blocks
     # (v0.7 adversarial review M3 / A4).
     try:
-        return _pre_tool_call_verdict(tool_name, args if isinstance(args, dict) else {})
+        return _pre_tool_call_verdict(tool_name, args if isinstance(args, dict) else {},
+                                      task_id=task_id, session_id=kwargs.get("session_id", ""))
     except Exception as exc:
         logger.exception("passkey-gate: pre_tool_call failed; blocking")
         return {"action": "block", "message": (
@@ -48,7 +49,14 @@ def _on_pre_tool_call(tool_name: str, args: dict = None, task_id: str = "", **kw
             "'hermes passkey-gate status' shows what the gate sees.")}
 
 
-def _pre_tool_call_verdict(tool_name, args):
+def _session_surface() -> str:
+    try:
+        return cli._ctx_ref.session_surface() if cli._ctx_ref is not None else ""
+    except Exception:  # older Hermes without ctx.session_surface()
+        return ""
+
+
+def _pre_tool_call_verdict(tool_name, args, task_id="", session_id=""):
     cfg = cli.apply_config_safe()
     if cfg.get("_config_error"):
         # Finding 17: a config that is PRESENT but failed to load must fail
@@ -64,7 +72,29 @@ def _pre_tool_call_verdict(tool_name, args):
             "passkey-gate settings (`hermes passkey-gate get` shows them; they "
             "live in the Hermes config file). Once they parse, the gate reloads "
             "them automatically and this call can be retried.")}
-    return tools.hook_verdict(tool_name, args, cfg["patterns"], cfg["require_passkey"])
+    if not cfg["require_passkey"]:
+        return None
+    # Lanes (v0.8): is this turn's conversation one the operator gates?
+    gated = lanes.normalize_lanes(cfg.get("gated_lanes", list(lanes.LANES)))
+    turn = lanes.turn_lanes(task_id, session_id, _session_surface(),
+                            cfg.get("owner_senders") or [])
+    applies, lane_words = lanes.gate_decision(gated, turn)
+    if not applies:
+        return None
+    verdict = tools.hook_verdict(tool_name, args, cfg["patterns"], True)
+    if isinstance(verdict, dict) and verdict.get("action") == "block" and lane_words:
+        verdict["message"] += f" (Gated lane: {lane_words}.)"
+    return verdict
+
+
+def _on_pre_llm_call(**kwargs):
+    lanes.note_turn(**kwargs)
+    return None
+
+
+def _on_post_gateway_admission(**kwargs):
+    lanes.note_admission(**kwargs)
+    return None
 
 
 def _setup_cli(parser):
@@ -87,6 +117,15 @@ def register(ctx):
     # would leave no hook at all, the one fail-open path worse than a block.
     # Settings that won't load make the hook block every call with the reason.
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    # Lane observers: record where each turn came from. If either fails to
+    # register, lanes fall back to "unknown origin", which is gated.
+    for name, fn in (("pre_llm_call", _on_pre_llm_call),
+                     ("post_gateway_admission", _on_post_gateway_admission)):
+        try:
+            ctx.register_hook(name, fn)
+        except Exception:
+            logger.exception("passkey-gate: could not register %s; turn origins "
+                             "will be treated as unknown (gated)", name)
     try:
         cfg = cli.apply_config_safe()
     except Exception as exc:

@@ -153,6 +153,44 @@ try:
     step("approved call is ALLOWED exactly once", d.action != "block", d)
     d = _get_pre_tool_call_directive_details(call["tool"], call["args"])
     step("replay of the same call is BLOCKED (approval consumed)", d.action == "block", d)
+    # ---- lanes (v0.8): Hermes's own hook dispatch delivers turn origins
+    from hermes_cli.lifecycle import invoke_hook
+    risky = {"command": "rm -rf ./lane-cache"}
+
+    def turn(sid, platform, sender=""):
+        invoke_hook("pre_llm_call", session_id=sid, task_id=sid, turn_id="1", user_message="hi",
+                    conversation_history=[], is_first_turn=True, model="m", platform=platform,
+                    parent_session_id="", sender_id=sender)
+
+    def gate(sid):
+        return _get_pre_tool_call_directive_details("terminal", risky, task_id=sid, session_id=sid)
+
+    turn("e2e-a2a", "a2a", "sorrel")
+    d = gate("e2e-a2a")
+    step("A2A turn: block names the agents lane", d.action == "block" and "Gated lane: agents" in (d.message or ""), d)
+    rc, out = hermes("set", "gated_lanes", "agents,bots")
+    m = re.search(r"--approve (\S+)", out)
+    step("narrowing gated_lanes is REFUSED without a passkey", "REFUSED" in out and m, out[-300:])
+    s, o = post(f"/a/{m.group(1)}/options", {})
+    s, r = post(f"/a/{m.group(1)}/finish", human.get(o))
+    rc, out = hermes("set", "gated_lanes", "agents,bots", "--approve", m.group(1))
+    step("... and applied once the human approves it", rc == 0 and '"agents"' in out and "REFUSED" not in out, out[-300:])
+    turn("e2e-cli", "cli")
+    d = gate("e2e-cli")
+    step("CLI turn with local ungated: risky call passes the lane check", d.action != "block", d)
+    d = gate("e2e-a2a")
+    step("A2A turn still BLOCKED", d.action == "block", d)
+    turn("e2e-peer", "local", "api-peer")
+    step("Hermes peer DM (api-peer) counts as agents", gate("e2e-peer").action == "block")
+    turn("e2e-human", "discord", "12345")
+    step("chat from a person passes when only agents+bots are gated", gate("e2e-human").action != "block")
+    invoke_hook("post_gateway_admission", session_key="k", platform="discord", source={
+        "platform": "discord", "user_id": "777", "is_bot": True}, message_id="m", text="hi")
+    turn("e2e-bot", "discord", "777")
+    d = gate("e2e-bot")
+    step("chat from a flagged bot is BLOCKED (bots lane)", d.action == "block" and "Gated lane: bots" in (d.message or ""), d)
+    d = gate("e2e-never-seen")
+    step("turn with unknown origin is BLOCKED (fail closed)", d.action == "block", d)
     rc, out = hermes("audit-verify")
     step("hermes passkey-gate audit-verify", rc == 0 and "broken" not in out.lower(), out[-200:])
 finally:

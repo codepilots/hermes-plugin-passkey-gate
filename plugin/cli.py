@@ -63,7 +63,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import gate_core, expose, local_verify, netfetch, service, tools
+from . import gate_core, expose, lanes, local_verify, netfetch, service, tools
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,8 @@ SETTINGS_SPEC = {
     "authority_patterns": {"type": "list"},
     "parent_gate_allowlist": {"type": "list"},
     "audit_notary_path": {"type": "str"},
+    "gated_lanes": {"type": "list"},
+    "owner_senders": {"type": "list"},
 }
 
 DEFAULTS = {
@@ -93,6 +95,8 @@ DEFAULTS = {
     "authority_patterns": [],
     "parent_gate_allowlist": [],
     "audit_notary_path": "",
+    "gated_lanes": list(lanes.LANES),
+    "owner_senders": [],
 }
 
 # finding 16: the settings that define what the gate enforces. An agent with
@@ -103,7 +107,10 @@ SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist
                  # H11: a longer TTL keeps signed approvals spendable longer,
                  # and moving origin/rp_id re-points where approvals are
                  # minted and what they are verified against
-                 "challenge_ttl", "origin", "rp_id")
+                 "challenge_ttl", "origin", "rp_id",
+                 # v0.8 lanes: ungating a lane, or naming a sender as the
+                 # owner, takes those conversations out of enforcement
+                 "gated_lanes", "owner_senders")
 
 _ctx_ref = None
 _cfg_cache = None
@@ -134,8 +141,12 @@ def apply_config(ctx):
                         port=int(port),
                         challenge_ttl=int(ttl),
                         parent_allowlist=allow)
+    owners = ctx.get_config("owner_senders", default=[]) or []
     return {"require_passkey": bool(ctx.get_config("require_passkey", default=False)),
-            "patterns": ctx.get_config("authority_patterns", default=[]) or []}
+            "patterns": ctx.get_config("authority_patterns", default=[]) or [],
+            # normalize_lanes fails closed on a malformed value (all lanes)
+            "gated_lanes": ctx.get_config("gated_lanes", default=list(lanes.LANES)),
+            "owner_senders": owners if isinstance(owners, list) else []}
 
 
 def os_default_rp_id(origin: str = ""):
@@ -575,12 +586,20 @@ def _change_description(key, old, new):
     that disables a pattern look like the existing rule)."""
     if key == "require_passkey":
         return "turns enforcement OFF (require_passkey true → false)"
-    if key in ("authority_patterns", "parent_gate_allowlist"):
+    if key == "gated_lanes":
+        old_l = sorted(lanes.normalize_lanes(old), key=lanes.LANES.index)
+        new_l = sorted(lanes.normalize_lanes(new), key=lanes.LANES.index)
+        removed = [x for x in old_l if x not in new_l]
+        return ("stops requiring a passkey in lane(s) "
+                + ", ".join(f"{x} ({lanes.LANE_WORDS[x]})" for x in removed)
+                if removed else f"gated_lanes: {_quoted(old_l)} → {_quoted(new_l)}")
+    if key in ("authority_patterns", "parent_gate_allowlist", "owner_senders"):
         old_l = [str(x) for x in (old or [])] if isinstance(old, (list, tuple)) else []
         new_l = [str(x) for x in (new or [])] if isinstance(new, (list, tuple)) else []
         removed = [x for x in old_l if x not in new_l]
         added = [x for x in new_l if x not in old_l]
-        noun = "pattern" if key == "authority_patterns" else "trusted peer gate"
+        noun = {"authority_patterns": "pattern", "parent_gate_allowlist": "trusted peer gate",
+                "owner_senders": "owner sender"}[key]
         parts = []
         if removed:
             parts.append(f"REMOVES {len(removed)} {noun}(s): {_quoted(removed)}")
@@ -641,10 +660,14 @@ def _change_weakens(key, old, new):
             return True  # a non-list in a list slot cannot be judged -> fail closed
         removed = set(old_n) - set(new_n)
         return bool(removed) or len(new_n) < len(old_n)
-    if key == "parent_gate_allowlist":
+    if key in ("parent_gate_allowlist", "owner_senders"):
         if not (isinstance(old_n, list) and isinstance(new_n, list)):
             return True
         return bool(set(new_n) - set(old_n))
+    if key == "gated_lanes":
+        if not (isinstance(old_n, list) and isinstance(new_n, list)):
+            return True
+        return bool(lanes.normalize_lanes(old_n) - lanes.normalize_lanes(new_n))
     if key == "challenge_ttl":
         # raising the TTL keeps approvals live longer; lowering is free
         try:
@@ -801,7 +824,13 @@ def _weakening_approval_used(key, cid):
          "they have signed it."])
 
 
-def cmd_set(ctx, rest):
+# Settings the setup wizard may narrow without a passkey, but only BEFORE it
+# turns enforcement on: with require_passkey off nothing is enforced yet, so
+# choosing the lanes is part of switching enforcement on, not a weakening.
+SETUP_FREE_WHILE_OFF = ("gated_lanes", "owner_senders")
+
+
+def cmd_set(ctx, rest, *, _setup_enforcement_off=False):
     if not rest:
         return ("usage: hermes passkey-gate set <key> <value> [--approve <challenge-id>] — keys: "
                 + ", ".join(SETTINGS_SPEC))
@@ -840,6 +869,16 @@ def cmd_set(ctx, rest):
                     f"{tools.MAX_PATTERN_COUNT} patterns in the list:\n  - "
                     + "\n  - ".join(problems)
                     + "\nFix the pattern(s) and re-run the same command.")
+    if key == "gated_lanes":
+        problems = lanes.validate(value)
+        if problems:
+            return "REFUSED: gated_lanes rejected — nothing was saved:\n  - " + "\n  - ".join(problems)
+        value = sorted({str(v).strip().lower() for v in value}, key=lanes.LANES.index)
+    if key == "owner_senders":
+        problems = lanes.validate_owner_senders(value)
+        if problems:
+            return "REFUSED: owner_senders rejected — nothing was saved:\n  - " + "\n  - ".join(problems)
+        value = [str(v).strip() for v in value]
     _ensure_data_dir()  # audit() needs the data dir; db() may never have run
     if key in SECURITY_KEYS:
         # finding 16: enforcement policy is operator-owned, not agent-mutable.
@@ -854,6 +893,10 @@ def cmd_set(ctx, rest):
                     "security-critical setting is never changed while its current "
                     "value is unreadable")
         weakens = _change_weakens(key, old, value)
+        setup_free = (weakens and _setup_enforcement_off and key in SETUP_FREE_WHILE_OFF
+                      and not bool(ctx.get_config("require_passkey", default=False)))
+        if setup_free:
+            weakens = False
         if weakens:
             if approve_cid is None:
                 return _weakening_needs_approval(key, value, raw, old)
@@ -880,6 +923,7 @@ def cmd_set(ctx, rest):
         try:
             gate_core.audit("config_changed", key=key, old=_jsonable(old), new=_jsonable(value),
                             weakened=weakens,
+                            **({"via": "setup, before enforcement was on"} if setup_free else {}),
                             approved=approve_cid if weakens else None,
                             consumed=approve_cid if weakens else None)
         except Exception as exc:

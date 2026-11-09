@@ -17,7 +17,7 @@ import json
 import sys
 import time
 
-from . import cli, expose, gate_core, local_verify, netfetch, service, tools
+from . import cli, expose, gate_core, lanes, local_verify, netfetch, service, tools
 
 # Standard: dangerous command words in any flag order, find -delete, and any
 # code execution (which can do anything). A best-effort deny-list: an
@@ -322,8 +322,42 @@ class Wizard:
                 self.say("Enforcement left off. Fix the pattern with: "
                          "hermes passkey-gate set authority_patterns <regex>")
                 return
+        if not self.step_lanes():
+            self.say("Enforcement left off.")
+            return
         cli.cmd_set(self.ctx, ["require_passkey", "true"])
-        self.say("✓ Enforcement is on.")
+        gated = self.ctx.get_config("gated_lanes", default=list(lanes.LANES))
+        self.say(f"✓ Enforcement is on, for: {', '.join(lanes.normalize_lanes_ordered(gated)) or 'nothing'}.")
+
+    def step_lanes(self):
+        """Which conversations need a passkey. Runs only while enforcement is
+        still off: narrowing lanes later needs a passkey approval."""
+        self.say()
+        self.say("Which conversations should need your passkey?")
+        self.say("  1  All of them (safest): you at this computer too.")
+        self.say("  2  When you're not at this computer: every chat, bots and other agents.")
+        self.say("  3  Only other agents and bots: A2A, Hermes peer DMs, and chat senders")
+        self.say("     the platform marks as bots. Chats from people aren't gated.")
+        self.say(f"  Or list lanes yourself, comma-separated: {', '.join(lanes.LANES)}")
+        self.say("  (README: 'Choosing which chats need a passkey' explains each, and its limits.)")
+        raw = self.ask("Choose 1, 2, 3, or lanes [1]: ") or "1"
+        chosen = {"1": list(lanes.LANES), "2": ["owner", "others", "bots", "agents"],
+                  "3": ["bots", "agents"]}.get(raw) or [x.strip() for x in raw.split(",") if x.strip()]
+        out = cli.cmd_set(self.ctx, ["gated_lanes", json.dumps(chosen)], _setup_enforcement_off=True)
+        if out.startswith("REFUSED"):
+            self.say(out)
+            return False
+        gated = set(chosen)
+        if "others" in gated and "owner" not in gated:
+            self.say("Your own chat accounts aren't gated, but other people's are. List yours as")
+            self.say("platform:user_id (e.g. telegram:123456789) so the gate can tell them apart.")
+            owners = self.ask("Your accounts, comma-separated (Enter to skip): ")
+            if owners:
+                out = cli.cmd_set(self.ctx, ["owner_senders", owners], _setup_enforcement_off=True)
+                if out.startswith("REFUSED"):
+                    self.say(out)
+                    self.say("No owner accounts saved; your chats count as 'others' for now.")
+        return True
 
     # ------------------------------------------------------------ run
     def run(self):

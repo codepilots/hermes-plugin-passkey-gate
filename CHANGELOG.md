@@ -4,6 +4,38 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-09
+
+### Added
+
+- **Lanes: choose which conversations need a passkey.** Each agent turn is
+  placed in one of five lanes: `local` (you at this computer), `owner`
+  (your own chat accounts, listed in the new `owner_senders` setting),
+  `others` (anyone else, scheduled jobs, webhooks, unknown origins),
+  `bots` (senders the chat platform marks as bots) and `agents` (A2A
+  sessions and Hermes peer DMs). The new `gated_lanes` setting lists the
+  lanes enforcement applies to. It defaults to all five, so existing
+  setups behave as before. `setup` asks which lanes to gate when it
+  switches enforcement on, with presets for "everything", "when I'm not
+  at this computer" and "only other agents and bots".
+- The plugin learns each turn's origin from two documented Hermes hooks,
+  `post_gateway_admission` (bot flags) and `pre_llm_call` (platform,
+  sender, parent session). A session stays in the strictest lane it has
+  seen, and subagents inherit their parent's. A turn with no record is
+  gated unless Hermes reports a CLI, TUI, Desktop or ACP session.
+- Block messages name the lane that caused them.
+- README section "Choosing which chats need a passkey", covering how lanes
+  are detected and their limits (bot flags depend on the platform,
+  messages that steer a running turn aren't attributed, `owner` is only
+  as safe as your chat account).
+
+### Security
+
+- Narrowing `gated_lanes` or adding to `owner_senders` is a weakening
+  change: once enforcement is on, `set` needs a passkey approval for it.
+  `setup` may set both freely only while it is switching enforcement on
+  for the first time, and records that in the audit log.
+
 ## [0.7.2] - 2026-11-08
 
 ### Changed
