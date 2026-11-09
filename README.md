@@ -25,7 +25,7 @@ Discord DM, a QR code, any chat) and the agent verifies the answer locally.
   <tr>
     <td align="center"><img src="docs/images/phone-register.png" width="240" alt="Registration page: three numbered steps and a Create passkey button"></td>
     <td align="center"><img src="docs/images/phone-code.png" width="240" alt="After registering: a large confirmation code to type into the computer"></td>
-    <td align="center"><img src="docs/images/phone-approve.png" width="240" alt="Approval request: the action text, the exact bound command, Approve and Deny buttons"></td>
+    <td align="center"><img src="docs/images/phone-approve.png" width="240" alt="Approval request: the exact bound command first, then the agent's own description and reason, labelled as its words, and Approve and Deny buttons"></td>
   </tr>
   <tr>
     <td align="center"><sub><b>1.</b> Set up your passkey once</sub></td>
