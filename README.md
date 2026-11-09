@@ -50,7 +50,7 @@ Discord DM, a QR code, any chat) and the agent verifies the answer locally.
 **You need:**
 
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) with plugin
-  support (tested on v0.23)
+  support, v0.23 or later (the version it is tested on)
 - [Tailscale](https://tailscale.com) on this computer **and** your phone,
   signed in to the same tailnet, with HTTPS certificates enabled in the
   admin console. You can use your own HTTPS reverse proxy instead; see
@@ -79,7 +79,8 @@ The wizard takes about three minutes and checks each step before moving on:
 5. **Optionally switches on enforcement**: matching tool calls are blocked
    until you approve them. Choose *standard* (dangerous terminal commands and
    any code execution) or *strict* (every terminal command, code run and
-   file edit).
+   file edit), then which conversations it applies to (see
+   [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey)).
 
 Re-running `setup` is safe; finished steps are skipped. Run it in your own
 terminal, never through an agent: it decides which key is trusted.
@@ -99,13 +100,29 @@ again and it's blocked again: each approval is good for one execution.
   `tailscale status` and `tailscale serve` (to publish the HTTPS address,
   which adds a rule to your tailnet's serve configuration), and
   `systemctl --user`, `journalctl --user`, `loginctl` or `launchctl` (for
-  the background service). It never runs anything with elevated privileges.
+  the background service). `set authority_patterns` also starts a short
+  Python process to time each new pattern on long inputs. It never runs
+  anything with elevated privileges.
 - **Makes network requests** only to its own HTTPS address (health checks
   and verification), and to other people's gates only if you list them in
   `parent_gate_allowlist`. No third-party services, no telemetry.
 - **Stores** passkey public keys, requests, the pinned key, the audit log
   and the remote-minting token in its own Hermes plugin data folder. No
-  private keys are stored anywhere.
+  private keys are stored anywhere. It writes its settings, plus a random
+  check value (`config_canary`), into its own section of the Hermes config,
+  and writes outside its folder only where you point it: the audit anchor
+  file (`audit_notary_path`) and the service file.
+- **Watches, but never changes, your conversations.** Three Hermes hooks:
+  `pre_tool_call` blocks matching tool calls while enforcement is on;
+  `pre_llm_call` and `post_gateway_admission` note each turn's platform,
+  sender id and bot flag so lanes can work. Those notes stay in memory
+  (the last 4096 sessions), are never written to disk, and nothing is
+  added to the model's context.
+- **Fails closed.** With enforcement on, any failure (gate unreachable,
+  settings unreadable, an error in the hook) blocks the gated call rather
+  than letting it through.
+- **Who can do what.** Only the passkey you pinned can approve. Anyone who
+  has an approval link can read that request and deny it.
 
 ## How it works
 

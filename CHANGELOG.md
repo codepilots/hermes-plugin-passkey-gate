@@ -76,7 +76,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   torn last audit line no longer breaks `gate_status` or new entries, and
   `tool_call` must be an object.
 
+### Changed
+
+- **Minimum Hermes version is now 0.23.0** (`requires_hermes` in
+  `plugin.yaml` and the catalog entry). 0.23 is the only version the plugin
+  is tested on, and the lanes hooks need it.
+- README "What it does on your machine" now discloses everything catalog
+  rule 13 asks for (hooks and what they record, config writes, the pattern
+  timing process, failure behaviour, who can approve and deny), and the
+  catalog entry carries a matching disclosure sentence.
+
 ### Upgrading from 0.7.1 or earlier
+
+- Hermes 0.23.0 or later is required.
 
 - The config check (added in 0.7.2) isn't armed on upgraded installs until
   you run `hermes passkey-gate setup` or any `set` once. `status` says
