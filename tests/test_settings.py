@@ -75,7 +75,7 @@ def test_numeric_settings_reject_out_of_range_without_persistence():
 def test_numeric_settings_accept_range_boundaries():
     # fresh config per value: raising challenge_ttl is a gate-weakening
     # change (H11), so the max is checked from a config already at the max
-    for key, low, high in (("challenge_ttl", 1, 86400), ("port", 1, 65535)):
+    for key, low, high in (("challenge_ttl", 60, 86400), ("port", 1, 65535)):
         for value in (low, high):
             ctx = FakeCtx()
             if key == "challenge_ttl" and value == high:
@@ -264,7 +264,10 @@ def test_settings_spec_matches_manifest():
     manifest_path = Path(__file__).resolve().parents[1] / "plugin" / "plugin.yaml"
     manifest = yaml.safe_load(manifest_path.read_text())
     schema_keys = set((manifest.get("config_schema") or {}).keys())
-    assert schema_keys == set(cli.SETTINGS_SPEC.keys())
+    # config_canary is declared (so a schema-driven settings form keeps it)
+    # but is never settable with `set`
+    assert schema_keys == set(cli.SETTINGS_SPEC.keys()) | {cli.CANARY_KEY}
+    assert cli.CANARY_KEY not in cli.SETTINGS_SPEC
 
 
 # ---------------- finding 22: authority_patterns are validated at set time

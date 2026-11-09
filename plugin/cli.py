@@ -110,7 +110,10 @@ SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist
                  "challenge_ttl", "origin", "rp_id",
                  # v0.8 lanes: ungating a lane, or naming a sender as the
                  # owner, takes those conversations out of enforcement
-                 "gated_lanes", "owner_senders")
+                 "gated_lanes", "owner_senders",
+                 # v0.7 review A28: re-pointing the audit anchor at a file
+                 # someone else wrote would hide a rewritten audit log
+                 "audit_notary_path")
 
 _ctx_ref = None
 _cfg_cache = None
@@ -260,20 +263,30 @@ def stamp_config_canary(ctx):
     """Arm the check after an operator command wrote settings successfully.
     Config first, then the copy: if writing the config fails, the check is
     simply not armed yet (never a fail-closed caused by our own write)."""
-    if ctx is None or config_canary_problem(ctx):
+    if ctx is None:
         return
-    expected = _expected_canary()
-    if expected is not None:
-        return  # already armed, and the config matches
-    value = secrets.token_hex(8)
-    ctx.set_config(CANARY_KEY, value)
     path = _canary_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value)
-    os.replace(tmp, path)
+    # v0.7 review A29: check-and-arm under a cross-process lock, so two
+    # commands arming at once can't leave the config and the copy holding
+    # different values (a permanent fail-closed)
+    with gate_core.file_lock("config-canary.lock"):
+        if config_canary_problem(ctx):
+            return
+        expected = _expected_canary()
+        if expected is not None:
+            return  # already armed, and the config matches
+        value = secrets.token_hex(8)
+        ctx.set_config(CANARY_KEY, value)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.unlink()  # A28: never write through a planted link
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(value)
+        os.replace(tmp, path)
 
 
 def invalidate_config_cache():
@@ -297,22 +310,41 @@ def _load_config_state():
         # never registered: nothing has been configured, so default-off is
         # the honest state, not a failure
         return {"require_passkey": False, "patterns": []}
+    # v0.7 review L7: check the config BEFORE applying any of it. A config
+    # the check rejects must not set the origin, RP ID, request lifetime or
+    # peer allowlist the gate then runs with; the gate falls back to its
+    # built-in defaults (and enforcement fails closed) until it is restored.
+    try:
+        gate_core.set_data_dir(plugin_data(_ctx_ref))
+    except Exception:
+        pass
+    problem = config_canary_problem(_ctx_ref)
+    if problem:
+        logger.error("passkey-gate: %s; failing closed", problem)
+        try:
+            gate_core.configure(data_dir=str(plugin_data(_ctx_ref)))
+        except Exception:
+            pass
+        return {"require_passkey": True, "patterns": [], "_config_error": problem}
     try:
         cfg = apply_config(_ctx_ref)
     except Exception as exc:
         logger.exception("passkey-gate: config load failed; failing closed until it loads")
         return {"require_passkey": True, "patterns": [],
                 "_config_error": f"{type(exc).__name__}: {exc}"}
-    problem = config_canary_problem(_ctx_ref)
-    if problem:
-        logger.error("passkey-gate: %s; failing closed", problem)
-        return {"require_passkey": True, "patterns": [], "_config_error": problem}
     return cfg
+
+
+# v0.7 review L16: when the settings file can't be located (Hermes's config
+# path helper failed), reload on a timer instead of never
+CONFIG_RECHECK_S = 5
 
 
 def apply_config_safe():
     global _cfg_cache, _cfg_stamp
     stamp = _settings_stamp()
+    if stamp is None and _ctx_ref is not None:
+        stamp = ("timer", int(time.monotonic() // CONFIG_RECHECK_S))
     if _cfg_cache is None or stamp != _cfg_stamp:
         _cfg_cache = _load_config_state()
         _cfg_stamp = stamp
@@ -528,11 +560,12 @@ def cmd_show(ctx, rest):
     if row is None:
         return "no such challenge"
     st = row["status"] if row["status"] != "pending" or time_left(row) > 0 else "expired"
+    safe = gate_core.terminal_safe  # v0.7 review M7: never print agent text raw
     lines = [f"challenge: {cid}", f"status: {st}",
-             f"requester: {row['requester']}" +
-             (f" (agent of {row['requester_owner']})" if row["requester_owner"] else "")]
+             f"requester (as the agent named itself): {safe(row['requester'])}" +
+             (f" (agent of {safe(row['requester_owner'])})" if row["requester_owner"] else "")]
     if row["why"]:
-        lines.append(f"why: {row['why']}")
+        lines.append(f"why (agent's words): {safe(row['why'])}")
     if gate_core.origin():
         url = f"{gate_core.origin()}/a/{cid}"
         lines.append(f"url: {url}")
@@ -674,7 +707,7 @@ def _change_weakens(key, old, new):
             return int(new_n) > int(old_n if old_n is not None else DEFAULTS["challenge_ttl"])
         except (TypeError, ValueError):
             return True
-    if key in ("origin", "rp_id"):
+    if key in ("origin", "rp_id", "audit_notary_path"):
         # first-time setup (nothing configured yet) is free; moving an
         # established origin/RP ID is not
         old_s = (old_n or "").strip() if isinstance(old_n, str) or old_n is None else None
@@ -742,10 +775,13 @@ def _verify_weakening_approval(cid, phrase):
     # is the same phrase, and never one with a bound tool call (the page
     # would have told the human to judge the command, not this text)
     row = gate_core.db().execute(
-        "select kind, binding_sha256, tool_call, action_sha256 from challenges where id=?",
+        "select kind, binding_sha256, tool_call, action_sha256, challenge from challenges where id=?",
         (cid,)).fetchone()
     if (row is None or row["kind"] != gate_core.SETTINGS_KIND or row["binding_sha256"]
-            or row["tool_call"] or row["action_sha256"] != sha):
+            or row["tool_call"] or row["action_sha256"] != sha
+            # A29: the signed nonce must be the one stored HERE, not just
+            # whatever the fetched record says it was
+            or not gate_core.record_matches_local_challenge(rec, row["challenge"])):
         return ["this approval wasn't created by passkey-gate for a settings change, so it "
                 "can't authorise one — re-run the change without --approve to get the right "
                 "approval link"]
@@ -828,6 +864,7 @@ def _weakening_approval_used(key, cid):
 # turns enforcement on: with require_passkey off nothing is enforced yet, so
 # choosing the lanes is part of switching enforcement on, not a weakening.
 SETUP_FREE_WHILE_OFF = ("gated_lanes", "owner_senders")
+SET_TTL_MIN = 60
 
 
 def cmd_set(ctx, rest, *, _setup_enforcement_off=False):
@@ -869,6 +906,23 @@ def cmd_set(ctx, rest, *, _setup_enforcement_off=False):
                     f"{tools.MAX_PATTERN_COUNT} patterns in the list:\n  - "
                     + "\n  - ".join(problems)
                     + "\nFix the pattern(s) and re-run the same command.")
+    if key == "authority_patterns":
+        # v0.7 review L15: a pattern that backtracks catastrophically would
+        # hang every tool call it is checked against; refuse it here
+        slow = tools.slow_patterns(value)
+        if slow:
+            return ("REFUSED: authority_patterns rejected — nothing was saved. These "
+                    "patterns take too long on long inputs (catastrophic backtracking), "
+                    "which would stall every tool call they are checked against:\n  - "
+                    + "\n  - ".join(slow)
+                    + "\nRewrite them without nested repeats such as (a+)+ or (.*)*.")
+    if key == "challenge_ttl" and isinstance(value, int) and not isinstance(value, bool) \
+            and value < SET_TTL_MIN:
+        # L15: a lifetime this short would expire every approval before a
+        # human could sign it (the range check above allows it for tests)
+        return (f"REFUSED: challenge_ttl must be at least {SET_TTL_MIN} seconds (allowed "
+                f"range {SET_TTL_MIN}..{gate_core.CHALLENGE_TTL_MAX}) so a human has time to "
+                "approve. Nothing was saved.")
     if key == "gated_lanes":
         problems = lanes.validate(value)
         if problems:
@@ -892,6 +946,10 @@ def cmd_set(ctx, rest, *, _setup_enforcement_off=False):
                     f"change weakens the gate ({type(exc).__name__}: {exc}) — a "
                     "security-critical setting is never changed while its current "
                     "value is unreadable")
+        if key == "rp_id" and not (old or "").strip() and gate_core.credential_count():
+            # v0.7 review L8: with no RP ID configured, the default one is
+            # what registered passkeys are bound to; judge against that
+            old = gate_core.rp_id()
         weakens = _change_weakens(key, old, value)
         setup_free = (weakens and _setup_enforcement_off and key in SETUP_FREE_WHILE_OFF
                       and not bool(ctx.get_config("require_passkey", default=False)))
@@ -1007,7 +1065,7 @@ def cmd_status(ctx, rest):
     else:
         try:
             with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
-                out["gate"] = {**json.loads(r.read()), "reachable": r.status == 200}
+                out["gate"] = {**json.loads(netfetch.read_capped(r, 65536)), "reachable": r.status == 200}
         except Exception as exc:
             out["gate"] = {"reachable": False, **tools.gate_unreachable_reason(base, exc)}
     out["origin_configured"] = bool(base)

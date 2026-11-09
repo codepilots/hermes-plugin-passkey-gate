@@ -96,7 +96,17 @@ def _systemd_quote(arg: str) -> str:
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
+def _path_problem(name, value):
+    """v0.7 review L10: a control character (a newline above all) in a path
+    would add lines to the unit file or plist."""
+    if value is not None and any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in str(value)):
+        raise ValueError(f"{name} contains a control character (such as a newline), "
+                         "so it can't be written into a service file safely")
+
+
 def unit_text(exe: str, home: str | None) -> str:
+    _path_problem("the hermes executable path", exe)
+    _path_problem("HERMES_HOME", home)
     env = f"Environment={_systemd_quote('HERMES_HOME=' + home)}\n" if home else ""
     return ("[Unit]\n"
             "Description=passkey-gate: Hermes passkey approval gate (127.0.0.1 only)\n"
@@ -113,6 +123,8 @@ def unit_text(exe: str, home: str | None) -> str:
 
 
 def plist_text(exe: str, home: str | None) -> str:
+    _path_problem("the hermes executable path", exe)
+    _path_problem("HERMES_HOME", home)
     from xml.sax.saxutils import escape
     env = {"PYTHONUNBUFFERED": "1", **({"HERMES_HOME": home} if home else {})}
     env_xml = "".join(f"<key>{escape(k)}</key><string>{escape(v)}</string>" for k, v in env.items())
@@ -221,7 +233,11 @@ def install(port: int):
         path = unit_path()
         replaced = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(unit_text(exe, home))
+        try:
+            text = unit_text(exe, home)
+        except ValueError as exc:
+            return False, f"not installed: {exc}"
+        path.write_text(text)
         for cmd in (["systemctl", "--user", "daemon-reload"],
                     ["systemctl", "--user", "enable", UNIT_NAME],
                     ["systemctl", "--user", "restart", UNIT_NAME]):
@@ -245,7 +261,11 @@ def install(port: int):
     domain = f"gui/{os.getuid()}"
     if replaced:
         run(["launchctl", "bootout", f"{domain}/{LAUNCHD_LABEL}"])
-    path.write_text(plist_text(exe, home))
+    try:
+        text = plist_text(exe, home)
+    except ValueError as exc:
+        return False, f"not installed: {exc}"
+    path.write_text(text)
     rc, out = run(["launchctl", "bootstrap", domain, str(path)])
     if rc != 0:
         return False, f"launchctl bootstrap failed: {out}"

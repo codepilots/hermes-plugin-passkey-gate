@@ -233,11 +233,17 @@ def test_verify_uses_configured_notary_path(data, tmp_path):
 
 # ------------------------------------------------- settings contract
 
-def test_audit_notary_path_is_not_a_security_key():
-    """audit_notary_path only names where anchors are kept — deliberately NOT
-    in SECURITY_KEYS (finding 16 protects gate-enforcement settings only)."""
-    assert "audit_notary_path" in cli.SETTINGS_SPEC
-    assert "audit_notary_path" not in cli.SECURITY_KEYS
+def test_moving_the_audit_anchor_needs_approval_first_setting_is_free():
+    """v0.7 review A28: audit_notary_path is now protected. Pointing an
+    established anchor at another file (one an agent wrote) could hide a
+    rewritten audit log, so moving it needs a passkey; setting it the first
+    time is free, like origin."""
+    assert "audit_notary_path" in cli.SECURITY_KEYS
+    ctx = FakeCtx()
+    out = cli.dispatch(ctx, "set audit_notary_path /mnt/usb/anchor.jsonl")
+    assert ctx.store["audit_notary_path"] == "/mnt/usb/anchor.jsonl", out
+    out = cli.dispatch(ctx, "set audit_notary_path /tmp/agent-wrote-this.jsonl")
+    assert "REFUSED" in out and ctx.store["audit_notary_path"] == "/mnt/usb/anchor.jsonl"
 
 
 # ------------------- fresh-review F3: multi-process appends keep the chain intact

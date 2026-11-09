@@ -97,6 +97,13 @@ for _ in range(60):
 try:
     with urllib.request.urlopen(ORIGIN + "/health", timeout=3) as r:
         step("hermes passkey-gate serve → /health", json.loads(r.read())["status"] == "ok")
+    # v0.7 review L5: a DNS-rebinding page sends its own host name and is refused
+    r421 = urllib.request.Request(ORIGIN + "/health", headers={"Host": "attacker.example"})
+    try:
+        urllib.request.urlopen(r421, timeout=3); code = 200
+    except urllib.error.HTTPError as e:
+        code = e.code
+    step("request naming another host is refused (DNS rebinding)", code == 421, code)
     rc, out = hermes("set", "challenge_ttl", "300")   # lowering is free
     with urllib.request.urlopen(ORIGIN + "/health", timeout=3) as r:
         ttl = json.loads(r.read()).get("challenge_ttl_s")
@@ -153,6 +160,8 @@ try:
     step("approved call is ALLOWED exactly once", d.action != "block", d)
     d = _get_pre_tool_call_directive_details(call["tool"], call["args"])
     step("replay of the same call is BLOCKED (approval consumed)", d.action == "block", d)
+    s, r = post(f"/a/{cid}/deny", {})
+    step("denying an already-used request is an error, not 'denied'", s == 409, (s, r))
     # ---- lanes (v0.8): Hermes's own hook dispatch delivers turn origins
     from hermes_cli.lifecycle import invoke_hook
     risky = {"command": "rm -rf ./lane-cache"}

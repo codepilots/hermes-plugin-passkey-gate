@@ -36,6 +36,55 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `setup` may set both freely only while it is switching enforcement on
   for the first time, and records that in the audit log.
 
+### Security: the rest of the v0.7 review (A7–A30)
+
+- **Audit flooding (M6).** Requests that name no real approval request,
+  bad registration tokens and anonymous errors no longer write audit
+  lines. Appending reads only the end of the log instead of the whole
+  file, and `/health` no longer carries the audit head.
+- **Terminal and page spoofing (M7, L6).** Control, bidirectional and
+  invisible characters in the action text, requester, owner, reason or
+  parent owner are refused when a request is created; `show` escapes any
+  it finds. The approval page shows the bound command first and labels
+  the requester, description and reason as the agent's own words.
+- **HTTP hardening (L3, L4, L5).** Requests must name the gate's own host
+  or `localhost` (DNS rebinding is refused with 421). Traffic about a real
+  request has its own rate budget, so a flood can't lock you out of an
+  approval. Each connection has a 20-second deadline in total.
+- **Request caps (L2).** Requests minted over HTTP by remote agents are
+  limited to 50 of the 100 open requests.
+- **Peer fetches (L11, L12).** The address filter now refuses every
+  non-public address, including 100.64.0.0/10 and Tailscale's
+  100.100.100.100. A peer gate whose allowlist entry is a `*.ts.net` name
+  may still resolve to a tailnet address. Every response the plugin reads
+  is size-capped with an overall deadline.
+- **Settings (L7, L8, L15, L16, A28, A29).** A config the check rejects is
+  no longer applied to the gate's runtime settings. `set rp_id` is judged
+  against the RP ID your passkeys actually use. `set` refuses patterns
+  that backtrack catastrophically and request lifetimes under 60
+  seconds. Settings reload on a timer if the config file can't be
+  located. The config check is armed under a lock and declared in the
+  config schema. Moving `audit_notary_path` once set needs a passkey
+  approval. `set --approve` and `gate_verify` require the fetched record
+  to carry the nonce this gate stored.
+- **Robustness (L10, L13, L14, A26, A28, A30).** Control characters in
+  service paths are refused. Setup refuses an ambiguous code and warns
+  against copying codes from `credentials`. Denying a request that isn't
+  pending answers 409, not "denied". Registration and approval recheck
+  expiry when they complete. The mint token, the config check and the
+  Tailscale record are never read or written through a symbolic link. A
+  torn last audit line no longer breaks `gate_status` or new entries, and
+  `tool_call` must be an object.
+
+### Upgrading from 0.7.1 or earlier
+
+- The config check (added in 0.7.2) isn't armed on upgraded installs until
+  you run `hermes passkey-gate setup` or any `set` once. `status` says
+  "not armed yet" until then.
+- `challenge_ttl` can no longer be set below 60 seconds with `set`.
+- The approval page's deny call now answers 409 for a request that is no
+  longer pending; the bundled page handles it.
+
 ## [0.7.2] - 2026-11-08
 
 ### Changed

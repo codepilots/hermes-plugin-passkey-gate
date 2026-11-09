@@ -223,6 +223,12 @@ class Wizard:
             self.say("If you registered on your phone earlier and didn't finish (the phone now says")
             self.say("it already has a passkey for this gate), you can use that one: you'll need the")
             self.say("code its page showed. Otherwise make a new one.")
+            # v0.7 review L13: these passkeys were not registered after a QR
+            # this run showed, so the typed code is the only proof of whose
+            # they are
+            self.say("Only type the code YOUR phone showed. Don't copy one from 'hermes passkey-gate")
+            self.say("credentials': that lists every passkey registered here, including any you")
+            self.say("didn't make.")
             if self.confirm("Use a passkey that's already registered?", default=False):
                 return existing
         while True:
@@ -278,6 +284,11 @@ class Wizard:
                 self.say("  That doesn't match the passkey that was just registered. "
                          "Check the phone screen and type it again.")
                 continue
+            if len(match) > 1:
+                # L13: same rule as 'pin --code' — never pick one silently
+                self.say("✗ More than one registered passkey has that code, so it can't tell "
+                         "which is yours. Nothing was pinned. Run setup again for a fresh QR code.")
+                return False
             c = match[0]
             try:
                 local_verify.pin(gate_core.data_dir(), c["spki_pem"], None)

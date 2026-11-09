@@ -346,7 +346,9 @@ the data directory could rewrite the whole log consistently, so anchor the
 head now and then to a file **outside** that directory, somewhere agents
 can't write. `audit-verify` then reports `INTACT AND NOTARIZED`,
 `GROWN SINCE NOTARIZATION`, or `DIVERGED` (rewritten or truncated). Set
-`audit_notary_path` once to drop the flags.
+`audit_notary_path` once to drop the flags. Setting it the first time is
+free; moving it later needs your passkey, since a file someone else wrote
+could hide a rewritten log.
 
 ## Reference
 
@@ -454,8 +456,26 @@ setup, approvals are an honest record, not a boundary.
   six-word minimum only goes so far.
 - **Approval links can be read by anyone who has them.** Reading a request
   can't approve it, but anyone holding the link can see the action text.
-- **Request flooding is capped** at 10 open requests per agent and 100 in
-  total.
+- **Request flooding is capped,** but only roughly. Each requester name may
+  have 10 open requests and the gate 100. The name is whatever the agent
+  says, so one agent can use several names. Requests from remote agents
+  (minted over HTTP) are limited to 50, so the agents on this computer
+  always keep some room, and your own settings requests are never refused
+  by the cap.
+- **The gate only answers for its own address.** A request whose `Host`
+  is not the configured origin's host (or `localhost`) is refused, which
+  stops websites using DNS rebinding to reach a gate on your computer.
+  Traffic about a real request (its page, approve and deny) has its own
+  rate budget, so junk requests can't lock you out of an approval.
+- **Anyone with an approval link can deny it,** as well as read it. Denying
+  is always safe (nothing runs); it can only get in the way.
+- **Agent-written text is checked, not trusted.** Requests whose text
+  contains control, bidirectional or invisible characters are refused, the
+  page labels the requester, description and reason as the agent's words,
+  and the bound command comes first. `show` escapes anything odd it finds.
+- **Patterns can't be bounded at run time.** Python regexes have no timeout,
+  so `set` refuses patterns that backtrack badly on long inputs; a pattern
+  edited into the config file directly isn't checked.
 
 The full threat model, including the risks deliberately left out of scope,
 is in [docs/security-review/threat-model.md](docs/security-review/threat-model.md).
@@ -473,6 +493,7 @@ later independent reviews and the record of every finding and fix are in
 | Setup says the port is used by "a program that isn't this gate" | Something else, or an older `passkey-gate serve`, holds the port. Accept the suggested free port, or stop the other program. |
 | The phone can't open the link | The phone isn't on your tailnet, or Tailscale HTTPS certificates aren't enabled. |
 | "This setup link has expired or was already used" | Registration links last 15 minutes and work once. Run `setup` again for a fresh QR code. |
+| `status` says the config check is "not armed yet" | You upgraded from v0.7.1 or earlier, where the check didn't exist. Run `hermes passkey-gate setup` (or any `set`) once to arm it. |
 | Every gated call is blocked: "the Hermes config wasn't read as expected" | The gate's settings were lost or replaced (a reset, an edit, another profile's config), so it fails closed instead of running with enforcement off. Restore the settings. If you replaced them on purpose, delete `config-canary` in the gate's data folder and run `setup` again. |
 | The phone says it already has a passkey for this gate | It registered earlier but its code was never typed in. Run `setup` again and choose to use the passkey that's already registered. If you've lost the code, delete that passkey in the phone's password settings and start again. |
 | The code you type doesn't match | You're reading a different passkey's code. Nothing is pinned until it matches; run `setup` again if in doubt. |

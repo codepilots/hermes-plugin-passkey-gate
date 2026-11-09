@@ -14,6 +14,7 @@ internal host (``private_network_problem``).
 """
 import ipaddress
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +43,33 @@ _opener = urllib.request.build_opener(_NoRedirectHandler)
 def open_no_redirect(url, timeout=10):
     """GET a URL with urlopen semantics except redirects raise RedirectBlocked."""
     return _opener.open(url, timeout=timeout)
+
+
+# v0.7 review L12: every response body the plugin reads is capped, and the
+# whole read has a deadline (the socket timeout alone restarts on each byte)
+MAX_RESPONSE_BYTES = 256 * 1024
+READ_DEADLINE_S = 15
+
+
+class ResponseTooLarge(ValueError):
+    pass
+
+
+def read_capped(resp, limit=MAX_RESPONSE_BYTES, deadline_s=READ_DEADLINE_S) -> bytes:
+    """The response body, refusing more than `limit` bytes or a read that
+    runs past `deadline_s` seconds in total."""
+    end = time.monotonic() + deadline_s
+    chunks, total = [], 0
+    while True:
+        if time.monotonic() > end:
+            raise TimeoutError("response took too long to arrive")
+        chunk = resp.read(min(16384, limit + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise ResponseTooLarge(f"response larger than {limit} bytes")
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -122,7 +150,34 @@ def _address_problem(raw: str):
         return "a multicast address"
     if ip.is_reserved:
         return "a reserved address"
+    if not ip.is_global:
+        # v0.7 review L11: everything else that isn't public, notably
+        # 100.64.0.0/10 (carrier-grade NAT, Tailscale's addresses and its
+        # 100.100.100.100 service address)
+        return "a non-public address"
     return None
+
+
+# A parent gate on the same tailnet is a normal setup: its MagicDNS name
+# (*.ts.net) resolves to a Tailscale address. Those addresses are accepted
+# only for an allowlist entry that is itself a *.ts.net name, and never
+# Tailscale's own service address.
+TAILNET_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+TAILSCALE_SERVICE_ADDRS = frozenset({ipaddress.ip_address("100.100.100.100"),
+                                     ipaddress.ip_address("fd7a:115c:a1e0::53")})
+
+
+def _tailnet_ok(entry_host: str, raw: str) -> bool:
+    if not entry_host or not entry_host.lower().rstrip(".").endswith(".ts.net"):
+        return False
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return ip not in TAILSCALE_SERVICE_ADDRS and any(ip in n for n in TAILNET_NETS)
 
 
 def _entry_names_literal_internal_host(entry_host: str) -> bool:
@@ -140,7 +195,7 @@ def _entry_names_literal_internal_host(entry_host: str) -> bool:
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped
-    return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+    return bool(ip.is_loopback or ip.is_private or ip.is_link_local or not ip.is_global)
 
 
 def _resolve_checked(host, allowlist_entry_host, resolver=None):
@@ -165,6 +220,8 @@ def _resolve_checked(host, allowlist_entry_host, resolver=None):
         except Exception:
             return "parent gate host could not be resolved", None
         problem = _address_problem(raw)
+        if problem and _tailnet_ok(allowlist_entry_host, raw):
+            problem = None
         if problem:
             return f"parent gate host resolves to {problem}", None
         if chosen is None:

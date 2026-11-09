@@ -15,7 +15,7 @@ committed; the test names cited are in `tests/`.
 
 **Open items (8 Nov 2026):**
 
-- A1–A30: findings of the [v0.7 adversarial review](adversarial-review-v0.7.md); A1, A2, A4–A6, A10 fixed, A3/A11/A15 partly, A9 documented, the rest queued (see the end of this ledger).
+- A1–A30: findings of the [v0.7 adversarial review](adversarial-review-v0.7.md); all fixed except A3, A11 and A24 (partly) and A9 (documented); see the end of this ledger.
 
 - H9: a demo recording for the README.
 - D1: deferred refinement — derive `action_text` from the `tool_call` at mint time.
@@ -637,27 +637,27 @@ reviewer (M3 reproduced in real Hermes v0.23). Status legend adds 🟡 partially
 | A4 | M3: corrupted canary file makes the hook fail open (introduced with the canary) | MEDIUM | ✅ v0.7.2 — any canary read error fails closed; hook body wrapped (any exception blocks); hook registered before settings load; `task_id` optional; verified in real Hermes; 2 tests |
 | A5 | M4: `GATE_DATA` override lets a settings approval be replayed | MEDIUM | ✅ v0.7.2 — inside Hermes the data folder is always Hermes's; `GATE_DATA` honoured only outside; verified in real Hermes; 1 test |
 | A6 | M5: settings-change phrase hides what is removed | MEDIUM | ✅ v0.7.2 — phrase names the change (REMOVES/ADDS, turns enforcement OFF) and old → new values, so an approval only applies to the state it was granted for; 2 tests |
-| A7 | M6: anonymous audit-log flooding | MEDIUM | ⬜ |
-| A8 | M7: terminal escape sequences via `show` | MEDIUM | ⬜ |
+| A7 | M6: anonymous audit-log flooding | MEDIUM | ✅ v0.8.0 — no audit line for unknown ids, bad tokens or anonymous errors; tail-cached append (no full re-read); `/health` drops the audit head; tests |
+| A8 | M7: terminal escape sequences via `show` | MEDIUM | ✅ v0.8.0 — control/bidi/invisible characters refused at creation in every agent field; `show` escapes; tests |
 | A9 | M8: approvals bind command text, not what it depends on | MEDIUM | 📝 v0.7.2 — documented in README known limits and the threat model; not fixed |
 | A10 | L1: probe/local_health follow redirects; expose/status don't check instance | LOW | ✅ v0.7.2 — `local_health` uses http.client (no redirects, no proxies, bounded read); `expose`'s TLS probe and setup check the instance; 1 test |
-| A11 | L2: request cap per self-declared name; global cap starves the CLI | LOW | 🟡 v0.7.2 partial — settings requests no longer starved by the global cap; per-agent quota is still per self-declared name |
-| A12 | L3: GET cap lockout lasts as long as the flood | LOW | ⬜ |
-| A13 | L4: slow clients fill connection slots | LOW | ⬜ |
-| A14 | L5: no Host check (DNS rebinding) | LOW | ⬜ |
-| A15 | L6: bidi/invisible Unicode and page imitation in agent text | LOW | 🟡 v0.7.2 partial — `hermes-cli` requester reserved; bidi/invisible Unicode still rendered |
-| A16 | L7: rejected config still applied to runtime settings | LOW | ⬜ |
-| A17 | L8: `set rp_id` free while a default RP ID is in effect | LOW | ⬜ |
-| A18 | L9: upgraded installs not armed; no upgrade note | LOW | ⬜ |
-| A19 | L10: newline injection into the systemd unit | LOW | ⬜ |
-| A20 | L11: SSRF filter misses 100.64.0.0/10 | LOW | ⬜ |
-| A21 | L12: unbounded fetch reads, no overall deadline | LOW | ⬜ |
-| A22 | L13: existing-passkey path drops the after-QR restriction | LOW | ⬜ |
-| A23 | L14: deny on non-pending returns 200 "denied" | LOW | ⬜ |
-| A24 | L15: free strengthening changes can deny service | LOW | ⬜ |
-| A25 | L16: cache freshness depends on `get_config_path` | LOW | ⬜ |
-| A26 | INFO: registration/approval expiry edges | INFO | ⬜ |
-| A27 | INFO: /health activity signal; bearer can deny | INFO | ⬜ |
-| A28 | INFO: symlink-following writes; serve record; notary path unprotected | INFO | ⬜ |
-| A29 | INFO: canary arming race; schema; fetched-record trust | INFO | ⬜ |
-| A30 | INFO: robustness: torn audit line, non-object tool_call, prose guard | INFO | ⬜ |
+| A11 | L2: request cap per self-declared name; global cap starves the CLI | LOW | 🟡 v0.8.0 — HTTP-minted requests capped at 50 of 100, so remote agents can't starve local ones; local per-agent quota is still per self-declared name (README says so) |
+| A12 | L3: GET cap lockout lasts as long as the flood | LOW | ✅ v0.8.0 — separate rate budget for traffic about real requests and the registration page; test |
+| A13 | L4: slow clients fill connection slots | LOW | ✅ v0.8.0 — 20 s whole-request deadline per connection; test |
+| A14 | L5: no Host check (DNS rebinding) | LOW | ✅ v0.8.0 — Host must be the origin's host or a loopback name (421 otherwise); test + e2e step |
+| A15 | L6: bidi/invisible Unicode and page imitation in agent text | LOW | ✅ v0.8.0 — characters refused; bound command shown first; agent fields labelled as the agent's words; tests |
+| A16 | L7: rejected config still applied to runtime settings | LOW | ✅ v0.8.0 — config check runs before anything is applied; built-in defaults until restored; test |
+| A17 | L8: `set rp_id` free while a default RP ID is in effect | LOW | ✅ v0.8.0 — judged against the effective RP ID once passkeys exist; test |
+| A18 | L9: upgraded installs not armed; no upgrade note | LOW | ✅ v0.8.0 — upgrade note in CHANGELOG and README troubleshooting; `status` already reports "not armed yet" |
+| A19 | L10: newline injection into the systemd unit | LOW | ✅ v0.8.0 — control characters in service paths refused (unit and plist); tests |
+| A20 | L11: SSRF filter misses 100.64.0.0/10 | LOW | ✅ v0.8.0 — all non-global addresses refused; tailnet addresses only for `*.ts.net` allowlist entries, never 100.100.100.100; tests |
+| A21 | L12: unbounded fetch reads, no overall deadline | LOW | ✅ v0.8.0 — `netfetch.read_capped` (size cap + overall deadline) on every fetch; test |
+| A22 | L13: existing-passkey path drops the after-QR restriction | LOW | ✅ v0.8.0 — ambiguous code refused; warning not to copy codes from `credentials` |
+| A23 | L14: deny on non-pending returns 200 "denied" | LOW | ✅ v0.8.0 — 409 `not pending`; page updated; test + e2e step |
+| A24 | L15: free strengthening changes can deny service | LOW | 🟡 v0.8.0 — `set` refuses catastrophically backtracking patterns (probed in a killable subprocess) and `challenge_ttl` < 60; a broad pattern like `.*` is still allowed (it is strict mode); no run-time regex timeout exists in Python |
+| A25 | L16: cache freshness depends on `get_config_path` | LOW | ✅ v0.8.0 — timer reload every 5 s when the file can't be stamped; test |
+| A26 | INFO: registration/approval expiry edges | INFO | ✅ v0.8.0 — both completions recheck expiry in their UPDATE; test |
+| A27 | INFO: /health activity signal; bearer can deny | INFO | ✅ v0.8.0 — audit head removed from `/health`; deny-by-link documented in README |
+| A28 | INFO: symlink-following writes; serve record; notary path unprotected | INFO | ✅ v0.8.0 — no-follow reads/writes for mint token, canary, audit log and serve record; `audit_notary_path` protected (moving it needs approval); a planted serve record still needs data-folder write access, which already defeats the gate |
+| A29 | INFO: canary arming race; schema; fetched-record trust | INFO | ✅ v0.8.0 — arming under a file lock; `config_canary` in `config_schema`; fetched records must carry the locally stored nonce; tests |
+| A30 | INFO: robustness: torn audit line, non-object tool_call, prose guard | INFO | ✅ v0.8.0 — torn line tolerated (and still reported by audit-verify); `tool_call` must be an object; prose guard left as is by design (the hook enforces regardless, and widening it would refuse legitimate text-only approvals) |

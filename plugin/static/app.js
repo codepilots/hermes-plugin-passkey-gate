@@ -70,11 +70,11 @@ document.addEventListener("DOMContentLoaded", () => {
                              : "Denied. Nothing will happen. You can close this page.", cls);
   };
   if (a) a.onclick = () => { a.disabled = true; approve(cidEl.dataset.id).then(() => done("approved", "ok")).catch(e => { a.disabled = false; msg(e && e.name === "NotAllowedError" ? "Not approved: cancelled or timed out. Tap Approve to try again." : "Not approved: " + e.message, "err"); }); };
-  if (d) d.onclick = () => post(`/a/${cidEl.dataset.id}/deny`).then(j => {
-    // the gate answers 200 with an error when the request was no longer pending
-    if (j && j.error) { a && a.remove(); d.remove(); msg("Nothing changed: this request was already decided or has expired. Reload the page to see its status.", "err"); }
-    else done("denied", "err");
-  }).catch(e => msg(e.message, "err"));
+  if (d) d.onclick = () => post(`/a/${cidEl.dataset.id}/deny`).then(() => done("denied", "err")).catch(e => {
+    // the gate answers 409 when the request was no longer pending
+    if (/not pending/.test(e.message)) { a && a.remove(); d.remove(); msg("Nothing changed: this request was already decided or has expired. Reload the page to see its status.", "err"); }
+    else msg(e.message, "err");
+  });
   if (g) {
     const token = location.hash.slice(1);
     history.replaceState(null, "", location.pathname);  // drop the token from the address bar

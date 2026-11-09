@@ -247,8 +247,12 @@ data folder. On every load, if the copy exists but the config's value is
 missing or different, the gate fails closed: gated calls are blocked with a
 message saying the settings weren't read, and `set`, `expose` and `setup`
 refuse to write (writing into a lost config could replace the real settings
-and then "match"). With no copy, the gate was never configured, and
-default-off is the honest state. It uses only the public plugin API.
+and then "match"). With no copy, either the gate was never configured
+(default-off is the honest state) or it was upgraded from v0.7.1 or
+earlier and hasn't been armed yet; `status` reports "not armed yet" until
+the operator runs `setup` or any `set` (v0.7 review L9). A config the check
+rejects is not applied to the gate's runtime settings either (L7). It uses
+only the public plugin API.
 
 What it catches, checked in Hermes v0.23: the settings block removed or
 reset while the YAML still parses, the config replaced by an older or

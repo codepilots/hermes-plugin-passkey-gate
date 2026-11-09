@@ -28,6 +28,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -210,8 +211,48 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 # frees its slot immediately, so throttling never outlives the TTL.
 MAX_PENDING_CHALLENGES_PER_REQUESTER = 10
 MAX_PENDING_CHALLENGES_TOTAL = 100
+# v0.7 review L2: the per-requester cap counts a name the agent chooses, so a
+# caller can rotate names. Requests minted over HTTP (remote agents holding
+# the mint token) get their own share of the gate-wide cap, so they can't
+# crowd out the agents on this computer.
+HTTP_SOURCE = "http"
+MAX_PENDING_CHALLENGES_HTTP = 50
 
 _lock = threading.Lock()
+
+
+def set_data_dir(path):
+    """Point the gate at its data folder without touching any other setting."""
+    global _plugin_data_dir
+    _plugin_data_dir = Path(path)
+
+
+def record_matches_local_challenge(rec, local_challenge) -> bool:
+    """v0.7 review A29: a fetched approval record must carry exactly the
+    nonce this gate stored for that request."""
+    try:
+        return hmac.compare_digest(str(rec.get("challenge_b64url") or ""),
+                                   bytes_to_base64url(bytes(local_challenge)))
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def file_lock(name: str):
+    """Cross-process lock on a file in the data folder (POSIX flock)."""
+    d = data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / name, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -269,7 +310,9 @@ def db():
                          ("parent_verified", "TEXT"), ("tool_call", "TEXT"), ("consumed_at", "REAL"),
                          # v0.7 review M1: 'settings' marks a challenge the gate's own
                          # CLI minted for a settings change; nothing agents call sets it
-                         ("kind", "TEXT")):
+                         ("kind", "TEXT"),
+                         # L2: 'http' marks a challenge minted over HTTP
+                         ("source", "TEXT")):
         try:
             c.execute(f"alter table challenges add column {col} {coltype}")
         except sqlite3.OperationalError:
@@ -287,6 +330,62 @@ def _safe_rollback(c):
         pass
 
 
+# v0.7 review M6: appending used to re-read the whole log every time, so its
+# cost grew with the log. The tail (last good record + whether the file ends
+# mid-line) is cached against the file's identity and size, and on a miss
+# only the end of the file is read.
+_TAIL_CHUNK = 64 * 1024
+_tail_cache: dict = {}
+
+
+def _file_key(path: Path):
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _read_tail(path: Path):
+    """(last parseable record or None, file ends with a newline?). Reads
+    backwards from the end only as far as the last complete record. A torn
+    final line (a crash mid-write) is skipped, not fatal (A30)."""
+    key = _file_key(path)
+    if key is None:
+        return None, True
+    if _tail_cache.get("key") == key:
+        return _tail_cache["last"], _tail_cache["clean"]
+    size = key[3]
+    last, clean = None, True
+    with open(path, "rb") as f:
+        if size:
+            f.seek(size - 1)
+            clean = f.read(1) == b"\n"
+        end, buf = size, b""
+        while end > 0 and last is None:
+            start = max(0, end - _TAIL_CHUNK)
+            f.seek(start)
+            buf = f.read(end - start) + buf
+            end = start
+            lines = buf.split(b"\n")
+            # lines[0] may be partial unless we reached the start of the file
+            candidates = lines if end == 0 else lines[1:]
+            for raw in reversed(candidates):
+                if not raw.strip():
+                    continue
+                try:
+                    rec = json.loads(raw)
+                    if isinstance(rec, dict) and "hash" in rec and "seq" in rec:
+                        last = rec
+                        break
+                except ValueError:
+                    continue
+            if end > 0 and last is None:
+                buf = lines[0]
+    _tail_cache.update(key=key, last=last, clean=clean)
+    return last, clean
+
+
 def audit(event, **fields):
     """Append to a hash-chained JSONL log. Each line commits to the previous
     line's hash, so an edit or deletion WITHIN the file breaks the chain.
@@ -296,29 +395,32 @@ def audit(event, **fields):
     path = data_dir() / "audit.jsonl"
     with _audit_lock():
         prev, seq = "0" * 64, 0
-        if path.exists():
-            lines = path.read_text().splitlines()
-            if lines:
-                last = json.loads(lines[-1])
-                prev, seq = last["hash"], last["seq"] + 1
+        last, clean = _read_tail(path)
+        if last is not None:
+            prev, seq = last["hash"], last["seq"] + 1
         rec = {"seq": seq, "ts": time.time(), "event": event, **fields, "prev": prev}
         body = json.dumps(rec, sort_keys=True, separators=(",", ":"))
         rec["hash"] = hashlib.sha256(body.encode()).hexdigest()
-        with open(path, "a") as f:
-            f.write(json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n")
+        line = json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n"
+        if not clean:
+            # a torn last line: start on a fresh line so this record stays
+            # readable; audit-verify still reports the torn line
+            line = "\n" + line
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(path, 0o600)
+        _tail_cache.update(key=_file_key(path), last=rec, clean=True)
         return rec["hash"]
 
 
 def audit_head():
     path = data_dir() / "audit.jsonl"
     with _audit_lock():
-        if not path.exists():
-            return None
-        lines = path.read_text().splitlines()
-    return json.loads(lines[-1])["hash"] if lines else None
+        last, _ = _read_tail(path)
+    return last["hash"] if last else None
 
 
 def audit_checkpoints():
@@ -333,8 +435,11 @@ def audit_checkpoints():
     with _audit_lock():
         lines = path.read_text().splitlines() if path.exists() else []
     for i, line in enumerate(lines):
-        rec = json.loads(line)
-        h = rec.pop("hash")
+        try:
+            rec = json.loads(line)
+            h = rec.pop("hash")
+        except (ValueError, AttributeError, KeyError):
+            return False, f"unreadable line {i} (torn or edited)", heads
         if rec["seq"] != i or rec["prev"] != prev:
             return False, f"chain broken at line {i}", heads
         if hashlib.sha256(json.dumps(rec, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != h:
@@ -369,6 +474,51 @@ def canonical_binding(tool_call: dict) -> str:
     """Canonical hash of a structured tool call — what the enforcement hook
     re-derives at execution time so a challenge covers exactly one action."""
     return sha256_hex(canonical_binding_json(tool_call))
+
+
+# v0.7 review M7/L6: characters that can rewrite the operator's terminal
+# (control characters, escape sequences) or make a page show text other than
+# what is signed (bidi overrides, zero-width and other invisible format
+# characters, line/paragraph separators). Agent-supplied text containing them
+# is refused at creation, and every place that prints stored text escapes it.
+# (Arabic letter mark, Hangul fillers, Mongolian vowel separator)
+_BIDI_AND_INVISIBLE = frozenset(map(chr, (0x061C, 0x115F, 0x1160, 0x180E, 0x3164, 0xFFA0)))
+
+
+def _unsafe_char(ch: str, allow_newlines: bool) -> bool:
+    if allow_newlines and ch in "\n\t":
+        return False
+    cat = unicodedata.category(ch)
+    # Cc control, Cf format (bidi controls, zero-width, BOM, soft hyphen),
+    # Zl/Zp line and paragraph separators, Co private use, Cs surrogates, Cn unassigned
+    return cat in ("Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn") or ch in _BIDI_AND_INVISIBLE
+
+
+def text_problem(field: str, text, allow_newlines: bool = False):
+    """Why `text` may not be shown to the human as-is, or None."""
+    if not isinstance(text, str):
+        return None
+    for ch in text:
+        if _unsafe_char(ch, allow_newlines):
+            return (f"{field} contains a control, bidirectional or invisible character "
+                    f"(U+{ord(ch):04X}); these can make the approval page or the operator's "
+                    "terminal show something other than what is signed, so they are refused")
+    return None
+
+
+def terminal_safe(text) -> str:
+    """Stored text made safe to print in a terminal: every character
+    text_problem() would refuse is shown as an escape (\\x1b, \\u202e) instead
+    of being interpreted. Newlines and tabs survive."""
+    s = "" if text is None else str(text)
+    out = []
+    for ch in s:
+        if _unsafe_char(ch, True):
+            o = ord(ch)
+            out.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def specificity_problem(text):
@@ -407,7 +557,8 @@ RESERVED_REQUESTERS = ("hermes-cli",)
 
 def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
                      requester_owner: str | None = None, why: str | None = None,
-                     parent_approval: dict | None = None, *, _kind: str | None = None) -> GateResult:
+                     parent_approval: dict | None = None, *, _kind: str | None = None,
+                     _source: str | None = None) -> GateResult:
     """Mint a challenge bound to exact action text (and optionally a canonical tool call).
 
     The challenge's WebAuthn nonce embeds sha256(action_text), so the signed
@@ -440,6 +591,18 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                          "settings requests; use your own agent name")
     if _kind == SETTINGS_KIND and tool_call is not None:
         raise ValueError("a settings challenge is text-only")
+    if tool_call is not None and not (isinstance(tool_call, dict)
+                                      and isinstance(tool_call.get("tool"), str)
+                                      and isinstance(tool_call.get("args", {}), dict)):
+        # v0.7 review A30: anything else would be shown as "the exact command"
+        # but could never match a real call
+        raise ValueError("tool_call must be an object shaped {\"tool\": <name>, \"args\": {...}}")
+    for field, value, multiline in (("requester", requester, False),
+                                    ("requester_owner", requester_owner, False),
+                                    ("why", why, False), ("action_text", action_text, True)):
+        prob = text_problem(field, value, multiline)
+        if prob:
+            raise ValueError(prob)
     owner = (requester_owner or "").strip()
     if len(owner) > 64:
         raise ValueError("requester_owner must be at most 64 chars")
@@ -460,6 +623,9 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                 "action_sha256": str(parent_approval["action_sha256"]).strip().lower(),
                 "owner": str(parent_approval.get("owner", "")).strip()[:64],
             }
+            prob = text_problem("parent_approval.owner", parent["owner"])
+            if prob:
+                raise ValueError(prob)
             if not ID_RE.match(parent["challenge_id"]) or not SHA_RE.match(parent["action_sha256"]):
                 raise ValueError("challenge_id/action_sha256 malformed")
             # finding 23: parse the base — the old https:// prefix check let
@@ -518,12 +684,20 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                 f"all requesters (max {MAX_PENDING_CHALLENGES_TOTAL}). The gate will "
                 "not bury the human in approval pages; resolve or let pending "
                 "challenges expire first.")
+        if _source == HTTP_SOURCE:
+            remote = c.execute("select count(*) from challenges where status='pending'"
+                               " and expires_at>=? and source=?", (now, HTTP_SOURCE)).fetchone()[0]
+            if remote >= MAX_PENDING_CHALLENGES_HTTP:
+                raise ChallengeLimitError(
+                    f"challenge limit reached for remote agents: {remote} requests minted "
+                    f"over HTTP are pending (max {MAX_PENDING_CHALLENGES_HTTP}); the rest "
+                    "of the gate's capacity is kept for the agents on this computer.")
         c.execute(
             "insert into challenges(id,action_text,action_sha256,binding_sha256,tool_call,requester,"
-            "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status,kind)"
-            " values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?)",
+            "requester_owner,why,parent_approval,parent_verified,challenge,created_at,expires_at,status,kind,"
+            "source) values(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',?,?)",
             (cid, text, sha, binding, binding_json, requester, owner or None, why or None,
-             parent_json, pv, chal, now, now + challenge_ttl(), _kind))
+             parent_json, pv, chal, now, now + challenge_ttl(), _kind, _source))
         c.execute("COMMIT")
     except ChallengeLimitError as exc:
         _safe_rollback(c)
@@ -719,7 +893,11 @@ def approve_finish(cid: str, assertion: dict):
     WebAuthn, not a gate defect (finding 13's limitation).
     """
     row = db().execute("select * from challenges where id=?", (cid,)).fetchone()
-    if row is None or row["status"] != "pending":
+    if row is None:
+        # v0.7 review M6: no audit line for an id that doesn't exist —
+        # anyone can send those, and they would bury real events
+        return {"error": "not pending", "status": "denied"}
+    if row["status"] != "pending":
         audit("approve_rejected", challenge_id=cid, reason="not pending")
         return {"error": "not pending", "status": "denied"}
     if time.time() > row["expires_at"]:
@@ -794,9 +972,9 @@ def approve_finish(cid: str, assertion: dict):
         return {"error": problem, "status": "denied"}
     cur = c.execute("update challenges set status='approved', decided_at=?, credential_id=?,"
                     " authenticator_data=?, client_data_json=?, signature=?, user_handle=?"
-                    " where id=? and status='pending'",
+                    " where id=? and status='pending' and expires_at>=?",
                     (time.time(), cred_id, resp["authenticatorData"], resp["clientDataJSON"],
-                     resp["signature"], resp.get("userHandle"), cid))
+                     resp["signature"], resp.get("userHandle"), cid, time.time()))
     if cur.rowcount != 1:  # lost a race / replay: single use
         audit("approve_rejected", challenge_id=cid, reason="already decided")
         return {"error": "already decided", "status": "denied"}
@@ -806,14 +984,18 @@ def approve_finish(cid: str, assertion: dict):
 
 
 def deny(cid: str):
+    """Deny a pending request. A request that is no longer pending (already
+    approved, denied or expired) is an error, never a "denied" answer that
+    an API client could mistake for a refusal (v0.7 review L14)."""
     row = db().execute("select * from challenges where id=?", (cid,)).fetchone()
     if row is None or row["status"] != "pending" or time.time() > row["expires_at"]:
-        return {"error": "not pending", "status": "denied"}
+        return {"error": "not pending"}
     cur = db().execute("update challenges set status='denied', decided_at=? where id=? and status='pending'",
                        (time.time(), cid))
-    if cur.rowcount == 1:
-        audit("challenge_denied", challenge_id=cid, action_sha256=row["action_sha256"],
-              requester=row["requester"], outcome="denied")
+    if cur.rowcount != 1:
+        return {"error": "not pending"}
+    audit("challenge_denied", challenge_id=cid, action_sha256=row["action_sha256"],
+          requester=row["requester"], outcome="denied")
     return {"status": "denied"}
 
 
@@ -879,6 +1061,14 @@ def list_credentials() -> list[dict]:
 MINT_TOKEN_NAME = "mint-token"
 
 
+def _read_nofollow(path) -> str:
+    """Read a small data-folder file without following a symlink planted in
+    its place (v0.7 review A28)."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "r") as f:
+        return f.read(64 * 1024)
+
+
 def mint_api_token() -> str:
     """The bearer token that HTTP `POST /challenge` requires — created once
     (0600, O_EXCL) in the gate data dir. The operator hands it to remote
@@ -887,7 +1077,7 @@ def mint_api_token() -> str:
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        return path.read_text().strip()
+        return _read_nofollow(path).strip()
     try:
         tok = secrets.token_urlsafe(32)
         os.write(fd, tok.encode())
@@ -901,9 +1091,10 @@ def mint_token_ok(header) -> bool:
     if not isinstance(header, str) or not header.startswith("Bearer "):
         return False
     path = data_dir() / MINT_TOKEN_NAME
-    if not path.exists():
+    try:
+        expected = _read_nofollow(path).strip()
+    except OSError:
         return False
-    expected = path.read_text().strip()
     return bool(expected) and hmac.compare_digest(header[7:].strip().encode(), expected.encode())
 
 
@@ -948,7 +1139,9 @@ def registration_finish(token: str, session_id: str, credential: dict):
     th = hashlib.sha256(token.encode()).hexdigest() if isinstance(token, str) and len(token) >= 20 else None
     sess = db().execute("select * from reg_sessions where id=?", (session_id,)).fetchone()
     if th is None or sess is None or sess["token_hash"] != th or time.time() > sess["expires_at"]:
-        audit("register_rejected", reason="bad session/token")
+        if sess is not None:
+            # M6: only a real session is worth a line; junk ids are not
+            audit("register_rejected", reason="bad session/token")
         return {"error": "registration session invalid"}
     try:
         v = verify_registration_response(credential=credential, expected_challenge=sess["challenge"],
@@ -958,8 +1151,10 @@ def registration_finish(token: str, session_id: str, credential: dict):
         audit("register_rejected", reason=f"attestation invalid: {type(exc).__name__}")
         return {"error": "registration invalid"}
     c = db()
-    cur = c.execute("update bootstrap_tokens set used_at=? where token_hash=? and used_at is null",
-                    (time.time(), th))
+    # v0.7 review A26: the token must still be unexpired when it is spent,
+    # not just when the session was opened
+    cur = c.execute("update bootstrap_tokens set used_at=? where token_hash=? and used_at is null"
+                    " and expires_at>=?", (time.time(), th, time.time()))
     if cur.rowcount != 1:
         return {"error": "token already used"}
     cid = bytes_to_base64url(v.credential_id)
@@ -999,17 +1194,18 @@ def approval_page(row):
         who += f' <span class="owner">(agent of {html.escape(row["requester_owner"])})</span>'
     why_block = ""
     if row["why"]:
-        why_block = f'<p class="why"><b>Why this ask:</b> {html.escape(row["why"])}</p>'
+        why_block = (f'<p class="why"><b>Why this ask</b> <span class="claimed">(the agent\'s words)</span>: '
+                     f'{html.escape(row["why"])}</p>')
     if row["tool_call"]:
         call_block = (
             '<div class="bound-call"><h2>THE EXACT COMMAND YOU ARE APPROVING</h2>'
             '<pre class="command">' + html.escape(row["tool_call"]) + '</pre>'
-            '<p><b>This command, not the prose above, is what executes if you approve.</b> '
+            '<p><b>This command, not the description below, is what executes if you approve.</b> '
             'The description can say anything, so check the command itself.</p></div>')
     else:
         call_block = (
             '<div class="bound-call text-only"><b>No tool call is bound to this request.</b> '
-            'This is a text-only approval: your signature covers the text above, and '
+            'This is a text-only approval: your signature covers the text below, and '
             'nothing here is bound for execution.</div>')
     parent_block = ""
     if row["parent_approval"]:
@@ -1039,12 +1235,12 @@ def approval_page(row):
     body = f"""
 <h1>Approval request</h1>
 {settings_banner}
-<div class="from"><p class="label">From</p><p class="who">{who}</p>
+<div class="from"><p class="label">From <span class="claimed">(the name the agent gave)</span></p><p class="who">{who}</p>
 <p class="meta"><span class="pill pill-{state}" id="state">{state}</span>{expiry}</p></div>
-{why_block}
-<p class="label">What it wants to do</p>
-<pre class="action">{html.escape(row['action_text'])}</pre>
 {call_block}
+<p class="label">What it says it wants to do <span class="claimed">(written by the agent)</span></p>
+<pre class="action">{html.escape(row['action_text'])}</pre>
+{why_block}
 {parent_block}
 <p class="warn">Approving signs exactly this request and nothing else. Only you can sign it:
 agents can't, and a message saying "someone approved it" counts for nothing without this
@@ -1086,23 +1282,72 @@ the one on this phone. You can close this page once the computer says it is done
 <p id="msg"></p>""")
 
 
-# fresh-review F5: bounds on the HTTP surface
-GET_RATE_WINDOW_S = 10      # sliding window for the gate-wide GET cap
-GET_RATE_MAX = 300          # GETs (non-static) per window, all clients together
+# fresh-review F5 + v0.7 review M6/L3/L4: bounds on the HTTP surface.
+# Behind tailscale serve every client is 127.0.0.1, so limits are gate-wide,
+# not per IP. Requests are split into two budgets so a flood of junk can't
+# lock the human out: "approval" is traffic about a request that really
+# exists (its page, its approve/deny calls) or the registration page; "other"
+# is everything else (unknown ids, /health, /verify, 404s, bad tokens).
+GET_RATE_WINDOW_S = 10      # sliding window for the gate-wide caps
+GET_RATE_MAX = 300          # "other" requests per window, all clients together
+APPROVAL_RATE_MAX = 300     # "approval" requests per window
 MAX_CONNECTIONS = 64        # concurrent connections; extra ones are closed
-_get_hits: "collections.deque[float]" = collections.deque()
-_get_hits_lock = threading.Lock()
+REQUEST_DEADLINE_S = 20     # whole-request deadline (the socket timeout is per read)
 
 
-def _get_rate_ok() -> bool:
-    now = time.monotonic()
-    with _get_hits_lock:
-        while _get_hits and now - _get_hits[0] > GET_RATE_WINDOW_S:
-            _get_hits.popleft()
-        if len(_get_hits) >= GET_RATE_MAX:
-            return False
-        _get_hits.append(now)
+class _Budget:
+    def __init__(self, limit):
+        self.limit = limit
+        self.hits: "collections.deque[float]" = collections.deque()
+        self.lock = threading.Lock()
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        with self.lock:
+            while self.hits and now - self.hits[0] > GET_RATE_WINDOW_S:
+                self.hits.popleft()
+            if len(self.hits) >= self.limit:
+                return False
+            self.hits.append(now)
+            return True
+
+    def clear(self):
+        with self.lock:
+            self.hits.clear()
+
+
+_budgets = {"other": _Budget(GET_RATE_MAX), "approval": _Budget(APPROVAL_RATE_MAX)}
+
+
+def _get_rate_ok(kind: str = "other") -> bool:
+    return _budgets[kind].take()
+
+
+def _challenge_exists(cid: str) -> bool:
+    if not ID_RE.match(cid or ""):
+        return False
+    return db().execute("select 1 from challenges where id=?", (cid,)).fetchone() is not None
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def host_allowed(header) -> bool:
+    """v0.7 review L5 (DNS rebinding): a request must name this gate — its
+    configured origin's host, or a loopback name — in its Host header. A
+    website that rebinds its own name to 127.0.0.1 sends its own name and
+    is refused."""
+    if not isinstance(header, str) or not header.strip():
+        return False
+    try:
+        host = urlparse("//" + header.strip()).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower().rstrip(".")
+    if host in _LOOPBACK_HOSTS:
         return True
+    want = (urlparse(origin()).hostname or "").lower().rstrip(".") if origin() else ""
+    return bool(want) and host == want
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -1126,10 +1371,30 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request, client_address):
+        # v0.7 review L4: a client that trickles bytes resets the per-read
+        # timeout forever; this deadline closes the connection regardless
+        timer = threading.Timer(REQUEST_DEADLINE_S, self._cut, (request,))
+        timer.daemon = True
+        timer.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
+            timer.cancel()
             self._slots.release()
+
+    def handle_error(self, request, client_address):
+        import sys
+        if isinstance(sys.exc_info()[1], OSError):
+            return  # a client went away or was cut off at the deadline: not an error
+        super().handle_error(request, client_address)
+
+    @staticmethod
+    def _cut(request):
+        import socket
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1168,20 +1433,36 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("bad body length")
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _budget_kind(self, p: str) -> str:
+        if p == "/register":
+            return "approval"
+        m = re.fullmatch(r"/a/([A-Za-z0-9_-]+)(?:/(?:options|finish|deny))?", p)
+        return "approval" if m and _challenge_exists(m.group(1)) else "other"
+
+    def _admit(self, p: str) -> bool:
+        """Host check and rate budget; sends the refusal and returns False."""
+        if not host_allowed(self.headers.get("Host")):
+            self._send(421, {"error": "this gate does not answer for that host name"})
+            return False
+        if not _get_rate_ok(self._budget_kind(p)):
+            self._send(429, {"error": "too many requests — slow down and retry"})
+            return False
+        return True
+
     # ---- GET
     def do_GET(self):
         _refresh_config()
         u = urlparse(self.path)
         p = u.path
-        if not p.startswith("/static/") and not _get_rate_ok():
-            # fresh-review F5: a gate-wide cap (behind tailscale serve every
-            # client is 127.0.0.1, so per-IP limits would mean nothing)
-            return self._send(429, {"error": "too many requests — slow down and retry"})
+        if not p.startswith("/static/") and not self._admit(p):
+            return
         if p == "/health":
+            # A27: no audit head here (it was a live activity signal and
+            # re-read the log on every probe)
             return self._send(200, {"status": "ok", "service": "passkey-gate",
                                     "instance": instance_id(), "rp_id": rp_id(), "origin": origin(),
                                     "credentials": credential_count(),
-                                    "challenge_ttl_s": challenge_ttl(), "audit_head": audit_head()})
+                                    "challenge_ttl_s": challenge_ttl()})
         if p.startswith("/static/"):
             name = p.rsplit("/", 1)[-1]
             f = self._static() / name
@@ -1204,10 +1485,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, dict(challenge_status(m.group(1), sha)))
         return self._send(404, {"error": "not found"})
 
+    def _audit_error(self, p, error):
+        """M6: errors are audited only for callers that are authenticated
+        (minting needs the mint token) or that name a real request — not
+        for anonymous junk, which would bury the real events."""
+        m = re.fullmatch(r"/a/([A-Za-z0-9_-]+)/\w+", p)
+        if p == "/challenge" or (m and _challenge_exists(m.group(1))):
+            audit("error", path=p.split("/")[1] if "/" in p else p, error=error)
+
     # ---- POST
     def do_POST(self):
         _refresh_config()
         p = urlparse(self.path).path
+        if not self._admit(p):
+            return
         # JSON only: a cross-site <form> can send text/plain or urlencoded
         # bodies without a CORS preflight, never application/json — so this
         # stops CSRF against /a/<id>/deny and the other POST endpoints.
@@ -1232,12 +1523,13 @@ class Handler(BaseHTTPRequestHandler):
                                      body.get("tool_call") or None,
                                      requester_owner=body.get("requester_owner"),
                                      why=body.get("why"),
-                                     parent_approval=body.get("parent_approval"))
+                                     parent_approval=body.get("parent_approval"),
+                                     _source=HTTP_SOURCE)
                 return self._send(201, dict(c))
             if p == "/register/options":
                 out = registration_options(body.get("token"))
                 if out is None:
-                    audit("register_rejected", reason="bad/expired/used token")
+                    # M6: a bad token is not audited (anyone can send one)
                     return self._send(403, {"error": "registration token invalid, expired or used"})
                 out.pop("_token_hash")
                 return self._send(200, out)
@@ -1252,7 +1544,9 @@ class Handler(BaseHTTPRequestHandler):
                 if verb == "options":
                     opts = approve_options(cid)
                     if opts is None:
-                        audit("approve_rejected", challenge_id=cid, reason="no options (not pending / expired / no credential)")
+                        if _challenge_exists(cid):
+                            audit("approve_rejected", challenge_id=cid,
+                                  reason="no options (not pending / expired / no credential)")
                         return self._send(409, {"error": "not pending", "status": "denied"})
                     return self._send(200, json.loads(opts))
                 if verb == "finish":
@@ -1263,15 +1557,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(code, r)
                 if verb == "deny":
                     r = deny(cid)
-                    return self._send(200, r)
+                    return self._send(409 if r.get("error") else 200, r)
         except ChallengeLimitError as exc:  # finding 11: throttled, same error shape, 429
-            audit("error", path=p.split("/")[1] if "/" in p else p, error="ChallengeLimitError")
+            self._audit_error(p, "ChallengeLimitError")
             return self._send(429, {"error": str(exc)})
         except ValueError as exc:  # input problems the caller can fix (422, not 400)
-            audit("error", path=p.split("/")[1] if "/" in p else p, error=type(exc).__name__)
+            self._audit_error(p, type(exc).__name__)
             return self._send(422, {"error": str(exc)})
         except Exception as exc:  # fail closed, no stack traces to the client
-            audit("error", path=p.split("/")[1] if "/" in p else p, error=type(exc).__name__)
+            self._audit_error(p, type(exc).__name__)
             return self._send(400, {"error": "rejected", "reason": type(exc).__name__})
         return self._send(404, {"error": "not found"})
 

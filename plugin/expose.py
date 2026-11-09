@@ -134,7 +134,13 @@ def _save_record(path, record) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps(record, indent=2))
+        try:
+            tmp.unlink()  # v0.7 review A28: never write through a planted link
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(record, indent=2))
         os.replace(tmp, p)
     except Exception:
         pass

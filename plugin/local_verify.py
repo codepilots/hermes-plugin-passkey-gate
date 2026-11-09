@@ -371,7 +371,7 @@ def verify_parent_approval(parent: dict, data_dir, timeout: int = 10,
         url = f"{base}/verify/{parent['challenge_id']}?action_sha256={parent['action_sha256']}"
         # dial the address that was just checked — never re-resolve (rebinding)
         with netfetch.open_pinned(url, address, timeout=timeout) as r:
-            rec = json.loads(r.read())
+            rec = json.loads(netfetch.read_capped(r))
     except netfetch.RedirectBlocked as exc:
         return (f"unverified (parent gate answered with a redirect ({exc.code}) — "
                 "never followed)")

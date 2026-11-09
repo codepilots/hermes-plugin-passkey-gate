@@ -205,9 +205,13 @@ def gate_verify(args: dict, **kwargs) -> str:
         # local gate's own agent-facing helper, recover the bound call from the
         # local DB instead of widening the public parent-record contract.
         local_row = gate_core.db().execute(
-            "select binding_sha256, tool_call from challenges "
+            "select binding_sha256, tool_call, challenge from challenges "
             "where id=? and action_sha256=? and status='approved'",
             (cid, rec.get("action_sha256"))).fetchone()
+        if local_row is not None and not gate_core.record_matches_local_challenge(
+                rec, local_row["challenge"]):
+            # v0.7 review A29: the record must carry the nonce stored here
+            problems.append("the approval record's challenge differs from the one this gate issued")
         if local_row is not None and local_row["tool_call"]:
             binding_note = "challenge is bound to a specific canonical tool call"
             try:
@@ -295,7 +299,7 @@ def _fetch_verify(base: str, cid: str, sha: str):
     url = f"{base}/verify/{cid}?action_sha256={sha}"
     try:
         with netfetch.open_no_redirect(url, timeout=10) as r:
-            return json.loads(r.read())
+            return json.loads(netfetch.read_capped(r))
     except Exception as exc:
         return {"status": "error", "error": f"gate not reachable: {type(exc).__name__}"}
 
@@ -347,7 +351,7 @@ def _unreachable_text(base: str, exc) -> dict:
 def _fetch_health(base: str):
     try:
         with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
-            return json.loads(r.read())
+            return json.loads(netfetch.read_capped(r, 65536))
     except Exception as exc:
         return {"status": "unreachable", **gate_unreachable_reason(base, exc)}
 
@@ -389,6 +393,43 @@ def validate_authority_patterns(patterns):
         except re.error as exc:
             problems.append(f"patterns[{i}] does not compile as a regex: {exc}")
     return problems
+
+
+# v0.7 review L15: Python's re has no timeout, so a catastrophically
+# backtracking pattern would stall the hook. At `set` time each pattern is run
+# against long, awkward inputs in a separate process that is killed if it
+# takes too long.
+SLOW_PATTERN_LIMIT_S = 2.0
+_PROBE_SCRIPT = r"""
+import json, re, sys
+pats = json.load(sys.stdin)
+bases = ["a" * 2000 + "!", " " * 2000 + "!", "a " * 1000 + "!", "x-" * 1000 + "!",
+         "\\" * 2000 + "!", "/" * 2000 + "!", "." * 2000 + "!",
+         '{"command":"' + "a" * 2000 + '"}!', "x" * 2000 + "!", "0" * 2000 + "!"]
+probes = bases + ["terminal " + b for b in bases]
+for i, p in enumerate(pats):
+    rx = re.compile(p)
+    for s in probes:
+        rx.search(s)
+    print(i, flush=True)
+"""
+
+
+def slow_patterns(patterns) -> list:
+    """Patterns that take too long on long inputs (with their index)."""
+    import subprocess
+    import sys
+    if not isinstance(patterns, (list, tuple)) or not patterns:
+        return []
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", _PROBE_SCRIPT], input=json.dumps(list(patterns)),
+                           capture_output=True, text=True, timeout=SLOW_PATTERN_LIMIT_S)
+        return [] if r.returncode == 0 else [f"could not be checked ({r.stderr.strip()[-200:]})"]
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or b""
+        done = len((out.decode() if isinstance(out, bytes) else out).split())
+        i = min(done, len(patterns) - 1)
+        return [f"patterns[{i}] {patterns[i]!r}"]
 
 
 def render_pattern(pat, index: int) -> str:

@@ -223,8 +223,8 @@ def test_http_challenge_endpoint_throttles_with_429(gate_env):
 
 # ------------------- fresh-review F5: GET cap + connection ceiling
 def test_get_requests_are_capped_gate_wide(monkeypatch):
-    monkeypatch.setattr(gate_core, "GET_RATE_MAX", 3)
-    monkeypatch.setattr(gate_core, "_get_hits", __import__("collections").deque())
+    monkeypatch.setattr(gate_core, "_budgets", {"other": gate_core._Budget(3),
+                                                "approval": gate_core._Budget(300)})
     srv = gate_core.BoundedHTTPServer(("127.0.0.1", 0), gate_core.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:

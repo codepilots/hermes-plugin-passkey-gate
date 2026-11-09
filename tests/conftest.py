@@ -29,3 +29,12 @@ def _isolated_config_canary(monkeypatch, tmp_path):
     config Hermes failed to read."""
     from passkey_gate import cli
     monkeypatch.setattr(cli, "_canary_file", lambda: tmp_path / "config-canary")
+
+
+@pytest.fixture(autouse=True)
+def _restore_gate_settings(monkeypatch):
+    """A `set` in one test re-applies config to the gate's module-level
+    settings; give every test its own copy so nothing leaks into the next."""
+    from passkey_gate import gate_core
+    monkeypatch.setattr(gate_core, "_settings", dict(gate_core._settings))
+    monkeypatch.setattr(gate_core, "_plugin_data_dir", gate_core._plugin_data_dir)

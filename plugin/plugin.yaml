@@ -76,6 +76,11 @@ config_schema:
     default: []
     label: "Your chat accounts (owner senders)"
     description: "Your own chat accounts, as platform:user_id (e.g. telegram:123456789), so your chats fall in the owner lane instead of others. Only as trustworthy as the chat account itself. Adding an entry needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
+  config_canary:
+    type: str
+    default: ""
+    label: "Config check value (don't edit)"
+    description: "Written by passkey-gate so it can tell its settings were really read. Don't change or remove it: if it goes missing, enforcement fails closed until it's restored."
 
 python_dependencies:
   - webauthn>=2,<4

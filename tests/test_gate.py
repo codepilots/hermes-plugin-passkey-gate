@@ -328,7 +328,7 @@ def test_approval_page_shows_bound_tool_call(base):
     canonical = tools.canonical_for_hook(TOOL_CALL["tool"], TOOL_CALL["args"])
     assert "THE EXACT COMMAND YOU ARE APPROVING" in page
     assert html.escape(canonical) in page  # the byte-exact canonical JSON, escaped
-    assert "not the prose" in page and "executes" in page
+    assert "not the description below" in page and "executes" in page
     # text-only challenge: no bound-call block, and that is stated plainly
     c2 = new_challenge(base, requester="sorrel")
     s, page2 = call(base, f"/a/{c2['challenge_id']}")
@@ -1783,7 +1783,7 @@ def test_negative_content_length_does_not_hang(base):
     from urllib.parse import urlparse
     u = urlparse(base)
     with socket.create_connection((u.hostname, u.port), timeout=5) as sock:
-        sock.sendall(b"POST /a/x/deny HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        sock.sendall(b"POST /a/x/deny HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                      b"Content-Length: -1\r\n\r\n")
         sock.settimeout(5)
         reply = sock.recv(200)

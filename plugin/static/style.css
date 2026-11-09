@@ -57,3 +57,4 @@ pre.command { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding
 p.warn { font-size: .95em; }
 div.bound-call.settings { border-color: #f08080; background: #241313; }
 div.bound-call.settings h2 { color: #f08080; }
+span.claimed { color: #8a9a86; font-size: .85em; text-transform: none; letter-spacing: 0; font-weight: 400; }
