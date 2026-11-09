@@ -80,10 +80,12 @@ GATE_CHALLENGE = {
                 "description": (
                     "Optional structured binding of the exact tool call this "
                     "approval should cover, shaped as {tool: <name>, args: <the "
-                    "same args object>}. When enforcement is on, the "
-                    "pre_tool_call hook re-derives this binding and only lets "
-                    "the call through if it matches an approved, unconsumed "
-                    "challenge."
+                    "same args object>}. Include EVERY argument you will pass "
+                    "when you run it, such as timeout or workdir: an argument "
+                    "added or dropped later makes it a different call. When "
+                    "enforcement is on, the pre_tool_call hook re-derives this "
+                    "binding and only lets the call through if it matches an "
+                    "approved, unconsumed challenge."
                 ),
             },
         },

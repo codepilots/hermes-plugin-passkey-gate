@@ -677,6 +677,16 @@ def approved_for_binding(binding_sha: str) -> list:
         "and expires_at>=? order by created_at", (binding_sha, time.time())).fetchall()
 
 
+def approved_unconsumed_tool_calls() -> list:
+    """Every approved, unexpired, unconsumed challenge that is bound to a
+    tool call, newest approval first. Used only to EXPLAIN a block (which
+    arguments differ from what the human signed); it never authorises
+    anything — authorisation is pending_for_binding + consume()."""
+    return db().execute(
+        "select id, tool_call from challenges where status='approved' and expires_at>=? "
+        "and tool_call is not null order by decided_at desc", (time.time(),)).fetchall()
+
+
 def approve_options(cid: str) -> str | None:
     row = db().execute("select * from challenges where id=?", (cid,)).fetchone()
     if row is None or row["status"] != "pending" or time.time() > row["expires_at"]:

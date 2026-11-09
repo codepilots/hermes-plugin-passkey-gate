@@ -1973,3 +1973,73 @@ def test_gate_data_override_is_ignored_inside_hermes(monkeypatch, tmp_path):
     assert gate_core.data_dir() == real
     monkeypatch.delitem(sys.modules, "plugins.plugin_storage")
     assert gate_core.data_dir() == tmp_path / "attacker-seeded"   # outside Hermes: honoured
+
+
+# ------------------- 8 Nov field incident: approved call run with an extra arg
+def test_hook_explains_extra_argument_and_still_blocks(base, autumn):
+    """The agent got `{command}` signed but ran `{command, timeout: 60}`.
+    The binding differs, so the hook must still block, and it must say which
+    argument differs and repeat the approved call, not tell the agent to go
+    and get another signature. The approval stays unspent, and the
+    verbatim retry goes through."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    call = _bound_call("near-miss")
+    patterns = [r"ssh git@100"]
+    c = new_challenge(base, tool_call=call, requester="bramble")
+    approve(base, autumn, c["challenge_id"])
+    with_timeout = dict(call["args"], timeout=60)
+    v = tools.hook_verdict(call["tool"], with_timeout, patterns, True)
+    assert v is not None and v["action"] == "block"
+    assert "adds `timeout` = 60" in v["message"]
+    assert json.dumps(call, sort_keys=True) in v["message"]
+    assert gate_core.pending_for_binding(c["binding_sha256"]) is not None  # not spent
+    assert tools.hook_verdict(call["tool"], call["args"], patterns, True) is None
+
+
+def test_hook_hint_names_missing_and_changed_arguments(base, autumn):
+    call = {"tool": "terminal", "args": {"command": "ssh git@100.64.0.10 probe-changed",
+                                         "timeout": 30, "workdir": "/srv"}}
+    c = new_challenge(base, tool_call=call, requester="bramble")
+    approve(base, autumn, c["challenge_id"])
+    v = tools.hook_verdict("terminal", {"command": call["args"]["command"], "timeout": 90},
+                           [r"ssh git@100"], True)
+    assert v["action"] == "block"
+    assert "changes `timeout` (approved: 30, this call: 90)" in v["message"]
+    assert "leaves out `workdir`" in v["message"]
+    assert gate_core.pending_for_binding(c["binding_sha256"]) is not None
+
+
+def test_hook_gives_no_hint_for_an_unrelated_call(base, autumn):
+    """No argument in common: a different action, so the normal message."""
+    call = _bound_call("unrelated-approved")
+    c = new_challenge(base, tool_call=call, requester="bramble")
+    approve(base, autumn, c["challenge_id"])
+    v = tools.hook_verdict("terminal", {"command": "ssh git@100.64.0.10 something-else-entirely"},
+                           [r"ssh git@100"], True)
+    assert v["action"] == "block"
+    assert "no approved passkey challenge covers it" in v["message"]
+
+
+def test_near_miss_hint_ignores_pending_and_consumed(base, autumn):
+    """Only an approved, unspent approval can be the near miss: an unsigned
+    request or a used approval gives no hint."""
+    pending = _bound_call("hint-pending")
+    new_challenge(base, tool_call=pending, requester="bramble")
+    assert tools.near_miss_hint("terminal", dict(pending["args"], timeout=1)) is None
+    spent = _bound_call("hint-spent")
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, tool_call=spent, requester="bramble")
+    approve(base, autumn, c["challenge_id"])
+    assert tools.hook_verdict(spent["tool"], spent["args"], [r"ssh git@100"], True) is None
+    assert tools.near_miss_hint("terminal", dict(spent["args"], timeout=1)) is None
+
+
+def test_gate_verify_tells_agent_to_run_the_call_verbatim(monkeypatch, base, autumn):
+    pin_once(gate_core.data_dir(), autumn.pem)
+    call = _bound_call("dispatch-note")
+    c = new_challenge(base, tool_call=call, requester="bramble")
+    approve(base, autumn, c["challenge_id"])
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
+    assert out["verified"] is True
+    assert "nothing added or removed" in out["dispatch_note"]

@@ -104,6 +104,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An approved call run with one extra argument got an unhelpful block.**
+  In a live run the agent had `{command}` signed, then ran it as `{command,
+  timeout: 60}`. That is a different call, so the hook rightly blocked it,
+  but its message just said to get a new approval, and the human signed
+  twice for nothing. When an unused approval for the same tool shares an
+  argument with the blocked call, the hook now names each added, missing
+  or changed argument and repeats the approved call to retry. Nothing that
+  was blocked before is allowed now. `gate_verify` adds a `dispatch_note`
+  (run the approved call exactly, nothing added), and the `tool_call`
+  description tells agents to include every argument, timeout and workdir
+  included.
 - **Deny could say "Denied" when nothing was denied.** If the request had
   already been approved (say, in another tab) or had expired, the page still
   reported a denial. It now says nothing changed.

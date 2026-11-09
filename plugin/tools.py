@@ -249,6 +249,10 @@ def gate_verify(args: dict, **kwargs) -> str:
         if approved_tool_call is not None:
             # Keep the legacy name for compatibility with existing callers.
             out["bound_tool_call"] = approved_tool_call
+            out["dispatch_note"] = (
+                "Run approved_tool_call exactly: the same tool and the same args, "
+                "nothing added or removed (not even a timeout or working directory). "
+                "Any difference is a different call, and the gate will block it.")
         return json.dumps(out)
     out = {"ok": True, "verified": False, "status": last.get("status", "error"),
            "challenge_id": cid}
@@ -447,6 +451,71 @@ def authority_matches(patterns, tool_name: str, args) -> tuple[int, str] | None:
     return None
 
 
+HINT_VALUE_CAP = 80
+
+
+def _short(value) -> str:
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return text if len(text) <= HINT_VALUE_CAP else text[:HINT_VALUE_CAP] + "…"
+
+
+def near_miss_hint(tool_name: str, args) -> str | None:
+    """Explain a block when the agent HOLDS an approval for this tool whose
+    arguments differ from the call it just made — e.g. the model added
+    `timeout: 60` when running a command it got signed without one, so the
+    binding hash differs and nothing covers the call (8 Nov field incident).
+
+    Purely diagnostic: names the differing top-level arguments and repeats the
+    approved call so the agent can retry it verbatim. Never allows anything.
+    Only offered when the approval shares at least one identical argument with
+    this call (otherwise it is a different action, not a near miss). Never
+    raises."""
+    try:
+        if not isinstance(args, dict):
+            return None
+        best = None
+        for row in gate_core.approved_unconsumed_tool_calls():
+            try:
+                approved = json.loads(row["tool_call"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(approved, dict) or approved.get("tool") != tool_name:
+                continue
+            a_args = approved.get("args")
+            if not isinstance(a_args, dict):
+                continue
+            keys = set(a_args) | set(args)
+            differing = sorted((k for k in keys if a_args.get(k, ...) != args.get(k, ...)), key=str)
+            same = [k for k in keys if k in a_args and k in args and a_args[k] == args[k]]
+            if not differing or not same:
+                continue
+            if best is None or len(differing) < len(best[1]):
+                best = (approved, differing)
+        if best is None:
+            return None
+        approved, differing = best
+        a_args = approved["args"]
+        parts = []
+        for k in differing:
+            if k not in a_args:
+                parts.append(f"adds `{k}` = {_short(args[k])}")
+            elif k not in args:
+                parts.append(f"leaves out `{k}` = {_short(a_args[k])}")
+            else:
+                parts.append(f"changes `{k}` (approved: {_short(a_args[k])}, this call: {_short(args[k])})")
+        return (
+            "Passkey gate: you hold a passkey approval for a `" + tool_name + "` call, but "
+            "this call is not the one the human signed — it " + "; ".join(parts) + ". "
+            "The approval covers only the exact arguments signed; any added, missing or "
+            "changed argument (even a timeout or working directory) is a different call. "
+            "Retry with exactly the approved call, nothing added or removed: "
+            f"{json.dumps(approved, ensure_ascii=False)}. "
+            "If you really need the different arguments, request a fresh approval via "
+            "gate_challenge with tool_call set to exactly the call you will run.")
+    except Exception:
+        return None
+
+
 def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict | None:
     """pre_tool_call directive: block until this exact call is passkey-approved.
 
@@ -465,6 +534,9 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
         binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
         row = gate_core.pending_for_binding(binding)
         if row is None:
+            hint = near_miss_hint(tool_name, args)
+            if hint:
+                return {"action": "block", "message": hint}
             return {"action": "block", "message": (
                 "Passkey gate: this tool call matches an authority pattern, but no "
                 "approved passkey challenge covers it (matched "
