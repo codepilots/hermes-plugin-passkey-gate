@@ -117,10 +117,10 @@ FAKE_TAILSCALE = r'''#!__PYTHON__
 import json, os, sys
 
 argv = sys.argv[1:]
-with open(os.environ["TS_LOG"], "a") as f:
+with open(__TS_LOG__, "a") as f:
     f.write(json.dumps(argv) + "\n")
 
-state_path = os.environ["TS_STATE"]
+state_path = __TS_STATE__
 if os.path.exists(state_path):
     state = json.load(open(state_path))
 else:
@@ -178,16 +178,18 @@ sys.exit(1)
 def _fake_tailscale(tmp_path, monkeypatch, status=None, host=REAL_HOST):
     """Write the fake binary + its initial serve state; return
     (binpath, state_file, log_file)."""
-    binpath = tmp_path / "tailscale"
-    binpath.write_text(FAKE_TAILSCALE.replace("__PYTHON__", sys.executable))
-    binpath.chmod(0o755)
+    # Paths are baked into the fake: the gate runs tailscale with a minimal
+    # env (PATH/HOME/LANG only), so the fake cannot read them from env vars.
     state = tmp_path / "ts-state.json"
+    log = tmp_path / "ts-cmds.log"
+    binpath = tmp_path / "tailscale"
+    binpath.write_text(FAKE_TAILSCALE.replace("__PYTHON__", sys.executable)
+                       .replace("__TS_LOG__", repr(str(log)))
+                       .replace("__TS_STATE__", repr(str(state))))
+    binpath.chmod(0o755)
     state.write_text(json.dumps({"host": host,
                                  "TCP": (status or {}).get("TCP", {}),
                                  "Web": (status or {}).get("Web", {})}))
-    log = tmp_path / "ts-cmds.log"
-    monkeypatch.setenv("TS_LOG", str(log))
-    monkeypatch.setenv("TS_STATE", str(state))
     return str(binpath), state, log
 
 

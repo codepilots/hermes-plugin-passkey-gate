@@ -67,7 +67,10 @@ and no undocumented-module warnings.
   `systemctl --user`, `journalctl --user`, `loginctl` or `launchctl`; and a
   short Python subprocess that times new authority patterns on long inputs.
   Each runs only when you use the matching feature, and nothing runs with
-  elevated privileges.
+  elevated privileges. None of them inherits the agent's environment: each
+  gets an explicit minimal one (`PATH`, `HOME`, `LANG`, plus
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for `systemctl --user`),
+  so provider keys never reach a child process.
 - **Network:**
   - It contacts only its own address and any peer gates you list in
     `parent_gate_allowlist`.

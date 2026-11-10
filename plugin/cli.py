@@ -63,7 +63,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import gate_core, expose, lanes, local_verify, netfetch, service, tools
+from . import childenv, gate_core, expose, lanes, local_verify, netfetch, service, tools
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,8 @@ def os_default_rp_id(origin: str = ""):
         return host
     try:
         out = shutil.which("tailscale") and subprocess.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5)
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5,
+            env=childenv.base_env())
         if out and out.returncode == 0:
             host = (json.loads(out.stdout).get("Self") or {}).get("DNSName", "")
             if host:

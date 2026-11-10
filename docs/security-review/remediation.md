@@ -661,3 +661,9 @@ reviewer (M3 reproduced in real Hermes v0.23). Status legend adds 🟡 partially
 | A28 | INFO: symlink-following writes; serve record; notary path unprotected | INFO | ✅ v0.8.0 — no-follow reads/writes for mint token, canary, audit log and serve record; `audit_notary_path` protected (moving it needs approval); a planted serve record still needs data-folder write access, which already defeats the gate |
 | A29 | INFO: canary arming race; schema; fetched-record trust | INFO | ✅ v0.8.0 — arming under a file lock; `config_canary` in `config_schema`; fetched records must carry the locally stored nonce; tests |
 | A30 | INFO: robustness: torn audit line, non-object tool_call, prose guard | INFO | ✅ v0.8.0 — torn line tolerated (and still reported by audit-verify); `tool_call` must be an object; prose guard left as is by design (the hook enforces regardless, and widening it would refuse legitimate text-only approvals) |
+
+## Catalog review of `f50b315` (10 Nov 2026) — C1
+
+| ID | Finding | Severity | Status |
+|---|---|---|---|
+| C1 | Child processes inherit the full environment (provider keys reach `tailscale`, `systemctl --user`/`launchctl`, the `-I` regex probe) | — (requested change) | ✅ v0.8.1 — every `subprocess.run` passes an explicit minimal env (`plugin/childenv.py`: `PATH`/`HOME`/`LANG`, plus `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` for service-manager commands); AST test fails on any call without `env=`; call-site and live-probe tests; 354 passed; e2e OK; live `tailscale status` verified under the minimal env |

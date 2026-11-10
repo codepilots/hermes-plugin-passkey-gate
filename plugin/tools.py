@@ -10,7 +10,7 @@ import logging
 import re
 import time
 
-from . import gate_core, local_verify, netfetch
+from . import childenv, gate_core, local_verify, netfetch
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +423,8 @@ def slow_patterns(patterns) -> list:
         return []
     try:
         r = subprocess.run([sys.executable, "-I", "-c", _PROBE_SCRIPT], input=json.dumps(list(patterns)),
-                           capture_output=True, text=True, timeout=SLOW_PATTERN_LIMIT_S)
+                           capture_output=True, text=True, timeout=SLOW_PATTERN_LIMIT_S,
+                           env=childenv.base_env())
         return [] if r.returncode == 0 else [f"could not be checked ({r.stderr.strip()[-200:]})"]
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout or b""

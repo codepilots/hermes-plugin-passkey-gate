@@ -28,7 +28,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import netfetch
+from . import childenv, netfetch
 
 # Ports tried, in order, for tailscale HTTPS serving (443 = clean URL)
 TAILSCALE_PORTS = [443, 8443, 8445, 8446, 8447, 8448, 8480, 8500, 8600, 8661]
@@ -54,7 +54,8 @@ def detect_backends() -> dict:
 def fetch_status_json(binpath: str = "tailscale", timeout: int = 15) -> dict | None:
     try:
         out = subprocess.run([binpath, "serve", "status", "--json"],
-                             capture_output=True, text=True, timeout=timeout)
+                             capture_output=True, text=True, timeout=timeout,
+                             env=childenv.base_env())
         if out.returncode == 0 and out.stdout.strip().startswith("{"):
             return json.loads(out.stdout)
     except Exception:
@@ -65,7 +66,7 @@ def fetch_status_json(binpath: str = "tailscale", timeout: int = 15) -> dict | N
 def fetch_self_dnsname(binpath: str = "tailscale", timeout: int = 15) -> str | None:
     try:
         out = subprocess.run([binpath, "status", "--json"], capture_output=True,
-                             text=True, timeout=timeout)
+                             text=True, timeout=timeout, env=childenv.base_env())
         if out.returncode == 0:
             dns = (json.loads(out.stdout).get("Self") or {}).get("DNSName") or ""
             return dns.rstrip(".") or None
@@ -205,7 +206,8 @@ def _unserve(binpath, port, mount=SERVE_MOUNT, timeout=30) -> None:
     nothing — it cannot take someone else's rule."""
     try:
         subprocess.run([binpath, "serve", "--bg", f"--https={port}", f"--set-path={mount}", "off"],
-                       capture_output=True, text=True, timeout=timeout)
+                       capture_output=True, text=True, timeout=timeout,
+                       env=childenv.base_env())
     except Exception:
         pass
 
@@ -336,7 +338,8 @@ def tailscale_expose(gate_port: int, target_port: int | None = None,
     last_error = None
     for port in candidates:
         out = subprocess.run([binpath, "serve", "--bg", f"--https={port}", f"--set-path={SERVE_MOUNT}", target],
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, text=True, timeout=30,
+                             env=childenv.base_env())
         if out.returncode != 0:
             last_error = f"tailscale serve {target} failed: {(out.stderr or out.stdout).strip()[:300]}"
             continue

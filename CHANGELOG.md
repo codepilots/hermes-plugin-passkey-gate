@@ -4,6 +4,20 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-11-10
+
+### Security
+
+- **Child processes no longer inherit the agent's environment.** Catalog
+  review of `f50b315` found that no `subprocess.run` call passed `env=`, so
+  every Hermes provider key reached `tailscale`, `systemctl --user` /
+  `launchctl` / `journalctl` / `loginctl`, and the regex timing probe. Each
+  call now passes an explicit allowlist from the new `plugin/childenv.py`:
+  `PATH`, `HOME` and `LANG` for `tailscale` and the probe, plus
+  `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for the service-manager
+  commands. Nothing else from the parent environment is passed. A test
+  fails if any `subprocess` call in the plugin omits `env=`.
+
 ## [0.8.0] - 2026-11-09
 
 ### Added
@@ -544,7 +558,9 @@ These are architectural, deliberate, and documented in
   action text and cryptographic evidence are still readable by anyone holding
   the high-entropy URL inputs.
 
-[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.6.4...v0.7.0

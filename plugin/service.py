@@ -24,6 +24,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from . import childenv
+
 UNIT_NAME = "passkey-gate.service"
 LAUNCHD_LABEL = "ai.hermes.passkey-gate"
 
@@ -31,7 +33,8 @@ LAUNCHD_LABEL = "ai.hermes.passkey-gate"
 def _run(cmd, timeout=30):
     """Run a command, never raising: (returncode, combined output)."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=childenv.systemd_user_env())
         return r.returncode, (r.stdout + r.stderr).strip()
     except FileNotFoundError:
         return 127, f"{cmd[0]}: not found"
