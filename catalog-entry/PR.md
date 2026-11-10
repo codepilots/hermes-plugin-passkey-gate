@@ -3,11 +3,10 @@ Title: Add passkey-gate to the plugin catalog
 ---
 
 Adds `plugin-catalog/passkey-gate.yaml`, pinned to
-[`f50b315`](https://github.com/codepilots/hermes-plugin-passkey-gate/commit/f50b315530beea1f0dc2739049b675ad69f83d26),
-version 0.8.0. Its `plugin/` tree is identical to tag
-[`v0.8.0`](https://github.com/codepilots/hermes-plugin-passkey-gate/tree/v0.8.0)
-(`37a72c4`); the one commit on top only refreshes the approval-page
-screenshot. Submitted by the repository owner (codepilots).
+[`1042d6c`](https://github.com/codepilots/hermes-plugin-passkey-gate/commit/1042d6c379efc1c6aff41d1a43c48d512b73bc4c),
+tag [`v0.8.1`](https://github.com/codepilots/hermes-plugin-passkey-gate/tree/v0.8.1).
+v0.8.1 answers the review of `f50b315`: every child process now gets an
+explicit minimal environment instead of inheriting the agent's. Submitted by the repository owner (codepilots).
 
 ## What it does
 
@@ -110,13 +109,13 @@ and no undocumented-module warnings.
 
 ## Validation
 
-All of these were run against v0.8.0 (`plugin/` is identical at the pin), on Hermes v0.23.0:
+All of these were run against the pin (`1042d6c`, v0.8.1), on Hermes v0.23.0:
 
 - `hermes plugins validate --install-deps` passes every check, and the
   security scan is `safe`.
-- A pinned install (`--ref 37a72c4…`) is allowed, and the installed files
+- A pinned install (`--ref 1042d6c…`) is allowed, and the installed files
   are identical to the tag.
-- 349 tests pass in a clean virtualenv built from a fresh clone.
+- 354 tests pass in a clean virtualenv built from a fresh clone.
 - `scripts/e2e_hermes.py` passes 34 of 34 steps against the pinned install.
   It goes through Hermes's own plugin manager, tool registry and hook
   dispatch, using a software authenticator in place of the phone.
