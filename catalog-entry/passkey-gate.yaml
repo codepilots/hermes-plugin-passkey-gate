@@ -13,6 +13,7 @@ requires_hermes: ">=0.23.0"
 docs_url: https://github.com/codepilots/hermes-plugin-passkey-gate
 version: "0.8.1"
 platforms: [linux, macos]
+image: https://raw.githubusercontent.com/codepilots/hermes-plugin-passkey-gate/eba44dfb4790f9b5421f96fc7f87902079a6ad44/docs/images/banner.png
 screenshots:
   - https://raw.githubusercontent.com/codepilots/hermes-plugin-passkey-gate/b0c183545de1873c2aa7c3417413fb9caac5c212/docs/images/phone-register.png
   - https://raw.githubusercontent.com/codepilots/hermes-plugin-passkey-gate/b0c183545de1873c2aa7c3417413fb9caac5c212/docs/images/phone-code.png
