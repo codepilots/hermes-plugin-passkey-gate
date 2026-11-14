@@ -200,3 +200,85 @@ def test_set_hermes_cover_writes_through_hermes_config(monkeypatch):
 def test_set_hermes_cover_outside_hermes():
     ok, note = transport.set_hermes_cover(True)
     assert not ok and "by hand" in note
+
+
+# ------------------------------------------------ pre_approval_request hook
+@pytest.fixture
+def approval_hook(monkeypatch):
+    """The plugin's pre_approval_request hook with config, surface and
+    begin_ask faked: returns (call, asked) where asked lists begin_ask calls."""
+    import passkey_gate
+    from passkey_gate import cli, lanes
+    cfg = {"require_passkey": True, "passkey_hermes_prompts": True, "patterns": [],
+           "gated_lanes": list(lanes.LANES), "owner_senders": []}
+    state = {"surface": "discord"}
+    asked = []
+    monkeypatch.setattr(cli, "apply_config_safe", lambda: cfg)
+    monkeypatch.setattr(passkey_gate, "_session_surface", lambda: state["surface"])
+    monkeypatch.setattr(cli, "_ctx_ref", type("Ctx", (), {"post_message": staticmethod(lambda t: None)})())
+    monkeypatch.setattr(transport, "begin_ask", lambda rid, cmd, why, post: asked.append((rid, cmd)) or "asked")
+    lanes.reset()
+
+    def fire(surface="transport:passkey-gate", **kw):
+        return passkey_gate._on_pre_approval_request(
+            surface=surface, request_id="r1", command=CMD, description="recursive delete", **kw)
+    return fire, asked, cfg, state
+
+
+def test_hook_asks_for_a_passkey_on_a_gated_chat(approval_hook):
+    fire, asked, cfg, state = approval_hook
+    assert fire() is None and asked == [("r1", CMD)]
+
+
+@pytest.mark.parametrize("change", [
+    {"passkey_hermes_prompts": False}, {"require_passkey": False}, {"_config_error": "broken"}])
+def test_hook_stays_out_unless_the_setting_and_enforcement_are_on(approval_hook, change):
+    fire, asked, cfg, state = approval_hook
+    cfg.update(change)
+    fire()
+    assert asked == []
+
+
+def test_hook_ignores_other_approval_surfaces(approval_hook):
+    fire, asked, cfg, state = approval_hook
+    for surface in ("gateway", "cli", "smart", "transport:someone-else"):
+        fire(surface=surface)
+    assert asked == []
+
+
+def test_hook_leaves_the_classic_terminal_and_ungated_lanes_to_hermes(approval_hook):
+    fire, asked, cfg, state = approval_hook
+    state["surface"] = "cli"                      # can't show the link in time
+    fire()
+    state["surface"] = "tui"                      # local lane, not gated here
+    cfg["gated_lanes"] = ["others", "bots", "agents"]
+    fire()
+    assert asked == []
+    state["surface"] = "discord"                  # unknown origin counts as gated
+    fire()
+    assert asked == [("r1", CMD)]
+
+
+def test_hook_never_raises(approval_hook, monkeypatch):
+    fire, asked, cfg, state = approval_hook
+    monkeypatch.setattr(transport, "begin_ask", lambda *a: 1 / 0)
+    assert fire() is None
+
+
+def test_status_warns_when_hermes_can_approve_without_asking(monkeypatch):
+    import sys
+    import types
+    cfg = {"security": {"approval": {"transport": "passkey-gate", "transport_fallback": "builtin"}},
+           "approvals": {"mode": "smart"}}
+    fake = types.ModuleType("hermes_cli.config")
+    fake.load_config_readonly = lambda: cfg
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    out = transport.hermes_selection(every_prompt=True)
+    assert out["every_flagged_command"] and "approvals.mode manual" in out["warning"]
+    cfg["approvals"]["mode"] = "manual"
+    out = transport.hermes_selection(every_prompt=True)
+    assert "warning" not in out and out["note"].startswith("on: every command Hermes flags")
+    cfg["security"]["approval"]["transport"] = "builtin"
+    assert transport.hermes_selection(every_prompt=True)["note"].startswith("WARNING")
+    assert "every_flagged_command" in transport.hermes_selection()

@@ -25,6 +25,8 @@ provides_hooks:
   - pre_llm_call
   - post_gateway_admission
   - post_tool_call
+  - pre_approval_request
+  - post_approval_response
 
 config_schema:
   origin:
@@ -67,6 +69,11 @@ config_schema:
     default: ""
     label: "Audit anchor file"
     description: "A file outside the gate's data folder, where `audit-notarize` records the audit log's latest fingerprint and `audit-verify` checks against it. This is what detects the whole log being rewritten. Keep it somewhere agents can't write."
+  passkey_hermes_prompts:
+    type: bool
+    default: false
+    label: "Passkey for every command Hermes flags"
+    description: "When on, with enforcement on and passkey-gate selected as Hermes's approval transport (security.approval.transport), every command Hermes itself flags as dangerous needs your passkey: the approval link is posted in the same chat and the command waits for your signature. Off, the default, only commands matching your patterns need a passkey. Works in chats and the TUI or Desktop app; the classic terminal client keeps Hermes's own prompt. Needs approvals.mode: manual in Hermes to cover every flagged command. Turning this off needs your passkey when done with `hermes passkey-gate set` (edits here aren't checked)."
   gated_lanes:
     type: list
     default: [local, owner, others, bots, agents]

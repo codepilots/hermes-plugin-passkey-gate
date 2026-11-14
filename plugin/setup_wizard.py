@@ -379,10 +379,33 @@ class Wizard:
         self.say("straight after your passkey it asks you again with its own prompt. Your")
         self.say("passkey approval can answer that prompt for exactly the command you signed;")
         self.say("every other Hermes prompt stays as it is.")
-        if self.confirm("Approve once instead of twice?"):
-            self._set_cover(True)
-        else:
+        if not self.confirm("Approve once instead of twice?"):
             self.say("Skipped. Later: run setup again.")
+            return
+        if not self._set_cover(True):
+            return
+        self.say()
+        self.say("You can go further: require your passkey for EVERY command Hermes flags as")
+        self.say("dangerous, not only the ones your patterns catch. The approval link is posted")
+        self.say("in the same chat and the command waits for your signature.")
+        if self.confirm("Require your passkey for everything Hermes flags?", default=False):
+            self._set_every_prompt(True)
+
+    def _every_prompt(self):
+        return bool(self.ctx.get_config("passkey_hermes_prompts", default=False))
+
+    def _set_every_prompt(self, on):
+        if not self._apply("passkey_hermes_prompts", "true" if on else "false"):
+            return False
+        if on:
+            self.say("✓ Every command Hermes flags now needs your passkey (in chats, the TUI and")
+            self.say("  Desktop; the classic terminal client keeps Hermes's own prompt).")
+            warning = transport.hermes_selection(every_prompt=True).get("warning")
+            if warning:
+                self.say(f"  ⚠ {warning}")
+        else:
+            self.say("✓ Only commands matching your patterns need your passkey now.")
+        return True
 
     def _set_cover(self, on):
         ok, note = transport.set_hermes_cover(on)
@@ -479,13 +502,43 @@ class Wizard:
 
     def _cover_label(self):
         state = transport.hermes_selection()
+        every = self._every_prompt()
         if state.get("selected") is None:
             return "can't tell from here"
         if not state.get("selected"):
-            return "off (Hermes may ask again after your passkey)"
+            return ("passkey for everything is set, but not switched on in Hermes (choose to fix)"
+                    if every else "off (Hermes may ask again after your passkey)")
+        if every:
+            return "passkey for everything Hermes flags"
         if state.get("transport_fallback") != "builtin":
             return "on, but fallback DENIES other prompts (choose to fix)"
         return "on (approve once, not twice)"
+
+    def _choose_cover(self):
+        """Settings menu item 5: how the gate and Hermes's own prompt combine."""
+        state = transport.hermes_selection()
+        if state.get("selected") is None:
+            self.say("This Hermes can't be configured from here. See README: 'Approving once, not twice'.")
+            return
+        self.say("Hermes has its own prompt for commands it flags as dangerous. Choose:")
+        self.say("  1  Off: after your passkey, Hermes may ask again for the same command.")
+        self.say("  2  Approve once: your passkey approval also answers Hermes's prompt for")
+        self.say("     that exact command. Its other prompts stay as they are.")
+        self.say("  3  Passkey for everything Hermes flags: the link is posted in the chat and")
+        self.say("     the command waits for your signature. Strongest.")
+        choice = self.ask("Choose 1, 2, 3, or Enter to keep: ")
+        if choice not in ("1", "2", "3"):
+            return
+        if choice != "3" and self._every_prompt() and not self._set_every_prompt(False):
+            return  # stepping down from 3 needs the passkey; it wasn't given
+        selected = bool(state.get("selected")) and state.get("transport_fallback") == "builtin"
+        if choice == "1":
+            if state.get("selected"):
+                self._set_cover(False)
+        elif not selected and not self._set_cover(True):
+            return
+        if choice == "3" and not self._every_prompt():
+            self._set_every_prompt(True)
 
     def step_settings(self):
         """Existing install: show the settings and change any of them."""
@@ -502,8 +555,9 @@ class Wizard:
             self.say(f"  4  Your chat accounts       {', '.join(owners) or 'none listed'}")
             self.say(f"  5  Hermes's own prompt      {self._cover_label()}")
             self.say("  Owner key and address are changed separately: see 'hermes passkey-gate --help'.")
-            self.say("  Turning enforcement off, removing patterns, narrowing conversations or")
-            self.say("  adding accounts weakens the gate, so those need your passkey.")
+            self.say("  Turning enforcement off, removing patterns, narrowing conversations, adding")
+            self.say("  accounts or dropping 'passkey for everything' weakens the gate, so those")
+            self.say("  need your passkey.")
             choice = self.ask("Number to change, or Enter when done: ").lower()
             if choice in ("", "q", "quit", "done"):
                 return
@@ -527,14 +581,7 @@ class Wizard:
                 if raw:
                     self._apply("owner_senders", "[]" if raw.lower() == "none" else raw)
             elif choice == "5":
-                state = transport.hermes_selection()
-                if state.get("selected") is None:
-                    self.say("This Hermes can't be configured from here. See README: 'Approving once, not twice'.")
-                elif state.get("selected") and state.get("transport_fallback") == "builtin":
-                    if self.confirm("Go back to Hermes asking again after your passkey?", default=False):
-                        self._set_cover(False)
-                else:
-                    self._set_cover(True)
+                self._choose_cover()
             else:
                 self.say("Type a number from 1 to 5, or press Enter.")
 

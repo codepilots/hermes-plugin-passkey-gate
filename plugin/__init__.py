@@ -97,6 +97,46 @@ def _on_post_tool_call(tool_name: str = "", args: dict = None, **kwargs):
     return None
 
 
+def _on_pre_approval_request(**kwargs):
+    """Hermes is about to ask its approval transport about a flagged command.
+    With passkey_hermes_prompts on, post a passkey approval link into this
+    conversation for the transport to wait on (transport.py). Never raises;
+    if nothing is posted, Hermes's own handling applies."""
+    try:
+        if kwargs.get("surface") != f"transport:{transport.TRANSPORT_NAME}":
+            return None
+        cfg = cli.apply_config_safe()
+        if (cfg.get("_config_error") or not cfg.get("require_passkey")
+                or not cfg.get("passkey_hermes_prompts")):
+            return None
+        surface = _session_surface()
+        gated = lanes.normalize_lanes(cfg.get("gated_lanes", list(lanes.LANES)))
+        turn = lanes.turn_lanes("", kwargs.get("session_id", ""), surface,
+                                cfg.get("owner_senders") or [])
+        if not lanes.gate_decision(gated, turn)[0]:
+            return None
+        if surface == "cli":
+            # the classic terminal client only shows posted messages when
+            # the turn ends, which is after the command would have run
+            outcome = "not asked: the classic terminal client can't show the link in time"
+        else:
+            outcome = transport.begin_ask(kwargs.get("request_id"), kwargs.get("command"),
+                                          kwargs.get("description"), cli._ctx_ref.post_message)
+        logger.info("passkey-gate: Hermes prompt on %s: %s", surface or "unknown surface", outcome)
+    except Exception:
+        logger.exception("passkey-gate: could not ask for a passkey approval of a Hermes prompt")
+    return None
+
+
+def _on_post_approval_response(**kwargs):
+    try:
+        if kwargs.get("surface") == f"transport:{transport.TRANSPORT_NAME}":
+            transport.end_ask(kwargs.get("request_id"))
+    except Exception:
+        logger.exception("passkey-gate: could not close a passkey approval request")
+    return None
+
+
 def _on_pre_llm_call(**kwargs):
     lanes.note_turn(**kwargs)
     return None
@@ -131,7 +171,9 @@ def register(ctx):
     # register, lanes fall back to "unknown origin", which is gated.
     for name, fn in (("pre_llm_call", _on_pre_llm_call),
                      ("post_gateway_admission", _on_post_gateway_admission),
-                     ("post_tool_call", _on_post_tool_call)):
+                     ("post_tool_call", _on_post_tool_call),
+                     ("pre_approval_request", _on_pre_approval_request),
+                     ("post_approval_response", _on_post_approval_response)):
         try:
             ctx.register_hook(name, fn)
         except Exception:

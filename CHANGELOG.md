@@ -19,6 +19,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discarded when the call finishes (a new `post_tool_call` hook), and are
   never given to a command whose text Hermes redacts. `status` reports the
   setting under `covers_hermes_prompt` and warns if the fallback would deny.
+- **Passkey for everything Hermes flags (`passkey_hermes_prompts`).** The
+  cover above only helps commands your patterns already caught. With this
+  setting on, Hermes's own dangerous-command detector decides what needs
+  approval and your passkey proves you said yes. When Hermes flags a
+  command, the gate posts an approval link into the same conversation
+  itself (`ctx.post_message`, from Hermes's `pre_approval_request` hook), so
+  no agent is involved in delivering it and nothing but the chat you
+  already use is needed. The transport waits for your signature, verifies
+  it locally against the pinned key, consumes it and answers "allow once";
+  a deny, no answer, or a signature that doesn't verify refuses the
+  command. The chat message is updated with the outcome, and a request
+  Hermes stops waiting on is withdrawn so a late signature leaves nothing
+  spendable. These requests are a new challenge kind created only by the
+  gate: an agent can't mint one, and one can't authorise a settings change.
+  Works in chats, the TUI and Desktop; the classic terminal client keeps
+  Hermes's own prompt. `status` warns unless `approvals.mode` is `manual`.
+  Turning the setting off needs your passkey. The setup wizard offers it,
+  and the settings menu switches between off, approve-once and this.
 - **Re-running `setup` lets you change your settings.** On an existing
   install the wizard used to skip every finished step and stop. It now ends
   with a settings menu showing the current values: enforcement on/off,

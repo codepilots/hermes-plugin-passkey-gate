@@ -121,12 +121,21 @@ again and it's blocked again: each approval is good for one execution.
   check value (`config_canary`), into its own section of the Hermes config,
   and writes outside its folder only where you point it: the audit anchor
   file (`audit_notary_path`) and the service file.
-- **Watches, but never changes, your conversations.** Three Hermes hooks:
-  `pre_tool_call` blocks matching tool calls while enforcement is on;
-  `pre_llm_call` and `post_gateway_admission` note each turn's platform,
-  sender id and bot flag so lanes can work. Those notes stay in memory
-  (the last 4096 sessions), are never written to disk, and nothing is
-  added to the model's context.
+- **Watches your conversations, and posts in them only if you ask it
+  to.** Hermes hooks: `pre_tool_call` blocks matching tool calls while
+  enforcement is on, and `post_tool_call` clears an unused approve-once
+  cover; `pre_llm_call` and `post_gateway_admission` note each turn's
+  platform, sender id and bot flag so lanes can work. Those notes stay in
+  memory (the last 4096 sessions), are never written to disk, and nothing
+  is added to the model's context. With `passkey_hermes_prompts` on,
+  `pre_approval_request` posts one message, the approval link for a
+  command Hermes flagged, into the conversation that command came from,
+  and later edits that message with the outcome
+  (`post_approval_response` closes the request). It never posts anywhere
+  else, and posts nothing with that setting off.
+- **Changes two Hermes settings only when you tell it to.** `setup` (and
+  its settings menu) can select the gate as Hermes's approval transport
+  (`security.approval.transport` and `transport_fallback`), after asking.
 - **Fails closed.** With enforcement on, any failure (gate unreachable,
   settings unreadable, an error in the hook) blocks the gated call rather
   than letting it through.
@@ -242,6 +251,57 @@ prompt the passkey didn't cover. `hermes passkey-gate status` shows the
 current state under `covers_hermes_prompt`. Hermes logs "Approval transport
 failed … using explicit builtin fallback" for each prompt it hands back;
 that's expected.
+
+#### Passkey for everything Hermes flags
+
+Patterns are a list you maintain, and a list can be worked round (see
+above). Hermes has its own detector for dangerous commands, with far more
+rules than a pattern list and its own shell parsing. With the gate selected
+as Hermes's approval transport (the block above), one more setting makes
+every command that detector flags need your passkey:
+
+```bash
+hermes passkey-gate set passkey_hermes_prompts true   # or: setup → settings menu → 5 → 3
+hermes config set approvals.mode manual
+```
+
+What happens then:
+
+1. The agent runs a command and Hermes flags it.
+2. The gate posts an approval link **into the same chat**, itself. The
+   agent takes no part in delivering it, so it can't skip asking.
+3. The command waits. You open the link, read the command and sign with
+   your passkey; the gate checks the signature against your pinned key and
+   lets the command run once. The chat message is updated to say what
+   happened. Deny on your phone, or don't answer before Hermes's
+   `approvals.timeout`, and it doesn't run.
+
+Things to know:
+
+- **`approvals.mode` must be `manual`** to cover every flagged command. In
+  Hermes's default `smart` mode a second model can approve a flagged
+  command without asking you, and with `off` or yolo nothing is asked at
+  all; none of those reach your passkey. `status` warns when the mode isn't
+  `manual`.
+- **Where the link can be posted.** Chats (Discord, Telegram and so on)
+  work. The TUI and Desktop app show it as a notification. The classic
+  terminal client only shows posted messages when the turn ends, which is
+  too late, so there Hermes's own prompt is used; you're at the keyboard
+  anyway.
+- **When the link can't be posted or created** (no conversation, no owner
+  key pinned, a command containing escape sequences the approval page
+  refuses to show), Hermes's `transport_fallback` decides: `builtin` shows
+  Hermes's ordinary prompt, anything else denies the command.
+- **Lanes apply.** Only conversations in your gated lanes get the passkey
+  request; others keep Hermes's own prompt.
+- **What it covers.** Hermes sends terminal commands and `execute_code`
+  scripts through a transport. File edits and other tools don't go this
+  way, so patterns (or *strict*) still matter for those.
+- **You sign what Hermes shows.** Hermes hands a transport the redacted
+  command, with tokens and passwords masked, so that is the text on the
+  approval page and in your signature.
+- **Anyone in the chat can see the link.** As with every approval link,
+  they can read the request and deny it; only your passkey can approve.
 
 ### Choosing which chats need a passkey
 
@@ -454,6 +514,7 @@ that check (see [Changing settings safely](#changing-settings-safely)).
 | `audit_notary_path` | `""` | Default notary file for `audit-notarize` / `audit-verify`. |
 | `gated_lanes` 🔒 | all five | Which conversations enforcement applies to: `local`, `owner`, `others`, `bots`, `agents`. See [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey). |
 | `owner_senders` 🔒 | `[]` | Your own chat accounts as `platform:user_id`, so their chats fall in the `owner` lane. |
+| `passkey_hermes_prompts` 🔒 | `false` | Every command Hermes itself flags as dangerous needs your passkey, with the link posted in the chat. Needs the gate selected as Hermes's approval transport; see [Passkey for everything Hermes flags](#passkey-for-everything-hermes-flags). |
 
 ### Tools the agent gets
 
@@ -556,6 +617,7 @@ later independent reviews and the record of every finding and fix are in
 | The phone says it already has a passkey for this gate | It registered earlier but its code was never typed in. Run `setup` again and choose to use the passkey that's already registered. If you've lost the code, delete that passkey in the phone's password settings and start again. |
 | The code you type doesn't match | You're reading a different passkey's code. Nothing is pinned until it matches; run `setup` again if in doubt. |
 | `status` says nothing is listening | The gate isn't running: `hermes passkey-gate service status`, or start `serve`. |
+| `passkey_hermes_prompts` is on but Hermes still shows its own prompt | Check `status`: the gate must be Hermes's approval transport, and the conversation must be in a gated lane. In the classic terminal client this is expected. If Hermes doesn't ask at all, `approvals.mode` isn't `manual`. |
 | After the passkey approval, Hermes asks again for the same command | Select the gate as Hermes's approval transport: see [Approving once, not twice](#approving-once-not-twice). |
 | The block message mentions the pinned owner key | No key is pinned, or the wrong one is. Check `hermes passkey-gate credentials`. |
 

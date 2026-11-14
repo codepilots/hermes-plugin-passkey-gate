@@ -3,7 +3,10 @@
 Getting started
   setup              guided first run: starts the gate, gives it an HTTPS
                      address, registers your phone's passkey and pins it
-                     when you type the code the phone shows. Safe to re-run.
+                     when you type the code the phone shows. Safe to re-run:
+                     on an existing install it ends with a settings menu
+                     (enforcement, which calls and chats, and how the gate
+                     works with Hermes's own approval prompt).
   service <action>   run the gate in the background (install, status, logs,
                      start, stop, restart, uninstall). Uses a systemd user
                      unit on Linux or a LaunchAgent on macOS.
@@ -32,7 +35,8 @@ Day to day
   set <key> <value> [--approve <challenge-id>]
                      change a setting; applies to a running gate at once.
                      Changes that make the gate weaker (turning enforcement
-                     off, removing a pattern, trusting another gate, a longer
+                     off, removing a pattern, trusting another gate, dropping
+                     passkey_hermes_prompts, a longer
                      request lifetime, moving the address) need your passkey:
                      the refusal prints a link and the --approve command.
   get                show all settings.
@@ -84,6 +88,7 @@ SETTINGS_SPEC = {
     "audit_notary_path": {"type": "str"},
     "gated_lanes": {"type": "list"},
     "owner_senders": {"type": "list"},
+    "passkey_hermes_prompts": {"type": "bool"},
 }
 
 DEFAULTS = {
@@ -97,6 +102,7 @@ DEFAULTS = {
     "audit_notary_path": "",
     "gated_lanes": list(lanes.LANES),
     "owner_senders": [],
+    "passkey_hermes_prompts": False,
 }
 
 # finding 16: the settings that define what the gate enforces. An agent with
@@ -111,6 +117,9 @@ SECURITY_KEYS = ("require_passkey", "authority_patterns", "parent_gate_allowlist
                  # v0.8 lanes: ungating a lane, or naming a sender as the
                  # owner, takes those conversations out of enforcement
                  "gated_lanes", "owner_senders",
+                 # turning this off hands Hermes-flagged commands back to
+                 # Hermes's ordinary, unsigned prompt
+                 "passkey_hermes_prompts",
                  # v0.7 review A28: re-pointing the audit anchor at a file
                  # someone else wrote would hide a rewritten audit log
                  "audit_notary_path")
@@ -149,7 +158,8 @@ def apply_config(ctx):
             "patterns": ctx.get_config("authority_patterns", default=[]) or [],
             # normalize_lanes fails closed on a malformed value (all lanes)
             "gated_lanes": ctx.get_config("gated_lanes", default=list(lanes.LANES)),
-            "owner_senders": owners if isinstance(owners, list) else []}
+            "owner_senders": owners if isinstance(owners, list) else [],
+            "passkey_hermes_prompts": bool(ctx.get_config("passkey_hermes_prompts", default=False))}
 
 
 def os_default_rp_id(origin: str = ""):
@@ -620,6 +630,9 @@ def _change_description(key, old, new):
     that disables a pattern look like the existing rule)."""
     if key == "require_passkey":
         return "turns enforcement OFF (require_passkey true → false)"
+    if key == "passkey_hermes_prompts":
+        return ("stops requiring a passkey for commands Hermes flags as dangerous "
+                "(passkey_hermes_prompts true → false)")
     if key == "gated_lanes":
         old_l = sorted(lanes.normalize_lanes(old), key=lanes.LANES.index)
         new_l = sorted(lanes.normalize_lanes(new), key=lanes.LANES.index)
@@ -687,7 +700,7 @@ def _change_weakens(key, old, new):
     old_n, new_n = _normalize_typed(key, old), _normalize_typed(key, new)
     if old_n is None or new_n is None:
         return True  # cannot judge the direction -> fail closed
-    if key == "require_passkey":
+    if key in ("require_passkey", "passkey_hermes_prompts"):
         return bool(old_n) and not bool(new_n)
     if key == "authority_patterns":
         if not (isinstance(old_n, list) and isinstance(new_n, list)):
@@ -1078,7 +1091,8 @@ def cmd_status(ctx, rest):
     out["config_check"] = (f"FAILING: {problem}" if problem else
                            "ok" if _expected_canary_safe() else
                            "not armed yet (run 'hermes passkey-gate setup')")
-    out["covers_hermes_prompt"] = transport.hermes_selection()
+    out["covers_hermes_prompt"] = transport.hermes_selection(
+        every_prompt=bool(apply_config_safe().get("passkey_hermes_prompts")))
     out["enforcement"] = {**apply_config_safe(),
                           "note": "patterns are regexes matched against tool_name + canonical args JSON"}
     return json.dumps(out, indent=2)

@@ -552,7 +552,12 @@ class ChallengeLimitError(ValueError):
 
 
 SETTINGS_KIND = "settings"
-RESERVED_REQUESTERS = ("hermes-cli",)
+# A command Hermes's own detector flagged, minted by the plugin's approval
+# transport (transport.py), never by an agent. Text-only, single use.
+HERMES_KIND = "hermes"
+HERMES_REQUESTER = "hermes-approval"
+GATE_KINDS = (SETTINGS_KIND, HERMES_KIND)
+RESERVED_REQUESTERS = ("hermes-cli", HERMES_REQUESTER)
 
 
 def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
@@ -582,15 +587,15 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
     requester = requester.strip()
     if not requester or len(requester) > 64:
         raise ValueError("requester must be 1-64 chars")
-    if _kind not in (None, SETTINGS_KIND):
+    if _kind not in (None,) + GATE_KINDS:
         raise ValueError("unknown challenge kind")
-    if requester.lower() in RESERVED_REQUESTERS and _kind != SETTINGS_KIND:
+    if requester.lower() in RESERVED_REQUESTERS and _kind not in GATE_KINDS:
         # v0.7 review L6/M1: an agent must not be able to dress its request
-        # up as the gate's own settings request
+        # up as one the gate itself created
         raise ValueError(f"requester name {requester!r} is reserved for the gate's own "
-                         "settings requests; use your own agent name")
-    if _kind == SETTINGS_KIND and tool_call is not None:
-        raise ValueError("a settings challenge is text-only")
+                         "requests; use your own agent name")
+    if _kind in GATE_KINDS and tool_call is not None:
+        raise ValueError("a challenge the gate creates itself is text-only")
     if tool_call is not None and not (isinstance(tool_call, dict)
                                       and isinstance(tool_call.get("tool"), str)
                                       and isinstance(tool_call.get("args", {}), dict)):
@@ -781,7 +786,8 @@ def consume(cid: str, binding_sha: str) -> bool:
     return cur.rowcount == 1
 
 
-def consume_approval(cid: str, action_sha: str) -> bool:
+def consume_approval(cid: str, action_sha: str, kind: str = SETTINGS_KIND,
+                     consumed_by: str = "hermes-cli set --approve") -> bool:
     """F1 (fresh review): atomically claim an APPROVED, UNEXPIRED,
     text-bound challenge by id + action hash — the claim behind
     `set --approve`, so a gate-weakening approval authorises exactly ONE
@@ -808,10 +814,26 @@ def consume_approval(cid: str, action_sha: str) -> bool:
         # v0.7 review M1: only a text-only challenge the gate minted for a
         # settings change can authorise one — not an agent's tool-call approval
         "and kind=? and binding_sha256 is null and tool_call is null",
-        (now, cid, sha, now, SETTINGS_KIND))
+        (now, cid, sha, now, kind if kind in GATE_KINDS else SETTINGS_KIND))
     if cur.rowcount == 1:
         audit("challenge_consumed", challenge_id=cid, action_sha256=sha,
-              consumed_by="hermes-cli set --approve")
+              consumed_by=consumed_by)
+    return cur.rowcount == 1
+
+
+def withdraw_challenge(cid: str, reason: str) -> bool:
+    """Void a Hermes-prompt request the transport stopped waiting on (no
+    answer, interrupted, or it could not be delivered), so a late signature
+    can't leave a spendable approval behind. Only touches challenges of
+    HERMES_KIND that haven't been consumed."""
+    if not isinstance(cid, str) or not ID_RE.match(cid):
+        return False
+    cur = db().execute(
+        "update challenges set status='denied', decided_at=? "
+        "where id=? and kind=? and status in ('pending','approved')",
+        (time.time(), cid, HERMES_KIND))
+    if cur.rowcount == 1:
+        audit("challenge_withdrawn", challenge_id=cid, reason=str(reason)[:200])
     return cur.rowcount == 1
 
 
@@ -1247,7 +1269,11 @@ def approval_page(row):
         '<div class="bound-call settings"><h2>THIS CHANGES PASSKEY-GATE\'S OWN SECURITY SETTINGS</h2>'
         '<p>Created by passkey-gate itself because someone asked to make the gate '
         '<b>weaker</b>. Read the change below; approve only if you asked for it.</p></div>'
-        if kind == SETTINGS_KIND else "")
+        if kind == SETTINGS_KIND else
+        '<div class="bound-call settings"><h2>HERMES FLAGGED THIS COMMAND AS DANGEROUS</h2>'
+        '<p>Created by passkey-gate because Hermes stopped before running the command below. '
+        'The agent is waiting: approve to let it run <b>once</b>, or deny.</p></div>'
+        if kind == HERMES_KIND else "")
     body = f"""
 <h1>Approval request</h1>
 {settings_banner}

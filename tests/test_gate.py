@@ -2063,3 +2063,182 @@ def test_challenge_state_tracks_progress_without_auditing(base, autumn, monkeypa
     assert gate_core.challenge_state(cid) == "expired"
     assert gate_core.challenge_state("nope") == "unknown"
     assert gate_core.challenge_state("0" * 32) == "unknown"
+
+
+# ------------------------------- passkey for every command Hermes flags
+from passkey_gate import transport  # noqa: E402
+
+HERMES_CMD = "git reset --hard origin/main"
+HERMES_WHY = "git reset --hard (destroys uncommitted changes)"
+
+
+class FakePost:
+    """ctx.post_message stand-in: records the text and later edits."""
+
+    def __init__(self, ok=True):
+        self.ok, self.error, self.texts = ok, None if ok else "no_conversation", []
+
+    def __call__(self, text):
+        self.texts.append(text)
+        return self
+
+    def edit(self, text):
+        self.texts.append(text)
+        return {"ok": True}
+
+    @property
+    def cid(self):
+        return re.search(r"/a/([A-Za-z0-9_-]+)", self.texts[0]).group(1)
+
+
+class HermesRequest:
+    """Shape of hermes_cli.approval_transport.ApprovalRequest."""
+
+    def __init__(self, rid, command=HERMES_CMD, timeout=30, choices=("once", "session", "always", "deny")):
+        self.request_id, self.command, self.timeout_seconds = rid, command, timeout
+        self.allowed_choices = choices
+
+    def respond(self, choice):
+        return choice
+
+
+@pytest.fixture
+def hermes_ask(base, autumn, monkeypatch):
+    """A Hermes-flagged command for which the link was posted to the chat."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(transport, "ASK_POLL_SECONDS", 0.02)
+    transport.clear()
+    post, rid = FakePost(), "req-" + secrets.token_hex(6)
+    assert transport.begin_ask(rid, HERMES_CMD, HERMES_WHY, post) == "asked"
+    yield rid, post
+    transport.clear()
+
+
+def test_hermes_prompt_is_answered_by_a_passkey_signature(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    assert HERMES_CMD in post.texts[0] and HERMES_WHY in post.texts[0]
+    assert f"{ORIGIN}/a/{post.cid}" in post.texts[0]
+    s, r = approve(base, autumn, post.cid)
+    assert s == 200 and r.get("status") == "approved", r
+    assert transport.present(HermesRequest(rid)) == "once"
+    assert post.texts[-1].startswith("✓ Approved with your passkey")
+    assert gate_core.challenge_state(post.cid) == "consumed"  # one signature, one run
+    with pytest.raises(transport.NotCovered):
+        transport.present(HermesRequest(rid))
+
+
+def test_hermes_prompt_waits_for_the_signature(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    threading.Timer(0.3, lambda: approve(base, autumn, post.cid)).start()
+    assert transport.present(HermesRequest(rid)) == "once"
+
+
+def test_hermes_prompt_page_says_who_created_it(base, hermes_ask):
+    rid, post = hermes_ask
+    with urllib.request.urlopen(f"{base}/a/{post.cid}") as r:
+        page = r.read().decode()
+    assert "HERMES FLAGGED THIS COMMAND AS DANGEROUS" in page
+    assert html.escape(HERMES_CMD) in page
+    transport.end_ask(rid)
+
+
+def test_hermes_prompt_denied_on_the_phone(base, hermes_ask):
+    rid, post = hermes_ask
+    assert gate_core.deny(post.cid) == {"status": "denied"}
+    assert transport.present(HermesRequest(rid)) == "deny"
+    assert post.texts[-1].startswith("✗ Denied")
+
+
+def test_hermes_prompt_no_answer_is_a_refusal_and_cannot_be_signed_late(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    assert transport.present(HermesRequest(rid, timeout=transport.ASK_MARGIN_SECONDS)) == "deny"
+    assert post.texts[-1].startswith("⌛ No passkey approval in time")
+    assert gate_core.challenge_state(post.cid) == "denied"
+    s, _ = call(base, f"/a/{post.cid}/options", {})
+    assert s != 200  # nothing left to sign
+
+
+def test_hermes_prompt_refuses_a_signature_from_an_unpinned_passkey(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    rogue = SoftAuthenticator()
+    tok = mint_token()
+    s, opts = call(base, "/register/options", {"token": tok})
+    s, r = call(base, "/register/finish", {"token": tok, "session_id": opts["session_id"],
+                                           "credential": rogue.create(opts)})
+    assert s == 200, r
+    s, r = approve(base, rogue, post.cid)
+    assert s == 200 and r.get("status") == "approved", r  # the gate recorded it...
+    assert transport.present(HermesRequest(rid)) == "deny"  # ...the transport doesn't accept it
+    assert "didn't verify" in post.texts[-1]
+    assert gate_core.challenge_state(post.cid) == "denied"
+
+
+def test_hermes_prompt_cancelled_when_hermes_stops_waiting(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    threading.Timer(0.2, lambda: transport.end_ask(rid)).start()
+    t0 = time.time()
+    assert transport.present(HermesRequest(rid, timeout=300)) == "deny"
+    assert time.time() - t0 < 5
+    assert gate_core.challenge_state(post.cid) == "denied"
+
+
+def test_hermes_prompt_withdrawn_if_the_transport_never_ran(base, hermes_ask):
+    rid, post = hermes_ask
+    transport.end_ask(rid)
+    assert gate_core.challenge_state(post.cid) == "denied"
+    assert post.texts[-1].startswith("⌛ Hermes stopped waiting")
+    with pytest.raises(transport.NotCovered):
+        transport.present(HermesRequest(rid))
+
+
+def test_hermes_prompt_never_grants_more_than_once(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    approve(base, autumn, post.cid)
+    assert transport.present(HermesRequest(rid, choices=("session", "always", "deny"))) == "deny"
+    assert gate_core.challenge_state(post.cid) == "denied"
+
+
+def test_hermes_prompt_not_asked_when_it_cannot_be_delivered(base, autumn):
+    pin_once(gate_core.data_dir(), autumn.pem)
+    transport.clear()
+    before = gate_core.db().execute("select count(*) from challenges where status='pending'").fetchone()[0]
+    post = FakePost(ok=False)
+    out = transport.begin_ask("req-undelivered", HERMES_CMD, HERMES_WHY, post)
+    assert out.startswith("not asked: the link could not be posted")
+    after = gate_core.db().execute("select count(*) from challenges where status='pending'").fetchone()[0]
+    assert after == before  # the request was withdrawn, nothing left to sign
+    with pytest.raises(transport.NotCovered):  # Hermes's fallback decides
+        transport.present(HermesRequest("req-undelivered"))
+    # text the approval page would refuse (an escape sequence) is never posted
+    post = FakePost()
+    assert transport.begin_ask("req-esc", "echo \x1b[2J; rm -r /srv/x", HERMES_WHY, post).startswith("not asked")
+    assert post.texts == []
+
+
+def test_hermes_prompt_left_to_the_cover_when_the_call_was_just_approved(base, autumn, monkeypatch):
+    pin_once(gate_core.data_dir(), autumn.pem)
+    transport.clear()
+    monkeypatch.setattr(transport, "_redact", lambda text: text)
+    transport.note_covered("terminal", {"command": HERMES_CMD})
+    post = FakePost()
+    assert transport.begin_ask("req-covered", HERMES_CMD, HERMES_WHY, post).startswith("covered")
+    assert post.texts == []
+    assert transport.present(HermesRequest("req-covered")) == "once"
+
+
+def test_agents_cannot_mint_or_spend_hermes_prompt_requests(base, autumn, hermes_ask):
+    rid, post = hermes_ask
+    text = transport.ask_text(HERMES_CMD, HERMES_WHY)
+    # the reserved requester name is refused over the agent-facing API
+    s, r = call(base, "/challenge", {"action_text": text, "requester": gate_core.HERMES_REQUESTER})
+    assert s != 201
+    # an agent's own request with the same text is not the gate's request
+    c = new_challenge(base, text=text, requester="mimic")
+    approve(base, autumn, c["challenge_id"])
+    assert not gate_core.consume_approval(c["challenge_id"], c["action_sha256"], kind=gate_core.HERMES_KIND)
+    # and a Hermes-prompt approval can't authorise a settings change
+    approve(base, autumn, post.cid)
+    sha = gate_core.sha256_hex(text)
+    assert not gate_core.consume_approval(post.cid, sha)  # settings kind by default
+    assert gate_core.consume_approval(post.cid, sha, kind=gate_core.HERMES_KIND)
+    assert not gate_core.withdraw_challenge(c["challenge_id"], "not ours")  # only Hermes-kind rows

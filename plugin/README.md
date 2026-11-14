@@ -56,6 +56,14 @@ Run `setup` in your own terminal, never through an agent.
   and the remote-minting token in its own Hermes plugin data folder. No
   private keys are stored anywhere.
 
+- **Hermes's own prompts, if you choose.** Select the gate as Hermes's
+  approval transport (setup offers it) and a passkey approval also answers
+  Hermes's prompt for that command, so you approve once. Turn on
+  `passkey_hermes_prompts` as well and every command Hermes itself flags as
+  dangerous needs your passkey: the gate posts the approval link into the
+  chat the command came from and the command waits for your signature. It
+  posts nothing unless that setting is on.
+
 ## Learn more
 
 The full README covers how verification works, enforcement, approvals

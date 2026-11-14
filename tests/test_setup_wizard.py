@@ -281,22 +281,50 @@ def test_rerun_keeps_settings_on_enter(world):
         {k: before[k] for k in ("authority_patterns", "gated_lanes", "require_passkey")}
 
 
-def test_cover_question_and_menu_toggle(world, monkeypatch):
+def _fake_hermes(monkeypatch):
     from passkey_gate import transport
     hermes = {"selected": False, "transport_fallback": "deny"}
-    monkeypatch.setattr(transport, "hermes_selection", lambda: dict(hermes))
+    monkeypatch.setattr(transport, "hermes_selection", lambda every_prompt=False: dict(hermes))
 
     def set_cover(on):
         hermes.update(selected=on, transport_fallback="builtin")
         return True, "on" if on else "off"
     monkeypatch.setattr(transport, "set_hermes_cover", set_cover)
-    _, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", "", ""])  # Enter = yes
+    return hermes
+
+
+def test_first_run_offers_the_cover_and_passkey_for_everything(world, monkeypatch):
+    hermes = _fake_hermes(monkeypatch)
+    # enforcement y, patterns, lanes, cover: Enter = yes, everything: Enter = no
+    _, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", "", "", ""])
     assert hermes["selected"] is True and "Approve once instead of twice?" in " ".join(s.prompts)
-    _, s, _ = _run(world, ["5", "y", ""], ctx)
+    assert not ctx.store.get("passkey_hermes_prompts")
+
+
+def test_menu_switches_between_off_cover_and_passkey_for_everything(world, monkeypatch):
+    hermes = _fake_hermes(monkeypatch)
+    ctx = _installed(world)
+    _, s, _ = _run(world, ["5", "3", ""], ctx)      # straight to the strongest
+    assert hermes["selected"] is True and ctx.store["passkey_hermes_prompts"] is True
+    assert "passkey for everything Hermes flags" in s.text.split("── Settings")[-1]
+    seen = _passkey_signs(monkeypatch)              # stepping down weakens: passkey
+    _, s, _ = _run(world, ["5", "2", ""], ctx)
+    assert ctx.store["passkey_hermes_prompts"] is False and hermes["selected"] is True
+    assert "stops requiring a passkey for commands Hermes flags" in seen["phrase"]
+    _run(world, ["5", "1", ""], ctx)                # off: the cover goes too
     assert hermes["selected"] is False
-    assert "off (Hermes may ask again" in s.text.split("── Settings")[-1]
-    _run(world, ["5", ""], ctx)
-    assert hermes["selected"] is True
+    _run(world, ["5", "", ""], ctx)                 # Enter keeps
+    assert hermes["selected"] is False
+
+
+def test_menu_keeps_passkey_for_everything_when_the_step_down_is_denied(world, monkeypatch):
+    hermes = _fake_hermes(monkeypatch)
+    ctx = _installed(world)
+    _run(world, ["5", "3", ""], ctx)
+    _passkey_signs(monkeypatch, decision="denied")
+    _run(world, ["5", "1", ""], ctx)
+    assert ctx.store["passkey_hermes_prompts"] is True and hermes["selected"] is True
+
 
 
 def test_wizard_turns_on_enforcement(world):
