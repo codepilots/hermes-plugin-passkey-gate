@@ -202,6 +202,36 @@ The block message tells the agent that reaching the same effect another way
 is a violation, which stops a well-behaved agent from wandering round the
 gate by accident; it can't stop a hostile one.
 
+#### Approving once, not twice
+
+A command the gate gates, such as `rm -rf`, is often one Hermes also counts
+as dangerous. Then, straight after you sign with your passkey, Hermes asks
+you to approve the same command again with its own prompt. To let the
+passkey approval answer that prompt, select the gate as Hermes's approval
+transport in the Hermes `config.yaml`:
+
+```yaml
+security:
+  approval:
+    transport: passkey-gate
+    transport_fallback: builtin
+```
+
+then `hermes gateway restart`. When the gate has just consumed a passkey
+approval for a call, Hermes's prompt for exactly that command (or
+`execute_code` script) is answered "allow once". Every other prompt falls
+back to Hermes's normal one. Each cover is single use, lasts at most 30
+seconds and ends when that tool call finishes. A command containing
+something Hermes redacts (a token, a password) keeps its second prompt,
+because Hermes only shows the transport the redacted text. Hermes's
+hardline blocks and deny rules still run first.
+
+`transport_fallback: builtin` matters: without it Hermes *denies* every
+prompt the passkey didn't cover. `hermes passkey-gate status` shows the
+current state under `covers_hermes_prompt`. Hermes logs "Approval transport
+failed … using explicit builtin fallback" for each prompt it hands back;
+that's expected.
+
 ### Choosing which chats need a passkey
 
 Enforcement can apply to every conversation or only some. Each agent turn
@@ -515,6 +545,7 @@ later independent reviews and the record of every finding and fix are in
 | The phone says it already has a passkey for this gate | It registered earlier but its code was never typed in. Run `setup` again and choose to use the passkey that's already registered. If you've lost the code, delete that passkey in the phone's password settings and start again. |
 | The code you type doesn't match | You're reading a different passkey's code. Nothing is pinned until it matches; run `setup` again if in doubt. |
 | `status` says nothing is listening | The gate isn't running: `hermes passkey-gate service status`, or start `serve`. |
+| After the passkey approval, Hermes asks again for the same command | Select the gate as Hermes's approval transport: see [Approving once, not twice](#approving-once-not-twice). |
 | The block message mentions the pinned owner key | No key is pinned, or the wrong one is. Check `hermes passkey-gate credentials`. |
 
 ## Development

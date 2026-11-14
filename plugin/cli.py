@@ -63,7 +63,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import childenv, gate_core, expose, lanes, local_verify, netfetch, service, tools
+from . import childenv, gate_core, expose, lanes, local_verify, netfetch, service, tools, transport
 
 logger = logging.getLogger(__name__)
 
@@ -1078,6 +1078,7 @@ def cmd_status(ctx, rest):
     out["config_check"] = (f"FAILING: {problem}" if problem else
                            "ok" if _expected_canary_safe() else
                            "not armed yet (run 'hermes passkey-gate setup')")
+    out["covers_hermes_prompt"] = transport.hermes_selection()
     out["enforcement"] = {**apply_config_safe(),
                           "note": "patterns are regexes matched against tool_name + canonical args JSON"}
     return json.dumps(out, indent=2)

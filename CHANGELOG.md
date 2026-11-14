@@ -4,6 +4,22 @@ All notable changes to passkey-gate are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A passkey approval also answers Hermes's own prompt.** A command both
+  the gate and Hermes count as dangerous used to need two approvals: the
+  passkey, then Hermes's built-in prompt straight after. The plugin now
+  registers a Hermes approval transport, `passkey-gate`. Once you select it
+  (`security.approval.transport: passkey-gate` with `transport_fallback:
+  builtin`), Hermes's prompt for a command the hook has just consumed a
+  passkey approval for is answered "allow once". Every other prompt goes to
+  Hermes's normal one. Covers are single use, expire after 30 s, are
+  discarded when the call finishes (a new `post_tool_call` hook), and are
+  never given to a command whose text Hermes redacts. `status` reports the
+  setting under `covers_hermes_prompt` and warns if the fallback would deny.
+
 ## [0.8.1] - 2026-11-10
 
 ### Security

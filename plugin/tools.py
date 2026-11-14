@@ -10,7 +10,7 @@ import logging
 import re
 import time
 
-from . import childenv, gate_core, local_verify, netfetch
+from . import childenv, gate_core, local_verify, netfetch, transport
 
 logger = logging.getLogger(__name__)
 
@@ -642,7 +642,13 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
                 "gate_challenge and have the human sign it before retrying. "
                 "A single signature authorises exactly one execution."
             )}
-        # allow = no block directive; the challenge is consumed and audited
+        # allow = no block directive; the challenge is consumed and audited.
+        # If Hermes now raises its own dangerous-command prompt for this
+        # exact command, the passkey approval answers it (transport.py).
+        try:
+            transport.note_covered(tool_name, args)
+        except Exception:
+            logger.exception("passkey-gate: could not record approval cover")
         return None
     except Exception as exc:
         return {"action": "block", "message": (

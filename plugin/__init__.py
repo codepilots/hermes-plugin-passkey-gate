@@ -29,7 +29,7 @@ The full first-hand scenario behind this plugin: docs/scenario.md.
 import argparse
 import logging
 
-from . import cli, gate_core, lanes, schemas, tools
+from . import cli, gate_core, lanes, schemas, tools, transport
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ def _pre_tool_call_verdict(tool_name, args, task_id="", session_id=""):
     return verdict
 
 
+def _on_post_tool_call(tool_name: str = "", args: dict = None, **kwargs):
+    # The call has run (or failed): a passkey cover it never used for
+    # Hermes's prompt must not be left for a later call (transport.py).
+    try:
+        transport.discard(tool_name, args)
+    except Exception:
+        logger.exception("passkey-gate: could not discard approval cover")
+    return None
+
+
 def _on_pre_llm_call(**kwargs):
     lanes.note_turn(**kwargs)
     return None
@@ -120,12 +130,23 @@ def register(ctx):
     # Lane observers: record where each turn came from. If either fails to
     # register, lanes fall back to "unknown origin", which is gated.
     for name, fn in (("pre_llm_call", _on_pre_llm_call),
-                     ("post_gateway_admission", _on_post_gateway_admission)):
+                     ("post_gateway_admission", _on_post_gateway_admission),
+                     ("post_tool_call", _on_post_tool_call)):
         try:
             ctx.register_hook(name, fn)
         except Exception:
             logger.exception("passkey-gate: could not register %s; turn origins "
                              "will be treated as unknown (gated)", name)
+    # Approval transport: lets a passkey approval also answer Hermes's own
+    # dangerous-command prompt for that exact command, so the human isn't
+    # asked twice. Registering does nothing until the operator selects it
+    # (security.approval.transport); older Hermes has no such API.
+    register_transport = getattr(ctx, "register_approval_transport", None)
+    if callable(register_transport):
+        try:
+            register_transport(transport.TRANSPORT_NAME, transport.present)
+        except Exception:
+            logger.exception("passkey-gate: could not register approval transport")
     try:
         cfg = cli.apply_config_safe()
     except Exception as exc:
