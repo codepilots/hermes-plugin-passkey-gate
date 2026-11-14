@@ -2121,6 +2121,8 @@ def test_hermes_prompt_is_answered_by_a_passkey_signature(base, autumn, hermes_a
     s, r = approve(base, autumn, post.cid)
     assert s == 200 and r.get("status") == "approved", r
     assert transport.present(HermesRequest(rid)) == "once"
+    assert len(post.texts) == 1  # the message is only updated once Hermes closes the request
+    transport.end_ask(rid)
     assert post.texts[-1].startswith("✓ Approved with your passkey")
     assert gate_core.challenge_state(post.cid) == "consumed"  # one signature, one run
     with pytest.raises(transport.NotCovered):
@@ -2146,12 +2148,14 @@ def test_hermes_prompt_denied_on_the_phone(base, hermes_ask):
     rid, post = hermes_ask
     assert gate_core.deny(post.cid) == {"status": "denied"}
     assert transport.present(HermesRequest(rid)) == "deny"
+    transport.end_ask(rid)
     assert post.texts[-1].startswith("✗ Denied")
 
 
 def test_hermes_prompt_no_answer_is_a_refusal_and_cannot_be_signed_late(base, autumn, hermes_ask):
     rid, post = hermes_ask
     assert transport.present(HermesRequest(rid, timeout=transport.ASK_MARGIN_SECONDS)) == "deny"
+    transport.end_ask(rid)
     assert post.texts[-1].startswith("⌛ No passkey approval in time")
     assert gate_core.challenge_state(post.cid) == "denied"
     s, _ = call(base, f"/a/{post.cid}/options", {})
@@ -2169,6 +2173,7 @@ def test_hermes_prompt_refuses_a_signature_from_an_unpinned_passkey(base, autumn
     s, r = approve(base, rogue, post.cid)
     assert s == 200 and r.get("status") == "approved", r  # the gate recorded it...
     assert transport.present(HermesRequest(rid)) == "deny"  # ...the transport doesn't accept it
+    transport.end_ask(rid)
     assert "didn't verify" in post.texts[-1]
     assert gate_core.challenge_state(post.cid) == "denied"
 
@@ -2180,6 +2185,8 @@ def test_hermes_prompt_cancelled_when_hermes_stops_waiting(base, autumn, hermes_
     assert transport.present(HermesRequest(rid, timeout=300)) == "deny"
     assert time.time() - t0 < 5
     assert gate_core.challenge_state(post.cid) == "denied"
+    assert post.texts[-1].startswith("⌛ Hermes stopped waiting") and len(post.texts) == 2
+    assert transport._asks == {}
 
 
 def test_hermes_prompt_withdrawn_if_the_transport_never_ran(base, hermes_ask):
@@ -2242,3 +2249,40 @@ def test_agents_cannot_mint_or_spend_hermes_prompt_requests(base, autumn, hermes
     assert not gate_core.consume_approval(post.cid, sha)  # settings kind by default
     assert gate_core.consume_approval(post.cid, sha, kind=gate_core.HERMES_KIND)
     assert not gate_core.withdraw_challenge(c["challenge_id"], "not ours")  # only Hermes-kind rows
+
+
+def test_hermes_prompt_survives_the_worker_thread_losing_its_profile(base, autumn, hermes_ask,
+                                                                      monkeypatch, tmp_path):
+    """Hermes runs the transport on a worker thread that has lost the
+    session's profile, where the gate's data folder resolves to the DEFAULT
+    profile's empty store (seen live: the request looked unknown and was
+    refused in under a second). The wait must use the folder the request
+    was created in."""
+    rid, post = hermes_ask
+    real = gate_core.data_dir()
+    wrong = tmp_path / "default-profile"
+    monkeypatch.setattr(
+        gate_core, "_hermes_data_dir",
+        lambda: wrong if threading.current_thread().name == "approval-transport-worker" else real)
+    threading.Timer(0.3, lambda: approve(base, autumn, post.cid)).start()
+    out = []
+    worker = threading.Thread(target=lambda: out.append(transport.present(HermesRequest(rid))),
+                              name="approval-transport-worker")
+    worker.start()
+    worker.join(20)
+    assert out == ["once"]
+    assert not (wrong / "gate.db").exists()  # nothing was read from or written to the wrong store
+    transport.end_ask(rid)
+    assert post.texts[-1].startswith("✓ Approved with your passkey")
+
+
+def test_using_data_dir_is_per_thread_and_restores():
+    real = gate_core.data_dir()
+    with gate_core.using_data_dir("/nonexistent/elsewhere"):
+        assert str(gate_core.data_dir()) == "/nonexistent/elsewhere"
+        seen = []
+        t = threading.Thread(target=lambda: seen.append(gate_core.data_dir()))
+        t.start()
+        t.join()
+        assert seen == [real]  # other threads are unaffected
+    assert gate_core.data_dir() == real

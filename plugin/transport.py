@@ -49,8 +49,16 @@ approval and the passkey proves the human said yes:
      then consumed: answer ``once``. Denied on the phone, no answer in
      time, or a signature that doesn't verify: answer ``deny``.
   3. When Hermes stops waiting, post_approval_response calls ``end_ask``,
-     which cancels the wait and withdraws the challenge, so a late
-     signature leaves nothing spendable behind.
+     which updates the chat message with the outcome, cancels a wait that
+     is still running and withdraws the challenge, so a late signature
+     leaves nothing spendable behind.
+
+Hermes's transport worker thread has lost the session's profile and
+conversation: there, the gate's data folder would resolve to the DEFAULT
+profile's, and posted messages can't be edited. So ``begin_ask`` records
+the data folder while it has the session's context and ``present`` pins
+its thread to it (gate_core.using_data_dir), and the message is only ever
+edited from ``end_ask``, which runs in the session's context again.
 
 If the link can't be minted or delivered (the classic terminal client only
 shows posted messages at the end of the turn; no owner key pinned; no gate
@@ -70,6 +78,7 @@ TRANSPORT_NAME = "passkey-gate"
 CREDIT_TTL_SECONDS = 30.0
 ASK_MARGIN_SECONDS = 5.0   # answer this long before Hermes's own timeout
 ASK_POLL_SECONDS = 1.0
+ASK_KEEP_SECONDS = 3600.0  # forget a request whose end never arrived
 DISPLAY_CHARS = 600
 
 _lock = threading.Lock()
@@ -164,10 +173,14 @@ def has_cover(command) -> bool:
 class _Ask:
     """One Hermes approval request waiting on a passkey signature."""
 
-    def __init__(self, cid, sha, text, command, handle):
+    def __init__(self, cid, sha, text, command, handle, data_dir):
         self.cid, self.sha, self.text, self.command, self.handle = cid, sha, text, command, handle
+        self.data_dir = data_dir       # resolved in the session's context
         self.cancelled = threading.Event()
-        self.started = False
+        self.started = False           # present() picked it up
+        self.line = None               # outcome for the chat message, once decided
+        self.closed = False            # end_ask already updated the message
+        self.created = time.monotonic()
 
 
 def ask_text(command: str, description: str) -> str:
@@ -225,8 +238,12 @@ def begin_ask(request_id, command, description, post) -> str:
         if not getattr(handle, "ok", False):
             gate_core.withdraw_challenge(cid, "the link could not be posted")
             return f"not asked: the link could not be posted ({getattr(handle, 'error', None)})"
+        now = time.monotonic()
         with _lock:
-            _asks[str(request_id)] = _Ask(cid, c["action_sha256"], text, command, handle)
+            for old in [k for k, a in _asks.items() if now - a.created > ASK_KEEP_SECONDS]:
+                del _asks[old]  # an end_ask that never came
+            _asks[str(request_id)] = _Ask(cid, c["action_sha256"], text, command, handle,
+                                          gate_core.data_dir())
         return "asked"
     except Exception as exc:
         if cid:
@@ -259,10 +276,17 @@ def _verify(ask) -> list:
 
 
 def _finish(ask, line: str) -> None:
+    """Record the outcome line; end_ask writes it to the chat."""
+    ask.line = line
+
+
+def _update_message(ask, line: str) -> None:
     try:
-        ask.handle.edit(f"{line}\n{_shown(ask.command)}")
+        result = ask.handle.edit(f"{line}\n{_shown(ask.command)}")
+        if isinstance(result, dict) and not result.get("ok"):
+            logger.info("passkey-gate: the approval message was not updated: %s", result.get("error"))
     except Exception:
-        logger.debug("passkey-gate: could not update the approval message", exc_info=True)
+        logger.info("passkey-gate: could not update the approval message", exc_info=True)
 
 
 def _decide(ask, timeout_seconds: float) -> bool:
@@ -315,16 +339,22 @@ def present(request):
             ask.started = True
     if ask is None:
         raise NotCovered("no passkey approval covers this command; using Hermes's own prompt")
+    approved = False
     try:
-        if once_allowed:
-            approved = _decide(ask, float(getattr(request, "timeout_seconds", 300) or 300))
-        else:  # nothing a signature could grant: don't leave the request open
-            approved = False
-            gate_core.withdraw_challenge(ask.cid, "Hermes did not offer a single-use approval")
-            _finish(ask, "✗ Hermes didn't offer a one-off approval for this. Not run:")
+        # this worker thread has lost the session's profile: use the data
+        # folder begin_ask resolved, not whatever resolves here
+        with gate_core.using_data_dir(ask.data_dir):
+            if once_allowed:
+                approved = _decide(ask, float(getattr(request, "timeout_seconds", 300) or 300))
+            else:  # nothing a signature could grant: don't leave the request open
+                gate_core.withdraw_challenge(ask.cid, "Hermes did not offer a single-use approval")
+                _finish(ask, "✗ Hermes didn't offer a one-off approval for this. Not run:")
     finally:
         with _lock:
-            _asks.pop(rid, None)
+            if ask.line is None:
+                ask.line = "✗ Not run:"
+            if ask.closed:  # Hermes gave up earlier and end_ask already ran
+                _asks.pop(rid, None)
     return request.respond("once" if approved else "deny")
 
 
@@ -337,15 +367,20 @@ def end_ask(request_id) -> None:
         ask = _asks.get(rid)
         if ask is None:
             return
+        line, waiting = ask.line, ask.started and ask.line is None
         ask.cancelled.set()
-        if ask.started:
-            return
-        _asks.pop(rid, None)
-    try:
-        gate_core.withdraw_challenge(ask.cid, "Hermes never waited on it")
-    except Exception:
-        pass
-    _finish(ask, "⌛ Hermes stopped waiting. Not run:")
+        ask.closed = True
+        if not waiting:
+            _asks.pop(rid, None)
+    if line is None:
+        line = "⌛ Hermes stopped waiting. Not run:"
+        if not waiting:  # present() never picked it up: withdraw it here
+            try:
+                with gate_core.using_data_dir(ask.data_dir):
+                    gate_core.withdraw_challenge(ask.cid, "Hermes never waited on it")
+            except Exception:
+                pass
+    _update_message(ask, line)
 
 
 def clear() -> None:

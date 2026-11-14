@@ -178,7 +178,31 @@ def _hermes_data_dir():
         return None
 
 
+_thread_data_dir = threading.local()
+
+
+@contextlib.contextmanager
+def using_data_dir(path):
+    """Pin THIS thread to a data folder the caller already resolved.
+
+    Hermes resolves a plugin's data folder from the calling thread's
+    profile, and its approval-transport worker threads lose that profile:
+    there, data_dir() would silently point at the DEFAULT profile's (empty)
+    store. The transport captures the folder while it still has the
+    session's context and pins its worker to it. The path only ever comes
+    from data_dir() itself, never from an agent or the environment (M4)."""
+    previous = getattr(_thread_data_dir, "path", None)
+    _thread_data_dir.path = Path(path)
+    try:
+        yield
+    finally:
+        _thread_data_dir.path = previous
+
+
 def data_dir() -> Path:
+    pinned_here = getattr(_thread_data_dir, "path", None)
+    if pinned_here is not None:
+        return pinned_here
     # v0.7 review M4: inside Hermes the trust store (pins, approvals, canary,
     # audit log) is ALWAYS Hermes's plugin data folder. A GATE_DATA override
     # there let a shell point `set --approve` at a store it had seeded, and
