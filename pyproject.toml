@@ -1,6 +1,6 @@
 [project]
 name = "hermes-plugin-passkey-gate"
-version = "0.8.1"
+version = "0.9.0"
 description = "Passkey (WebAuthn) authorization gate for high-authority Hermes agent actions"
 readme = "README.md"
 license = "MIT"
@@ -12,3 +12,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "pyyaml>=6,<7"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# pyflakes (unused imports and variables, undefined names) and syntax errors.
+# Deliberately narrow: it catches real mistakes without a style rewrite.
+select = ["E9", "F"]

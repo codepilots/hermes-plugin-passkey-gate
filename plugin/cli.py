@@ -11,8 +11,12 @@ Getting started
                      start, stop, restart, uninstall). Uses a systemd user
                      unit on Linux or a LaunchAgent on macOS.
   serve              run the gate in this terminal instead.
+  test               check address, phone and passkey end to end: scan a
+                     QR code, approve a harmless sample request, and the
+                     signature is checked against your pinned key. Says
+                     which part failed. Changes nothing.
   status             is the gate reachable, is your key pinned, is
-                     enforcement on?
+                     enforcement on? (--json for scripts)
 
 Setting up by hand (what `setup` does)
   expose [auto|tailscale]
@@ -72,7 +76,7 @@ from . import childenv, gate_core, expose, lanes, local_verify, netfetch, servic
 logger = logging.getLogger(__name__)
 
 USAGE = ("usage: hermes passkey-gate "
-         "<setup|service|serve|bootstrap|expose|credentials|pin|show|set|get|status|mint-token|"
+         "<setup|test|service|serve|bootstrap|expose|credentials|pin|show|set|get|status|mint-token|"
          "audit-verify|audit-notarize> [args]\n"
          "new here? run: hermes passkey-gate setup")
 
@@ -405,6 +409,11 @@ def cmd_bootstrap(ctx, rest):
 def cmd_setup(ctx, rest):
     from . import setup_wizard
     return setup_wizard.cmd_setup(ctx, rest)
+
+
+def cmd_test(ctx, rest):
+    from . import selftest
+    return selftest.cmd_test(ctx, rest)
 
 
 SERVICE_USAGE = ("usage: hermes passkey-gate service "
@@ -1070,8 +1079,8 @@ def cmd_show_settings(ctx, rest=None):
     return "passkey-gate settings (plugins.entries.passkey-gate.settings.*):\n" + "\n".join(rows)
 
 
-def cmd_status(ctx, rest):
-    """One-screen answer to 'can I rely on this gate right now?'"""
+def status_data(ctx):
+    """Everything `status` reports, as data (also `status --json`)."""
     out = {"gate": {"reachable": False}}
     base = ((ctx.get_config("origin", default="") or "").strip()).rstrip("/") if ctx is not None else ""
     if not base:
@@ -1092,10 +1101,110 @@ def cmd_status(ctx, rest):
                            "ok" if _expected_canary_safe() else
                            "not armed yet (run 'hermes passkey-gate setup')")
     out["covers_hermes_prompt"] = transport.hermes_selection(
-        every_prompt=bool(apply_config_safe().get("passkey_hermes_prompts")))
+        every_prompt=bool(apply_config_safe().get("passkey_hermes_prompts")),
+        request_ttl=gate_core.challenge_ttl())
     out["enforcement"] = {**apply_config_safe(),
                           "note": "patterns are regexes matched against tool_name + canonical args JSON"}
-    return json.dumps(out, indent=2)
+    return out
+
+
+def _patterns_words(patterns):
+    from . import setup_wizard  # lazy: setup_wizard imports this module
+    if patterns == [setup_wizard.DEFAULT_PATTERN]:
+        return "standard patterns"
+    if patterns == [setup_wizard.STRICT_PATTERN]:
+        return "strict"
+    n = len(patterns or [])
+    return f"{n} custom pattern{'' if n == 1 else 's'}" if n else "no patterns"
+
+
+def status_text(out) -> str:
+    """`status` for people: one line per thing to rely on, then what to do."""
+    ok, warn, bad, off = "✓", "!", "✗", "–"
+    rows, todo = [], []
+
+    def row(mark, label, text):
+        rows.append(f"  {mark} {label:<13}{terminal_safe_text(text)}")
+
+    gate = out.get("gate") or {}
+    if gate.get("reachable"):
+        where = gate.get("origin") or "its address"
+        row(ok, "Gate", f"reachable at {where}")
+    else:
+        row(bad, "Gate", gate.get("error") or "not reachable")
+        if gate.get("next_step"):
+            todo.append(gate["next_step"])
+
+    if out.get("owner_key_pinned"):
+        n = gate.get("credentials")
+        row(ok, "Owner key", "pinned" + (f" ({n} passkey{'' if n == 1 else 's'} registered here)"
+                                          if isinstance(n, int) else ""))
+    else:
+        row(bad, "Owner key", "not pinned: no approval can be trusted yet")
+        todo.append("run 'hermes passkey-gate setup' in your own terminal")
+
+    check = str(out.get("config_check") or "")
+    if check == "ok":
+        row(ok, "Config check", "ok")
+    elif check.startswith("FAILING"):
+        row(bad, "Config check", check)
+        todo.append("restore the gate's settings (see README: Troubleshooting)")
+    else:
+        row(warn, "Config check", check)
+
+    enf = out.get("enforcement") or {}
+    if enf.get("_config_error"):
+        row(bad, "Enforcement", f"settings failed to load, every gated call is blocked: {enf['_config_error']}")
+    elif enf.get("require_passkey"):
+        conv = ", ".join(lanes.normalize_lanes_ordered(enf.get("gated_lanes", list(lanes.LANES)))) or "none"
+        row(ok, "Enforcement", f"on · {_patterns_words(enf.get('patterns'))} · conversations: {conv}")
+    else:
+        row(off, "Enforcement", "off: nothing is blocked (hermes passkey-gate setup to turn it on)")
+
+    hermes = out.get("covers_hermes_prompt") or {}
+    if hermes.get("selected") is None:
+        row(off, "Hermes", "its config can't be read from here")
+    elif hermes.get("every_flagged_command") and hermes.get("selected"):
+        detail = []
+        if hermes.get("approvals_mode"):
+            detail.append(f"approvals.mode {hermes['approvals_mode']}")
+        if hermes.get("waits_seconds") is not None:
+            detail.append(f"waits {hermes['waits_seconds']}s")
+        row(warn if hermes.get("warning") else ok, "Hermes",
+            "passkey for every command Hermes flags" + (f" ({', '.join(detail)})" if detail else ""))
+    elif hermes.get("selected") and hermes.get("transport_fallback") == "builtin":
+        row(ok, "Hermes", "approve once: your passkey also answers Hermes's prompt")
+    elif hermes.get("selected") or hermes.get("every_flagged_command"):
+        row(warn, "Hermes", hermes.get("note", ""))
+    else:
+        row(off, "Hermes", "not connected: after your passkey, Hermes may ask again")
+    if hermes.get("warning"):
+        todo.extend(w.strip() for w in str(hermes["warning"]).split(" | "))
+
+    lines = ["passkey-gate status", ""] + rows
+    extra = [f"Requests can be signed for {gate['challenge_ttl_s']}s"] if gate.get("challenge_ttl_s") else []
+    peers = out.get("peer_keys_pinned") or []
+    if peers:
+        extra.append("peer keys pinned: " + ", ".join(peers))
+    if extra:
+        lines += ["", "  " + terminal_safe_text(". ".join(extra)) + "."]
+    if todo:
+        lines += ["", "Next:"] + [f"  • {terminal_safe_text(t)}" for t in todo]
+    lines += ["", "For scripts: hermes passkey-gate status --json"]
+    return "\n".join(lines)
+
+
+def terminal_safe_text(text) -> str:
+    return gate_core.terminal_safe(text)
+
+
+def cmd_status(ctx, rest):
+    """One-screen answer to 'can I rely on this gate right now?'
+    Plain text; `--json` for scripts."""
+    out = status_data(ctx)
+    if rest and "--json" in rest:
+        return json.dumps(out, indent=2)
+    return status_text(out)
 
 
 def _utc_now():
@@ -1281,6 +1390,7 @@ def cmd_audit_notarize(ctx, rest):
 
 _COMMANDS = {
     "setup": cmd_setup,
+    "test": cmd_test,
     "service": cmd_service,
     "serve": cmd_serve,
     "bootstrap": cmd_bootstrap,
@@ -1304,6 +1414,6 @@ def dispatch(ctx, args_str: str):
     fn = _COMMANDS.get(cmd)
     if fn is None:
         return USAGE
-    if cmd in ("set", "get", "show-settings", "status", "setup") and ctx is None:
+    if cmd in ("set", "get", "show-settings", "status", "setup", "test") and ctx is None:
         return "that command needs a hermes runtime context — run inside hermes"
     return fn(ctx, parts[1:])

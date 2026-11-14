@@ -20,7 +20,7 @@ Run it in a THROWAWAY Hermes home so your real profile is untouched:
 Prints PASS/FAIL per step and exits non-zero on any failure.
 """
 import base64, hashlib, json, os, re, secrets, struct, subprocess, sys, time, urllib.request, urllib.error
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from webauthn.helpers import encode_cbor
 
@@ -131,7 +131,7 @@ try:
         step(f"hermes passkey-gate set {k} (strengthening, no approval needed)", rc == 0 and "REFUSED" not in out, out[-200:])
 
     # --- the agent side, through Hermes's own plugin loader + dispatch
-    from hermes_cli.plugins import discover_plugins, get_plugin_manager, _get_pre_tool_call_directive_details
+    from hermes_cli.plugins import discover_plugins, _get_pre_tool_call_directive_details
     from tools.registry import registry
     discover_plugins(force=True)
     step("plugin loaded by Hermes's plugin manager",
@@ -200,6 +200,128 @@ try:
     step("chat from a flagged bot is BLOCKED (bots lane)", d.action == "block" and "Gated lane: bots" in (d.message or ""), d)
     d = gate("e2e-never-seen")
     step("turn with unknown origin is BLOCKED (fail closed)", d.action == "block", d)
+
+    # ---- status (v0.9): readable by default, JSON for scripts
+    rc, out = hermes("status")
+    step("hermes passkey-gate status is readable text",
+         "✓ Gate" in out and "✓ Owner key" in out and "status --json" in out, out[-400:])
+    rc, out = hermes("status", "--json")
+    try:
+        sj = json.loads(out[out.index("{"):])
+    except ValueError:
+        sj = {}
+    step("hermes passkey-gate status --json", sj.get("owner_key_pinned") is True, out[-300:])
+
+    # ---- the Hermes approval transport (v0.9), through Hermes's real approval engine
+    import threading
+    from hermes_cli.plugins import get_plugin_manager
+    from tools import approval
+    pg = sys.modules.get("hermes_plugins.passkey_gate")
+    step("plugin registered its approval transport with Hermes",
+         get_plugin_manager().get_approval_transport("passkey-gate") is not None)
+    for k, v in (("security.approval.transport", "passkey-gate"),
+                 ("security.approval.transport_fallback", "builtin"),
+                 ("approvals.mode", "manual"), ("approvals.timeout", "60")):
+        r = subprocess.run(["hermes", "config", "set", k, v], capture_output=True, text=True, timeout=60)
+        step(f"hermes config set {k} (throwaway home)", r.returncode == 0, (r.stdout + r.stderr)[-200:])
+    os.environ["HERMES_INTERACTIVE"] = "1"   # someone is at this "terminal" to be asked
+
+    def hermes_guard(command):
+        asked = []
+        result = approval.check_all_command_guards(
+            command, "local", approval_callback=lambda *a, **k: asked.append(1) or "once")
+        return result, asked
+
+    # approve once: the hook consumes a passkey approval, Hermes's prompt is answered for it
+    once = {"tool": "terminal", "args": {"command": "rm -rf ./once-cache"}}
+    rc, out = hermes("set", "gated_lanes", "local,owner,others,bots,agents")   # widening: free
+    c = registry.dispatch("gate_challenge", {"action_text": "Delete ./once-cache so the next build "
+                                             "starts from an empty cache directory", "requester": "bramble",
+                                             "tool_call": once})
+    c = json.loads(c) if isinstance(c, str) else c
+    s, o = post(f"/a/{c['challenge_id']}/options", {})
+    post(f"/a/{c['challenge_id']}/finish", human.get(o))
+    d = _get_pre_tool_call_directive_details(once["tool"], once["args"])
+    step("passkey-approved call passes the hook", d.action != "block", d)
+    r_once, asked = hermes_guard(once["args"]["command"])
+    step("... and Hermes's own prompt is answered by that approval (asked once, not twice)",
+         r_once.get("approved") is True and asked == [], (r_once, asked))
+
+    # passkey for everything Hermes flags: the link is posted to the chat, the command waits
+    rc, out = hermes("set", "passkey_hermes_prompts", "true")
+    step("hermes passkey-gate set passkey_hermes_prompts true", "REFUSED" not in out, out[-200:])
+    posted = []
+
+    class Posted:
+        ok, error = True, None
+
+        def edit(self, text):
+            posted.append(text)
+            return {"ok": True}
+
+    def fake_post(text):            # there's no chat in this script; record what would be posted
+        posted.append(text)
+        return Posted()
+    pg.cli._ctx_ref.post_message = fake_post
+    pg.cli.invalidate_config_cache()
+
+    def phone(answer):
+        for _ in range(200):
+            m = posted and re.search(r"(https?://\S+/a/([A-Za-z0-9_-]+))", posted[0])
+            if m:
+                break
+            time.sleep(0.05)
+        if not m:
+            return
+        if answer == "approve":
+            s, o = post(f"/a/{m.group(2)}/options", {})
+            post(f"/a/{m.group(2)}/finish", human.get(o))
+        else:
+            post(f"/a/{m.group(2)}/deny", {})
+
+    for answer, want in (("approve", True), ("deny", False)):
+        posted.clear()
+        threading.Thread(target=phone, args=(answer,), daemon=True).start()
+        r_ask, asked = hermes_guard(f"rm -rf ./flagged-{answer}")
+        step(f"Hermes-flagged command: link posted to the chat ({answer})",
+             posted and "Passkey approval needed" in posted[0], posted[:1])
+        step(f"... {answer} on the phone → {'runs once' if want else 'refused'}, Hermes's own prompt never shown",
+             r_ask.get("approved") is want and asked == [], (r_ask, asked))
+        step(f"... and the chat message is updated with the outcome ({answer})",
+             len(posted) >= 2 and posted[-1].startswith("✓" if want else "✗"), posted[-1:])
+    os.environ.pop("HERMES_INTERACTIVE", None)
+
+    # ---- the setup wizard's settings menu on an existing install (v0.9)
+    # Option 5 → 1 turns Hermes's prompt cover off. passkey_hermes_prompts is
+    # on, so stepping down weakens the gate: the wizard shows an approval QR
+    # and waits, and the software passkey answers it like the phone would.
+    said = []
+    answers = iter(["5", "1", ""])
+
+    def ask(prompt):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError
+
+    def wizard_say(text=""):
+        said.append(str(text))
+        m = re.fullmatch(r"\s*(https?://\S+/a/([A-Za-z0-9_-]+))\s*", str(text))
+        if m:
+            s_, o_ = post(f"/a/{m.group(2)}/options", {})
+            post(f"/a/{m.group(2)}/finish", human.get(o_))
+
+    import importlib
+    wizard = importlib.import_module("hermes_plugins.passkey_gate.setup_wizard")
+    pg.cli.invalidate_config_cache()
+    seen = wizard.Wizard(pg.cli._ctx_ref, ask=ask, say=wizard_say, sleep=lambda s: time.sleep(0.2)).run()
+    sel = pg.transport.hermes_selection()
+    step("setup re-run shows the settings menu", any("── Settings" in x for x in said), said[-8:])
+    step("... stepping down from 'passkey for everything' asks for the passkey, then applies",
+         any("needs your passkey" in x for x in said) and any("Approved with your passkey" in x for x in said)
+         and pg.cli._ctx_ref.get_config("passkey_hermes_prompts") is False, said[-15:])
+    step("... and option 5 → 1 deselects the transport in the Hermes config",
+         sel.get("selected") is False and "Setup complete" in seen, (sel, said[-15:]))
     rc, out = hermes("audit-verify")
     step("hermes passkey-gate audit-verify", rc == 0 and "broken" not in out.lower(), out[-200:])
 finally:

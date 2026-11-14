@@ -1215,7 +1215,7 @@ def test_set_authority_pattern_addition_is_free(monkeypatch):
     """Adding a pattern only tightens the gate — applied with no approval."""
     cli, ctx = _set_ctx(monkeypatch, require_passkey=True,
                         authority_patterns=[r"ssh git@100"])
-    out = cli.cmd_set(ctx, ["authority_patterns", '["ssh git@100", "curl"]'])
+    cli.cmd_set(ctx, ["authority_patterns", '["ssh git@100", "curl"]'])
     assert ctx.settings["authority_patterns"] == ["ssh git@100", "curl"]
     cc = _config_audit("authority_patterns")
     assert cc and cc[-1]["weakened"] is False and cc[-1]["approved"] is None
@@ -2286,3 +2286,103 @@ def test_using_data_dir_is_per_thread_and_restores():
         t.join()
         assert seen == [real]  # other threads are unaffected
     assert gate_core.data_dir() == real
+
+
+# ------------------------------------------------ `hermes passkey-gate test`
+from passkey_gate import cli as _cli_mod, selftest  # noqa: E402
+
+
+@pytest.fixture
+def selftest_ready(monkeypatch, base, autumn):
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(_cli_mod, "status_data", lambda ctx: {
+        "gate": {"reachable": True, "origin": ORIGIN}, "owner_key_pinned": True})
+    said = []
+    return said
+
+
+def _run_selftest(said, decide, clock_limit=None):
+    """Run the test; `decide(cid)` plays the phone once the QR is shown."""
+    state = {"done": False, "t": 0.0}
+
+    def say(text=""):
+        said.append(str(text))
+        if text.startswith("  https://") and not state["done"]:
+            state["done"] = True
+            cid = text.strip().rsplit("/", 1)[1]
+            threading.Timer(0.05, decide, args=(cid,)).start()
+
+    def sleep(_):
+        state["t"] += 1
+        threading.Event().wait(0.02)
+
+    t = selftest.Test(None, say=say, sleep=sleep,
+                      clock=(lambda: state["t"]) if clock_limit else __import__("time").time)
+    return t.run()
+
+
+def test_selftest_approve_with_the_pinned_passkey(selftest_ready, base, autumn):
+    out = _run_selftest(selftest_ready, lambda cid: approve(base, autumn, cid))
+    assert "Everything works" in out and "✓ Passkey" in out
+    assert any(ORIGIN in line for line in selftest_ready)  # the address check ran first
+    cid = [l for l in selftest_ready if "/a/" in l][0].strip().rsplit("/", 1)[1]
+    assert gate_core.challenge_state(cid) == "consumed"
+
+
+def test_selftest_signed_with_another_passkey_says_so(selftest_ready, base, autumn):
+    rogue = SoftAuthenticator()
+    tok = mint_token()
+    s, opts = call(base, "/register/options", {"token": tok})
+    s, r = call(base, "/register/finish", {"token": tok, "session_id": opts["session_id"],
+                                           "credential": rogue.create(opts)})
+    assert s == 200, r
+    out = _run_selftest(selftest_ready, lambda cid: approve(base, rogue, cid))
+    assert "✗ Passkey" in out and "does NOT verify" in out and "credentials" in out
+
+
+def test_selftest_deny_checks_the_phone_but_not_the_passkey(selftest_ready):
+    out = _run_selftest(selftest_ready, lambda cid: gate_core.deny(cid))
+    assert "✓ Phone" in out and "tap Approve" in out and "Everything works" not in out
+
+
+def test_selftest_no_answer_points_at_the_phone_and_withdraws(selftest_ready, monkeypatch):
+    monkeypatch.setattr(gate_core, "challenge_ttl", lambda: 3)
+    out = _run_selftest(selftest_ready, lambda cid: None, clock_limit=True)
+    assert "✗ Phone: no answer" in out and "tailnet" in out
+    cid = [l for l in selftest_ready if "/a/" in l][0].strip().rsplit("/", 1)[1]
+    assert gate_core.challenge_state(cid) == "denied"  # nothing left to sign
+
+
+def test_selftest_unreachable_gate_stops_before_making_a_request(monkeypatch):
+    monkeypatch.setattr(_cli_mod, "status_data", lambda ctx: {
+        "gate": {"reachable": False, "error": "nothing is listening", "next_step": "service start"},
+        "owner_key_pinned": True})
+    monkeypatch.setattr(gate_core, "create_challenge", lambda *a, **k: pytest.fail("minted"))
+    out = selftest.Test(None, say=lambda t="": None).run()
+    assert out.startswith("✗ Address") and "service start" in out
+
+
+def test_selftest_no_pinned_key_stops_before_making_a_request(monkeypatch):
+    monkeypatch.setattr(_cli_mod, "status_data", lambda ctx: {
+        "gate": {"reachable": True}, "owner_key_pinned": False})
+    monkeypatch.setattr(gate_core, "create_challenge", lambda *a, **k: pytest.fail("minted"))
+    assert selftest.Test(None, say=lambda t="": None).run().startswith("✗ Passkey")
+
+
+def test_selftest_page_marks_it_as_a_test(base, autumn):
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = gate_core.create_challenge(selftest.TEST_TEXT, gate_core.TEST_REQUESTER, _kind=gate_core.TEST_KIND)
+    with urllib.request.urlopen(f"{base}/a/{c['challenge_id']}") as r:
+        assert "THIS IS A TEST" in r.read().decode()
+    gate_core.withdraw_challenge(c["challenge_id"], "done", kind=gate_core.TEST_KIND)
+
+
+def test_selftest_agents_cannot_mint_test_requests(base):
+    s, r = call(base, "/challenge", {"action_text": selftest.TEST_TEXT,
+                                     "requester": gate_core.TEST_REQUESTER})
+    assert s != 201
+
+
+def test_selftest_test_command_needs_a_terminal(monkeypatch):
+    monkeypatch.setattr(selftest.sys.stdin, "isatty", lambda: False)
+    assert "interactive" in _cli_mod.dispatch(object(), "test")

@@ -13,11 +13,20 @@ with the evidence that it was verified. Probe scripts cited as
 `cache/scratch/probe_*.py` were run outside this repository and are not
 committed; the test names cited are in `tests/`.
 
-**Open items (8 Nov 2026):**
+**Open items (14 Nov 2026):**
 
-- A1–A30: findings of the [v0.7 adversarial review](adversarial-review-v0.7.md); all fixed except A3, A11 and A24 (partly) and A9 (documented); see the end of this ledger.
+- v0.9.0's Hermes approval transport (approve-once cover, and
+  `passkey_hermes_prompts`) has had **no independent review**. Its limits
+  are written up in [threat-model.md](threat-model.md#v09-additions-the-hermes-approval-transport).
+  Run live once on Discord with a phone passkey; still to run live: deny
+  on the phone, the no-answer timeout, the TUI and the Desktop app.
+- (Closed 14 Nov) `scripts/e2e_hermes.py` now covers the transport through
+  Hermes's real approval engine (approve-once, and a passkey ask approved
+  and denied) and the settings menu with its inline passkey approval:
+  53/53 PASS in a throwaway Hermes home with a software authenticator.
+- A1–A30: findings of the [v0.7 adversarial review](adversarial-review-v0.7.md); all fixed except A3, A11 and A24 (partly) and A9 (documented); see the end of this ledger. (As recorded on 8 Nov; not re-audited since. v0.9.0 narrows A3 (M2) for terminal commands and `execute_code` when `passkey_hermes_prompts` is on.)
 
-- H9: a demo recording for the README.
+- (Closed 14 Nov) H9: the demo video went out with the hackathon entry (posted on X, 9 Nov 2026).
 - D1: deferred refinement — derive `action_text` from the `tool_call` at mint time.
 - D2/D3 follow-up outside this repo: apply the same fixes to the original
   `verify_local.py` in the `approval-gate` prototype.

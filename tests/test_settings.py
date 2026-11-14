@@ -140,7 +140,7 @@ def test_http_serve_refuses_invalid_port_before_bind():
 
 def test_set_loopback_http_is_tolerated():
     ctx = FakeCtx()
-    out = _cli(ctx, "set origin http://127.0.0.1:8655")
+    _cli(ctx, "set origin http://127.0.0.1:8655")
     assert ctx.store["origin"] == "http://127.0.0.1:8655"
 
 
@@ -353,7 +353,7 @@ def test_expose_does_not_move_an_established_origin(monkeypatch):
 
 # ------------------- status explains an unreachable gate in plain English
 def test_status_without_origin_says_origin_not_configured():
-    out = json.loads(_cli(FakeCtx(), "status"))
+    out = json.loads(_cli(FakeCtx(), "status --json"))
     assert out["gate"]["reachable"] is False
     assert out["gate"]["error"] == "origin not configured"
     assert "expose" in out["gate"]["next_step"]
@@ -364,7 +364,7 @@ def test_status_with_nothing_listening_says_start_serve():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
     ctx = FakeCtx()
     ctx.store["origin"] = f"http://127.0.0.1:{port}"
-    out = json.loads(_cli(ctx, "status"))
+    out = json.loads(_cli(ctx, "status --json"))
     assert "nothing is listening" in out["gate"]["error"]
     assert "serve" in out["gate"]["next_step"]
 
@@ -466,10 +466,68 @@ def test_canary_is_not_armed_when_writing_the_config_fails(tmp_path):
 
 
 def test_status_reports_the_config_check():
-    from passkey_gate import cli
     ctx = FakeCtx()
-    assert "not armed" in json.loads(_cli(ctx, "status"))["config_check"]
+    assert "not armed" in json.loads(_cli(ctx, "status --json"))["config_check"]
     _cli(ctx, "set require_passkey true")
-    assert json.loads(_cli(ctx, "status"))["config_check"] == "ok"
+    assert json.loads(_cli(ctx, "status --json"))["config_check"] == "ok"
     ctx.store.clear()
-    assert json.loads(_cli(ctx, "status"))["config_check"].startswith("FAILING")
+    assert json.loads(_cli(ctx, "status --json"))["config_check"].startswith("FAILING")
+
+
+# ------------------------------------------------ readable status
+def _status(**over):
+    from passkey_gate import setup_wizard
+    out = {"gate": {"reachable": True, "origin": "https://host.example.ts.net:8480",
+                    "credentials": 1, "challenge_ttl_s": 600},
+           "owner_key_pinned": True, "peer_keys_pinned": [], "config_check": "ok",
+           "covers_hermes_prompt": {"selected": True, "transport_fallback": "builtin",
+                                    "every_flagged_command": True, "approvals_mode": "manual",
+                                    "waits_seconds": 300},
+           "enforcement": {"require_passkey": True, "patterns": [setup_wizard.DEFAULT_PATTERN],
+                           "gated_lanes": ["local", "owner", "others", "bots", "agents"]}}
+    for key, value in over.items():
+        out[key] = value
+    return out
+
+
+def test_status_text_when_everything_is_fine():
+    from passkey_gate import cli
+    text = cli.status_text(_status())
+    assert "✓ Gate" in text and "https://host.example.ts.net:8480" in text
+    assert "✓ Owner key    pinned (1 passkey registered here)" in text
+    assert "on · standard patterns · conversations: local, owner, others, bots, agents" in text
+    assert "passkey for every command Hermes flags (approvals.mode manual, waits 300s)" in text
+    assert "Next:" not in text and "✗" not in text
+    assert text.rstrip().endswith("hermes passkey-gate status --json")
+
+
+def test_status_text_says_what_to_do_about_problems():
+    from passkey_gate import cli
+    text = cli.status_text(_status(
+        gate={"reachable": False, "error": "nothing is listening on 127.0.0.1:8655",
+              "next_step": "start it: hermes passkey-gate service start"},
+        owner_key_pinned=False,
+        config_check="FAILING: the settings were replaced",
+        enforcement={"require_passkey": False},
+        covers_hermes_prompt={"selected": True, "transport_fallback": "builtin",
+                              "every_flagged_command": True, "approvals_mode": "smart",
+                              "warning": "Hermes approvals.mode is 'smart' | Hermes waits only 60s"}))
+    assert "✗ Gate         nothing is listening" in text
+    assert "✗ Owner key" in text and "✗ Config check FAILING" in text
+    assert "– Enforcement  off" in text and "! Hermes" in text
+    next_part = text.split("Next:")[1]
+    for hint in ("service start", "hermes passkey-gate setup", "restore the gate's settings",
+                 "approvals.mode is 'smart'", "waits only 60s"):
+        assert hint in next_part
+
+
+def test_status_text_escapes_terminal_control_characters():
+    from passkey_gate import cli
+    text = cli.status_text(_status(gate={"reachable": False, "error": "bad \x1b[2J host"}))
+    assert "\x1b" not in text and "\\x1b" in text
+
+
+def test_status_command_defaults_to_text():
+    out = _cli(FakeCtx(), "status")
+    assert out.startswith("passkey-gate status") and "Owner key" in out
+    json.loads(_cli(FakeCtx(), "status --json"))

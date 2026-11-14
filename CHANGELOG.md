@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-14
+
 ### Added
 
 - **A passkey approval also answers Hermes's own prompt.** A command both
@@ -47,6 +49,34 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without writing audit entries), then re-runs the change with `--approve`,
   so `set` verifies the signature exactly as before. First-time setup also
   asks about the Hermes prompt cover once enforcement is on.
+- **`hermes passkey-gate test`.** Shows a QR code for a harmless sample
+  request (its own request kind; the page says it's a test and approving
+  it authorises nothing), waits for your phone, then checks the signature
+  locally against your pinned key. When something fails it says which
+  part: the gate's address, the phone, or the passkey. Setup's closing
+  "Next" list points to it.
+
+### Changed
+
+- **`status` is readable.** One line each for the gate, owner key, config
+  check, enforcement and Hermes, marked ✓, !, ✗ or –, then a "Next" list
+  of what to fix. `status --json` gives the previous output for scripts.
+- **`status` warns about the timers.** With `passkey_hermes_prompts` on,
+  it warns when Hermes's `approvals.timeout` is under two minutes (short
+  for a phone) or longer than the gate's `challenge_ttl` (the link would
+  expire before Hermes stops waiting). The README has a new section, "How
+  long a request waits".
+
+### Development
+
+- CI runs the tests on Python 3.11, 3.12, 3.13 and 3.14 (the project
+  declares `>=3.11`; it was only tested on 3.14), and lints with ruff
+  (pyflakes and syntax errors only, configured in `pyproject.toml`). Seven
+  unused imports and two unused variables removed.
+- `scripts/e2e_hermes.py` now covers `status` in both forms, the approval
+  transport through Hermes's real approval engine (approve-once, and a
+  passkey ask approved and denied on the phone), and the setup wizard's
+  settings menu.
 
 ## [0.8.1] - 2026-11-10
 
@@ -602,7 +632,8 @@ These are architectural, deliberate, and documented in
   action text and cryptographic evidence are still readable by anyone holding
   the high-entropy URL inputs.
 
-[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.1...v0.7.2

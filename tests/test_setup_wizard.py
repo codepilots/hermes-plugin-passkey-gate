@@ -284,7 +284,7 @@ def test_rerun_keeps_settings_on_enter(world):
 def _fake_hermes(monkeypatch):
     from passkey_gate import transport
     hermes = {"selected": False, "transport_fallback": "deny"}
-    monkeypatch.setattr(transport, "hermes_selection", lambda every_prompt=False: dict(hermes))
+    monkeypatch.setattr(transport, "hermes_selection", lambda every_prompt=False, request_ttl=None: dict(hermes))
 
     def set_cover(on):
         hermes.update(selected=on, transport_fallback="builtin")

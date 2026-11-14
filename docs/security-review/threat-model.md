@@ -222,9 +222,10 @@ common dangerous command forms in any flag order plus all code execution,
 `setup` offers a strict mode that gates whole tools, and the block message
 tells the model that routing around the gate is a violation. Only whole-tool
 patterns give certainty, at the cost of approving every call of that tool.
-A stronger long-term answer is to let Hermes's own dangerous-command
-detection decide what needs approval (an approval transport), with the
-passkey as the proof.
+A stronger answer is to let Hermes's own dangerous-command detection decide
+what needs approval, with the passkey as the proof. v0.9.0 adds that as an
+option; see [the approval transport](#v09-additions-the-hermes-approval-transport)
+below for what it does and doesn't close.
 
 **Approvals bind text, not the state it depends on (M8).** The binding
 covers `{tool, args}`. A command that runs a script, reads a variable or
@@ -338,6 +339,100 @@ with the rest of the boundary.
 settings, and it uses the same `set` path, so a weakening change would still
 need a passkey approval. Its "already pinned" detection never replaces an existing pin;
 `local_verify.pin` still refuses replacement.
+
+## v0.9 additions: the Hermes approval transport
+
+v0.9.0 registers a Hermes approval transport, `passkey-gate`. It does
+nothing until the operator selects it in the Hermes config
+(`security.approval.transport`), and it has two behaviours.
+
+**Approve once (the cover).** When the `pre_tool_call` hook consumes a
+passkey approval for an exact call, it records a cover for the text Hermes
+will show in its own prompt. If Hermes then asks about that text, the
+transport answers `once`.
+
+- A cover is single use, expires after 30 seconds and is discarded when
+  that tool call finishes (`post_tool_call`). It is never answered with
+  `session` or `always`.
+- Hermes hands a transport only redacted text, so two commands differing
+  only in a redacted secret would look identical. A cover is therefore
+  recorded only when redaction leaves the command unchanged; a command
+  carrying a secret keeps Hermes's own prompt.
+- What it removes is a second, unsigned confirmation of a call the pinned
+  passkey has just signed. Hermes's hardline blocks and deny rules run
+  before any transport is asked.
+
+**Passkey for everything Hermes flags (`passkey_hermes_prompts`).** Hermes's
+detector decides what needs approval. The gate mints a request of its own
+kind over the text Hermes would show, posts the link into the conversation
+the command came from (`ctx.post_message`), and the transport waits for the
+signature, verifies it locally against the pinned owner key, consumes it
+and answers `once`. This addresses M2 for terminal commands and
+`execute_code`: the operator's pattern list is no longer what decides.
+
+What holds:
+
+- **No agent takes part in delivery.** The link is posted by the plugin
+  from Hermes's `pre_approval_request` hook, so an agent can't avoid
+  asking by not sending it. An agent also can't answer it: the request is
+  a gate-only kind with a reserved requester name, refused over the
+  agent-facing API, and its approval can't be spent on a settings change
+  (nor a settings approval on it).
+- **One signature, one run.** The approval is consumed before the
+  transport answers. A request Hermes stops waiting on (timeout, `/stop`)
+  is withdrawn, so a late signature leaves nothing spendable.
+- **Refusal is the default.** A deny, no answer, a signature from any
+  credential other than the pinned one, or any error while waiting answers
+  `deny`.
+- **Turning it off needs the passkey** when done with `set` or the wizard.
+
+What it doesn't close, and what the operator must know:
+
+- **Hermes's approval mode.** In `smart` mode a second model can approve a
+  flagged command without asking anyone, and `off`, yolo, containers and
+  unattended runs skip transports. None of those reach the passkey. Only
+  `approvals.mode: manual` covers every flagged command; `status` warns
+  otherwise. This setting, like `security.approval.transport` itself, lives
+  in the Hermes config: an agent that can edit that file can remove the
+  transport, the same residual as finding 2.
+- **Undeliverable requests follow Hermes's fallback.** Where the link
+  can't be posted in time (the classic terminal client), or can't be
+  created (no pinned key, no gate address, text the approval page refuses
+  such as escape sequences, or over 4000 characters), the transport
+  declines and Hermes's `transport_fallback` decides. With `builtin` that
+  is Hermes's ordinary, unsigned prompt; an agent can reach it on purpose
+  by, for example, padding a command past the length limit. Whoever can
+  answer that prompt in the chat can then approve. Leave `transport_fallback`
+  unset (deny) where the passkey must be the only way through, accepting
+  that such commands are then refused outright.
+- **Coverage.** Hermes routes terminal commands and `execute_code` through
+  a transport. File edits, plugin tools and plugin-escalated calls do not
+  go this way; patterns (or strict mode) remain the only gate for those.
+  Hermes's detector also asks about what it considers dangerous, which is
+  not everything an operator might (plain `curl` or `scp` uploads, say).
+- **The signature covers redacted text.** The human signs what Hermes
+  shows, with secrets masked, bound to one live request. It does not cover
+  the raw command or its arguments (working directory, timeout), and M8
+  still applies: the text is not the state it depends on.
+- **The link is visible to the conversation.** Anyone who can read that
+  chat can open the page and deny the request (finding 27's bearer
+  property); only the pinned passkey can approve.
+- **Lanes.** Conversations outside the gated lanes keep Hermes's own
+  prompt, by design.
+
+**Hermes's worker thread.** Hermes runs a transport on a thread that has
+lost the session's profile, where a plugin's data folder resolves to the
+default profile's. The request records its data folder when it is created
+and the waiting thread is pinned to it (`gate_core.using_data_dir`); the
+path only ever comes from `data_dir()` itself, never from an agent or the
+environment, so finding M4's rule (inside Hermes the store is always
+Hermes's plugin data folder) still holds.
+
+This transport has had no independent security review. Its tests cover the
+signature paths against a real gate with a software authenticator, and the
+full flow was run once on Discord with a phone passkey (14 Nov 2026); deny,
+timeout, the TUI and the Desktop app have only been exercised by tests or
+not at all.
 
 ## Residual risk summary
 

@@ -17,7 +17,6 @@ import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 import urllib.error
@@ -27,7 +26,7 @@ PARENT_ORIGIN = "https://parent-host.example.ts.net:8445"
 PARENT_RP = "parent-host.example.ts.net"
 os.environ.update(GATE_DATA=TMP, GATE_CHALLENGE_TTL="60", GATE_ORIGIN=PARENT_ORIGIN, GATE_RP_ID=PARENT_RP)
 
-from passkey_gate import cli, gate_core, local_verify, tools  # noqa: E402
+from passkey_gate import gate_core, local_verify, tools  # noqa: E402
 
 from cryptography.hazmat.primitives import hashes  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402

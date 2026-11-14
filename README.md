@@ -94,6 +94,11 @@ wizard shows the approval QR code, waits for your phone, then applies it.
 The owner key and the address aren't changed from the menu. Run `setup` in
 your own terminal, never through an agent: it decides which key is trusted.
 
+**Check it.** `hermes passkey-gate test` shows a QR code for a harmless
+sample request. Approve it on your phone and it confirms the signature
+against your pinned key, or tells you whether the address, the phone or the
+passkey is the problem.
+
 **Try it.** With enforcement on, ask your agent to run
 `rm -rf ./some-scratch-dir`. The call is blocked, the agent sends you an
 approval link, you approve on your phone, and the command runs once. Ask
@@ -303,6 +308,23 @@ Things to know:
 - **Anyone in the chat can see the link.** As with every approval link,
   they can read the request and deny it; only your passkey can approve.
 
+#### How long a request waits
+
+Two timers decide how long you have to answer:
+
+| Timer | Default | What it limits |
+|---|---|---|
+| `challenge_ttl` (this plugin) | 600 s | How long any approval link can be signed. For requests an agent sends you, also how long the agent's approval stays usable. |
+| `approvals.timeout` (Hermes) | 300 s | How long a command Hermes flagged waits for your answer before it's refused. |
+
+Away from the keyboard you need time to notice the message, unlock the
+phone and read the command, so keep `approvals.timeout` at a few minutes or
+more: `hermes config set approvals.timeout 300`. The agent's turn is paused
+while it waits. Keep `challenge_ttl` at least as long, or the link expires
+first and the wait ends early. Lengthening `challenge_ttl` needs your
+passkey, since it keeps approvals spendable for longer. `status` warns when
+`approvals.timeout` is under two minutes or longer than `challenge_ttl`.
+
 ### Choosing which chats need a passkey
 
 Enforcement can apply to every conversation or only some. Each agent turn
@@ -476,10 +498,11 @@ All commands are `hermes passkey-gate <command>`.
 
 | Command | What it does |
 |---|---|
-| `setup` | Guided first run (see [Quick start](#quick-start)). |
+| `setup` | Guided first run (see [Quick start](#quick-start)). On an existing install, ends with a settings menu. |
+| `test` | Check the address, your phone and your passkey end to end: scan a QR code and approve a harmless sample request; the signature is checked against your pinned key, and it tells you which part failed. Changes nothing. |
 | `service install` · `status` · `logs` · `start` · `stop` · `restart` · `uninstall` | Run the gate in the background as a per-user service: a systemd user unit on Linux, a LaunchAgent on macOS. |
 | `serve` | Run the gate in the foreground. |
-| `status` | Can I rely on this gate right now? Reachability, owner key, enforcement, backends. |
+| `status [--json]` | Can I rely on this gate right now? One line each for the gate, owner key, config check, enforcement and Hermes, then what to fix. `--json` for scripts. |
 | `expose [auto\|tailscale]` | Set up and verify the HTTPS address. |
 | `bootstrap` | Print a one-time passkey registration link and QR code (15 minutes, single use). |
 | `credentials` | List registered passkeys with their confirmation codes. |
@@ -610,13 +633,14 @@ later independent reviews and the record of every finding and fix are in
 |---|---|
 | `hermes passkey-gate setup` isn't recognised | An older version is installed. Reinstall with `hermes plugins install codepilots/hermes-plugin-passkey-gate#plugin --force`, then `hermes gateway restart`. |
 | Setup says the port is used by "a program that isn't this gate" | Something else, or an older `passkey-gate serve`, holds the port. Accept the suggested free port, or stop the other program. |
-| The phone can't open the link | The phone isn't on your tailnet, or Tailscale HTTPS certificates aren't enabled. |
+| The phone can't open the link | The phone isn't on your tailnet, or Tailscale HTTPS certificates aren't enabled. `hermes passkey-gate test` checks the whole path and says which part fails. |
 | "This setup link has expired or was already used" | Registration links last 15 minutes and work once. Run `setup` again for a fresh QR code. |
 | `status` says the config check is "not armed yet" | You upgraded from v0.7.1 or earlier, where the check didn't exist. Run `hermes passkey-gate setup` (or any `set`) once to arm it. |
 | Every gated call is blocked: "the Hermes config wasn't read as expected" | The gate's settings were lost or replaced (a reset, an edit, another profile's config), so it fails closed instead of running with enforcement off. Restore the settings. If you replaced them on purpose, delete `config-canary` in the gate's data folder and run `setup` again. |
 | The phone says it already has a passkey for this gate | It registered earlier but its code was never typed in. Run `setup` again and choose to use the passkey that's already registered. If you've lost the code, delete that passkey in the phone's password settings and start again. |
 | The code you type doesn't match | You're reading a different passkey's code. Nothing is pinned until it matches; run `setup` again if in doubt. |
 | `status` says nothing is listening | The gate isn't running: `hermes passkey-gate service status`, or start `serve`. |
+| The approval page says the request expired, or "No passkey approval in time" | You answered after the wait ended. See [How long a request waits](#how-long-a-request-waits); `status` warns when the timers are too short. |
 | `passkey_hermes_prompts` is on but Hermes still shows its own prompt | Check `status`: the gate must be Hermes's approval transport, and the conversation must be in a gated lane. In the classic terminal client this is expected. If Hermes doesn't ask at all, `approvals.mode` isn't `manual`. |
 | After the passkey approval, Hermes asks again for the same command | Select the gate as Hermes's approval transport: see [Approving once, not twice](#approving-once-not-twice). |
 | The block message mentions the pinned owner key | No key is pinned, or the wrong one is. Check `hermes passkey-gate credentials`. |
@@ -624,8 +648,9 @@ later independent reviews and the record of every finding and fix are in
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
+python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest ruff
 .venv/bin/python -m pytest tests/ -q
+.venv/bin/ruff check plugin tests scripts    # pyflakes + syntax; rules in pyproject.toml
 ```
 
 `scripts/e2e_hermes.py` runs the whole flow through a real Hermes install

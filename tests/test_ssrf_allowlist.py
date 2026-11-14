@@ -296,7 +296,7 @@ def test_status_and_tls_probe_never_follow_redirects(redirector, canary):
         def get_config(self, key, default=None):
             return {"origin": rbase}.get(key, default)
 
-    out = json.loads(cli.cmd_status(Ctx(), None))
+    out = json.loads(cli.cmd_status(Ctx(), ["--json"]))
     assert out["gate"].get("reachable") is False, out["gate"]
     assert out["gate"].get("error_type") == "RedirectBlocked", out["gate"]
     ok, note = expose._tls_probe(f"{rbase}/health")

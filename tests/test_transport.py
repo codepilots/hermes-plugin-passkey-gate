@@ -282,3 +282,30 @@ def test_status_warns_when_hermes_can_approve_without_asking(monkeypatch):
     cfg["security"]["approval"]["transport"] = "builtin"
     assert transport.hermes_selection(every_prompt=True)["note"].startswith("WARNING")
     assert "every_flagged_command" in transport.hermes_selection()
+
+
+@pytest.mark.parametrize("hermes_timeout, ttl, expect", [
+    (300, 600, None),
+    (600, 600, None),
+    (900, 600, "expires after 600s"),
+    (60, 600, "short for a phone"),
+    ("junk", 600, None),
+])
+def test_wait_warning(hermes_timeout, ttl, expect):
+    out = transport.wait_warning(hermes_timeout, ttl)
+    assert (out is None) if expect is None else (expect in out)
+
+
+def test_status_warns_about_timers(monkeypatch):
+    import sys
+    import types
+    cfg = {"security": {"approval": {"transport": "passkey-gate", "transport_fallback": "builtin"}},
+           "approvals": {"mode": "manual", "timeout": 60}}
+    fake = types.ModuleType("hermes_cli.config")
+    fake.load_config_readonly = lambda: cfg
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    out = transport.hermes_selection(every_prompt=True, request_ttl=600)
+    assert out["waits_seconds"] == 60 and "short for a phone" in out["warning"]
+    cfg["approvals"]["timeout"] = 300
+    assert "warning" not in transport.hermes_selection(every_prompt=True, request_ttl=600)

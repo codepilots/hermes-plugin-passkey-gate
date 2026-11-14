@@ -257,22 +257,7 @@ def begin_ask(request_id, command, description, post) -> str:
 def _verify(ask) -> list:
     """Problems list; empty means the pinned owner's passkey signed exactly
     this text for exactly this challenge. Every claim is re-derived here."""
-    rec = gate_core.challenge_status(ask.cid, ask.sha)
-    if not isinstance(rec, dict) or rec.get("status") != "approved":
-        return [f"the request is {rec.get('status') if isinstance(rec, dict) else rec!r}, not approved"]
-    if rec.get("action_sha256") != ask.sha:
-        return ["the approval was signed for different text"]
-    row = gate_core.db().execute(
-        "select kind, binding_sha256, tool_call, action_sha256, challenge from challenges where id=?",
-        (ask.cid,)).fetchone()
-    if (row is None or row["kind"] != gate_core.HERMES_KIND or row["binding_sha256"]
-            or row["tool_call"] or row["action_sha256"] != ask.sha
-            or not gate_core.record_matches_local_challenge(rec, row["challenge"])):
-        return ["this isn't the request passkey-gate created for this command"]
-    pinned = local_verify.pinned(gate_core.data_dir())
-    if pinned is None:
-        return ["no owner key is pinned"]
-    return list(local_verify.check(rec, ask.text, gate_core.origin(), gate_core.rp_id(), pinned))
+    return gate_core.own_request_problems(ask.cid, ask.sha, ask.text, gate_core.HERMES_KIND)
 
 
 def _finish(ask, line: str) -> None:
@@ -418,9 +403,32 @@ def set_hermes_cover(on: bool) -> tuple[bool, str]:
     return True, state.get("note", "")
 
 
-def hermes_selection(every_prompt: bool = False) -> dict:
+# A phone round trip (notice, unlock, read, sign) rarely fits in a minute.
+MIN_SENSIBLE_WAIT_SECONDS = 120
+
+
+def wait_warning(hermes_timeout, request_ttl) -> str | None:
+    """Why Hermes's approvals.timeout and the gate's challenge_ttl, together,
+    would make a passkey request end before the human can reasonably
+    answer. None when they're fine (or unknown)."""
+    try:
+        wait = int(float(hermes_timeout))
+    except (TypeError, ValueError):
+        return None
+    if request_ttl is not None and wait > int(request_ttl):
+        return (f"Hermes waits {wait}s (approvals.timeout) but a passkey link expires after "
+                f"{int(request_ttl)}s (challenge_ttl), so the wait ends when the link expires. "
+                "Raise challenge_ttl, or lower approvals.timeout")
+    if wait < MIN_SENSIBLE_WAIT_SECONDS:
+        return (f"Hermes waits only {wait}s for an approval (approvals.timeout); that's short for "
+                "a phone. Try: hermes config set approvals.timeout 300")
+    return None
+
+
+def hermes_selection(every_prompt: bool = False, request_ttl=None) -> dict:
     """What Hermes's config says about approval transports, for `status`.
-    ``every_prompt`` is the gate's own passkey_hermes_prompts setting."""
+    ``every_prompt`` is the gate's own passkey_hermes_prompts setting and
+    ``request_ttl`` its challenge_ttl."""
     try:
         from hermes_cli.config import load_config_readonly
         cfg = ((load_config_readonly() or {}).get("security") or {}).get("approval") or {}
@@ -452,8 +460,16 @@ def hermes_selection(every_prompt: bool = False) -> dict:
                            "the chat. " + ("Where it can't be delivered (the classic terminal client), "
                                            "Hermes's own prompt is used." if fallback == "builtin" else
                                            "Where it can't be delivered, the command is denied."))
+            warnings = []
             if mode != "manual":
-                out["warning"] = (f"Hermes approvals.mode is {mode or 'unset'!r}, not 'manual': Hermes can "
-                                  "approve or skip flagged commands without asking you, and those never "
-                                  "reach your passkey. Run: hermes config set approvals.mode manual")
+                warnings.append(f"Hermes approvals.mode is {mode or 'unset'!r}, not 'manual': Hermes can "
+                                "approve or skip flagged commands without asking you, and those never "
+                                "reach your passkey. Run: hermes config set approvals.mode manual")
+            hermes_timeout = _hermes_approvals().get("timeout", 300)
+            out["waits_seconds"] = hermes_timeout
+            timing = wait_warning(hermes_timeout, request_ttl)
+            if timing:
+                warnings.append(timing)
+            if warnings:
+                out["warning"] = " | ".join(warnings)
     return out

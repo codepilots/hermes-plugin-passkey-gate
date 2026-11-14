@@ -580,8 +580,12 @@ SETTINGS_KIND = "settings"
 # transport (transport.py), never by an agent. Text-only, single use.
 HERMES_KIND = "hermes"
 HERMES_REQUESTER = "hermes-approval"
-GATE_KINDS = (SETTINGS_KIND, HERMES_KIND)
-RESERVED_REQUESTERS = ("hermes-cli", HERMES_REQUESTER)
+# `hermes passkey-gate test`: a sample request the operator signs to check
+# address, phone and passkey end to end. Approving it authorises nothing.
+TEST_KIND = "test"
+TEST_REQUESTER = "passkey-gate-test"
+GATE_KINDS = (SETTINGS_KIND, HERMES_KIND, TEST_KIND)
+RESERVED_REQUESTERS = ("hermes-cli", HERMES_REQUESTER, TEST_REQUESTER)
 
 
 def create_challenge(action_text: str, requester: str, tool_call: dict | None = None,
@@ -845,17 +849,17 @@ def consume_approval(cid: str, action_sha: str, kind: str = SETTINGS_KIND,
     return cur.rowcount == 1
 
 
-def withdraw_challenge(cid: str, reason: str) -> bool:
-    """Void a Hermes-prompt request the transport stopped waiting on (no
+def withdraw_challenge(cid: str, reason: str, kind: str = HERMES_KIND) -> bool:
+    """Void a request the gate made itself and stopped waiting on (no
     answer, interrupted, or it could not be delivered), so a late signature
-    can't leave a spendable approval behind. Only touches challenges of
-    HERMES_KIND that haven't been consumed."""
-    if not isinstance(cid, str) or not ID_RE.match(cid):
+    can't leave a spendable approval behind. Only touches challenges of a
+    Hermes-prompt or test kind that haven't been consumed."""
+    if not isinstance(cid, str) or not ID_RE.match(cid) or kind not in (HERMES_KIND, TEST_KIND):
         return False
     cur = db().execute(
         "update challenges set status='denied', decided_at=? "
         "where id=? and kind=? and status in ('pending','approved')",
-        (time.time(), cid, HERMES_KIND))
+        (time.time(), cid, kind))
     if cur.rowcount == 1:
         audit("challenge_withdrawn", challenge_id=cid, reason=str(reason)[:200])
     return cur.rowcount == 1
@@ -867,6 +871,28 @@ def challenge_consumed(cid: str) -> bool:
     of the generic verification failure, so the operator learns the rule."""
     row = db().execute("select status from challenges where id=?", (cid,)).fetchone()
     return row is not None and row["status"] == "consumed"
+
+
+def own_request_problems(cid: str, sha: str, text: str, kind: str) -> list:
+    """Problems list for a request the gate made itself (kind HERMES_KIND or
+    TEST_KIND); empty means the pinned owner's passkey signed exactly this
+    text for exactly this challenge. Every claim is re-derived locally."""
+    rec = challenge_status(cid, sha)
+    if not isinstance(rec, dict) or rec.get("status") != "approved":
+        return [f"the request is {rec.get('status') if isinstance(rec, dict) else rec!r}, not approved"]
+    if rec.get("action_sha256") != sha:
+        return ["the approval was signed for different text"]
+    row = db().execute(
+        "select kind, binding_sha256, tool_call, action_sha256, challenge from challenges where id=?",
+        (cid,)).fetchone()
+    if (row is None or row["kind"] != kind or row["binding_sha256"]
+            or row["tool_call"] or row["action_sha256"] != sha
+            or not record_matches_local_challenge(rec, row["challenge"])):
+        return ["this isn't the request passkey-gate created"]
+    pinned = local_verify.pinned(data_dir())
+    if pinned is None:
+        return ["no owner key is pinned"]
+    return list(local_verify.check(rec, text, origin(), rp_id(), pinned))
 
 
 def challenge_state(cid: str) -> str:
@@ -1297,7 +1323,11 @@ def approval_page(row):
         '<div class="bound-call settings"><h2>HERMES FLAGGED THIS COMMAND AS DANGEROUS</h2>'
         '<p>Created by passkey-gate because Hermes stopped before running the command below. '
         'The agent is waiting: approve to let it run <b>once</b>, or deny.</p></div>'
-        if kind == HERMES_KIND else "")
+        if kind == HERMES_KIND else
+        '<div class="bound-call settings"><h2>THIS IS A TEST</h2>'
+        '<p>Created by <code>hermes passkey-gate test</code> to check that your phone and '
+        'passkey work with this gate. Approving it runs nothing.</p></div>'
+        if kind == TEST_KIND else "")
     body = f"""
 <h1>Approval request</h1>
 {settings_banner}

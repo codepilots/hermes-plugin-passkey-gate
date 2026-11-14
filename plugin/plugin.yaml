@@ -1,6 +1,6 @@
 name: passkey-gate
 
-version: 0.8.1
+version: 0.9.0
 
 description: >
   Approve your agents' risky actions with your phone's passkey. An agent

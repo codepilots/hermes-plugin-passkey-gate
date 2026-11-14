@@ -10,7 +10,6 @@ commands — and prove other services' rules are never touched.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 

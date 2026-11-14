@@ -400,7 +400,8 @@ class Wizard:
         if on:
             self.say("✓ Every command Hermes flags now needs your passkey (in chats, the TUI and")
             self.say("  Desktop; the classic terminal client keeps Hermes's own prompt).")
-            warning = transport.hermes_selection(every_prompt=True).get("warning")
+            warning = transport.hermes_selection(
+                every_prompt=True, request_ttl=gate_core.challenge_ttl()).get("warning")
             if warning:
                 self.say(f"  ⚠ {warning}")
         else:
@@ -618,6 +619,7 @@ class Wizard:
             f"  enforcement {'on' if enforce else 'off'}",
             "",
             "Next:",
+            "  • hermes passkey-gate test       — try a sample approval on your phone",
             "  • hermes passkey-gate status     — check everything at a glance",
             "  • ask your agent to do something that needs approval; it sends you a link",
             "  • hermes passkey-gate audit-notarize --to ~/gate-notary.log  — anchor the audit log",
