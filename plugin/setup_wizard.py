@@ -7,17 +7,23 @@ One command walks the operator through the manual setup commands
   2. it has an HTTPS address your phone can reach (tailscale, or your origin)
   3. you register a passkey on your phone (QR code in this terminal)
   4. you TYPE the short code your phone shows, and the matching key is pinned
-  5. optionally, enforcement is switched on
+  5. optionally, enforcement is switched on, and your passkey approvals
+     also answer Hermes's own prompt for the same command
 
-Re-running it is safe: finished steps are detected and skipped. It is an
-operator ceremony, like bootstrap and pin — run it in your own terminal,
-never through an agent.
+Re-running it is safe: finished steps are detected and skipped, and on an
+existing install it ends with a settings menu instead, so you can change
+enforcement, which calls and conversations are gated, your chat accounts and
+the Hermes prompt cover. A change that weakens the gate still needs your
+passkey (the same rule as `set`): the wizard shows the approval QR code and
+applies the change once you've signed. It is an operator ceremony, like
+bootstrap and pin — run it in your own terminal, never through an agent.
 """
 import json
+import re
 import sys
 import time
 
-from . import cli, expose, gate_core, lanes, local_verify, netfetch, service, tools
+from . import cli, expose, gate_core, lanes, local_verify, netfetch, service, tools, transport
 
 # Standard: dangerous command words in any flag order, find -delete, and any
 # code execution (which can do anything). A best-effort deny-list: an
@@ -307,42 +313,87 @@ class Wizard:
         return False
 
     def step_enforce(self):
+        """First run: offer to switch enforcement on, then the Hermes cover."""
         self.say()
         self.say("── Optional · Require your passkey for risky commands ─────────")
-        if self.ctx.get_config("require_passkey", default=False):
+        if self._enforcing():
             pats = self.ctx.get_config("authority_patterns", default=[]) or []
             self.say(f"✓ Enforcement is already on ({len(pats)} pattern(s)).")
-            return
-        self.say("With enforcement on, a tool call matching a pattern is blocked until you")
-        self.say("approve that exact call with your passkey. You can change this any time.")
-        if not self.confirm("Turn it on now?", default=False):
-            self.say("Skipped. Later: hermes passkey-gate set require_passkey true")
-            return
-        if not (self.ctx.get_config("authority_patterns", default=[]) or []):
-            self.say("Which calls should need your approval?")
-            self.say("  1  Standard: dangerous terminal commands (rm, curl, ssh, dd…) and any")
-            self.say("     code execution. Best effort: a determined agent can find another way.")
-            self.say("  2  Strict: every terminal command, code run and file edit. Safest, but")
-            self.say("     you'll approve a lot.")
-            self.say("  Or type your own regular expression.")
+        else:
+            self.say("With enforcement on, a tool call matching a pattern is blocked until you")
+            self.say("approve that exact call with your passkey. You can change this any time.")
+            if not self.confirm("Turn it on now?", default=False):
+                self.say("Skipped. Later: run setup again, or hermes passkey-gate set require_passkey true")
+                return
+            if not self._turn_on_enforcement():
+                return
+        self.step_cover()
+
+    def _enforcing(self):
+        return bool(self.ctx.get_config("require_passkey", default=False))
+
+    def _ask_patterns(self, current=None):
+        """Pattern choice; None means keep what's there (only offered when
+        there is something to keep)."""
+        self.say("Which calls should need your approval?")
+        self.say("  1  Standard: dangerous terminal commands (rm, curl, ssh, dd…) and any")
+        self.say("     code execution. Best effort: a determined agent can find another way.")
+        self.say("  2  Strict: every terminal command, code run and file edit. Safest, but")
+        self.say("     you'll approve a lot.")
+        self.say("  Or type your own regular expression.")
+        if current:
+            raw = self.ask("Choose 1, 2, a regex, or Enter to keep the current ones: ")
+            if not raw:
+                return None
+        else:
             raw = self.ask("Choose 1, 2, or a regex [1]: ") or "1"
-            raw = {"1": DEFAULT_PATTERN, "2": STRICT_PATTERN}.get(raw, raw)
+        return {"1": DEFAULT_PATTERN, "2": STRICT_PATTERN}.get(raw, raw)
+
+    def _turn_on_enforcement(self):
+        if not (self.ctx.get_config("authority_patterns", default=[]) or []):
+            raw = self._ask_patterns()
             out = cli.cmd_set(self.ctx, ["authority_patterns", json.dumps([raw])])
             if out.startswith("REFUSED"):
                 self.say(out)
                 self.say("Enforcement left off. Fix the pattern with: "
                          "hermes passkey-gate set authority_patterns <regex>")
-                return
+                return False
         if not self.step_lanes():
             self.say("Enforcement left off.")
-            return
+            return False
         cli.cmd_set(self.ctx, ["require_passkey", "true"])
         gated = self.ctx.get_config("gated_lanes", default=list(lanes.LANES))
         self.say(f"✓ Enforcement is on, for: {', '.join(lanes.normalize_lanes_ordered(gated)) or 'nothing'}.")
+        return True
 
-    def step_lanes(self):
-        """Which conversations need a passkey. Runs only while enforcement is
-        still off: narrowing lanes later needs a passkey approval."""
+    def step_cover(self):
+        """Offer to let a passkey approval answer Hermes's own prompt."""
+        state = transport.hermes_selection()
+        if state.get("selected") is None:
+            return  # not inside a Hermes we can configure
+        if state.get("selected") and state.get("transport_fallback") == "builtin":
+            self.say("✓ Your passkey approvals also answer Hermes's own prompt for that command.")
+            return
+        self.say()
+        self.say("Some commands, like rm -rf, are ones Hermes also counts as dangerous, so")
+        self.say("straight after your passkey it asks you again with its own prompt. Your")
+        self.say("passkey approval can answer that prompt for exactly the command you signed;")
+        self.say("every other Hermes prompt stays as it is.")
+        if self.confirm("Approve once instead of twice?"):
+            self._set_cover(True)
+        else:
+            self.say("Skipped. Later: run setup again.")
+
+    def _set_cover(self, on):
+        ok, note = transport.set_hermes_cover(on)
+        self.say(("✓ " if ok else "✗ ") + note)
+        if ok:
+            self.say("  Takes effect after: hermes gateway restart")
+        return ok
+
+    def step_lanes(self, allow_keep=False):
+        """Which conversations need a passkey. Free while enforcement is still
+        off; with it on, narrowing them needs a passkey approval (_apply)."""
         self.say()
         self.say("Which conversations should need your passkey?")
         self.say("  1  All of them (safest): you at this computer too.")
@@ -351,24 +402,141 @@ class Wizard:
         self.say("     the platform marks as bots. Chats from people aren't gated.")
         self.say(f"  Or list lanes yourself, comma-separated: {', '.join(lanes.LANES)}")
         self.say("  (README: 'Choosing which chats need a passkey' explains each, and its limits.)")
-        raw = self.ask("Choose 1, 2, 3, or lanes [1]: ") or "1"
+        if allow_keep:
+            raw = self.ask("Choose 1, 2, 3, lanes, or Enter to keep the current ones: ")
+            if not raw:
+                return True
+        else:
+            raw = self.ask("Choose 1, 2, 3, or lanes [1]: ") or "1"
         chosen = {"1": list(lanes.LANES), "2": ["owner", "others", "bots", "agents"],
                   "3": ["bots", "agents"]}.get(raw) or [x.strip() for x in raw.split(",") if x.strip()]
-        out = cli.cmd_set(self.ctx, ["gated_lanes", json.dumps(chosen)], _setup_enforcement_off=True)
-        if out.startswith("REFUSED"):
-            self.say(out)
+        if not self._apply("gated_lanes", json.dumps(chosen)):
             return False
         gated = set(chosen)
-        if "others" in gated and "owner" not in gated:
+        if "others" in gated and "owner" not in gated and not (
+                self.ctx.get_config("owner_senders", default=[]) or []):
             self.say("Your own chat accounts aren't gated, but other people's are. List yours as")
             self.say("platform:user_id (e.g. telegram:123456789) so the gate can tell them apart.")
             owners = self.ask("Your accounts, comma-separated (Enter to skip): ")
-            if owners:
-                out = cli.cmd_set(self.ctx, ["owner_senders", owners], _setup_enforcement_off=True)
-                if out.startswith("REFUSED"):
-                    self.say(out)
-                    self.say("No owner accounts saved; your chats count as 'others' for now.")
+            if owners and not self._apply("owner_senders", owners):
+                self.say("No owner accounts saved; your chats count as 'others' for now.")
         return True
+
+    # ------------------------------------------------------------ changing settings
+    def _apply(self, key, raw):
+        """Save one setting through `set` (all its checks apply). A change
+        that weakens the gate gets its passkey approval here: show the QR,
+        wait for the phone, then re-run the same change with --approve,
+        where `set` verifies the signature itself."""
+        out = cli.cmd_set(self.ctx, [key, raw], _setup_enforcement_off=True)
+        if not out.startswith(f"REFUSED: set {key} weakens"):
+            if out.startswith("REFUSED") or not out.startswith(f"{key} = "):
+                self.say(out)
+                return False
+            return True
+        cid = re.search(r"--approve (\S+)\s*$", out, re.M)
+        url = re.search(r"^\s*(https?://\S+/a/\S+)\s*$", out, re.M)
+        phrase = re.search(r"^approval phrase.*\n\s*(.+)$", out, re.M)
+        if not (cid and url):
+            self.say(out)
+            return False
+        cid, url = cid.group(1), url.group(1)
+        self.say()
+        self.say("This change weakens the gate, so it needs your passkey. Your phone will show:")
+        if phrase:
+            self.say(f"  {phrase.group(1)}")
+        self.say("Scan this QR code with your phone and approve it:")
+        self.say(cli.qr_text(url))
+        self.say(f"  {url}")
+        self.say("Waiting for your phone… (Ctrl-C to stop)")
+        state = self._wait_for_decision(cid)
+        if state != "approved":
+            self.say({"denied": "✗ You denied it. Nothing was changed.",
+                      "expired": "✗ The approval request expired. Nothing was changed."}
+                     .get(state, f"✗ The approval request is {state}. Nothing was changed."))
+            return False
+        out = cli.cmd_set(self.ctx, [key, raw, "--approve", cid], _setup_enforcement_off=True)
+        if not out.startswith(f"{key} = "):
+            self.say(out)
+            return False
+        self.say("✓ Approved with your passkey and saved.")
+        return True
+
+    def _wait_for_decision(self, cid):
+        while True:
+            state = gate_core.challenge_state(cid)
+            if state != "pending":
+                return state
+            self.sleep(1)
+
+    def _patterns_label(self):
+        pats = self.ctx.get_config("authority_patterns", default=[]) or []
+        if pats == [DEFAULT_PATTERN]:
+            return "standard"
+        if pats == [STRICT_PATTERN]:
+            return "strict"
+        return f"{len(pats)} custom pattern(s)" if pats else "none"
+
+    def _cover_label(self):
+        state = transport.hermes_selection()
+        if state.get("selected") is None:
+            return "can't tell from here"
+        if not state.get("selected"):
+            return "off (Hermes may ask again after your passkey)"
+        if state.get("transport_fallback") != "builtin":
+            return "on, but fallback DENIES other prompts (choose to fix)"
+        return "on (approve once, not twice)"
+
+    def step_settings(self):
+        """Existing install: show the settings and change any of them."""
+        while True:
+            enforcing = self._enforcing()
+            gated = lanes.normalize_lanes_ordered(
+                self.ctx.get_config("gated_lanes", default=list(lanes.LANES)))
+            owners = self.ctx.get_config("owner_senders", default=[]) or []
+            self.say()
+            self.say("── Settings " + "─" * 50)
+            self.say(f"  1  Require your passkey     {'on' if enforcing else 'off'}")
+            self.say(f"  2  Which calls              {self._patterns_label()}")
+            self.say(f"  3  Which conversations      {', '.join(gated) or 'none'}")
+            self.say(f"  4  Your chat accounts       {', '.join(owners) or 'none listed'}")
+            self.say(f"  5  Hermes's own prompt      {self._cover_label()}")
+            self.say("  Owner key and address are changed separately: see 'hermes passkey-gate --help'.")
+            self.say("  Turning enforcement off, removing patterns, narrowing conversations or")
+            self.say("  adding accounts weakens the gate, so those need your passkey.")
+            choice = self.ask("Number to change, or Enter when done: ").lower()
+            if choice in ("", "q", "quit", "done"):
+                return
+            if choice == "1":
+                if enforcing:
+                    if self.confirm("Turn enforcement OFF?", default=False):
+                        if self._apply("require_passkey", "false"):
+                            self.say("✓ Enforcement is off.")
+                else:
+                    self._turn_on_enforcement()
+            elif choice == "2":
+                raw = self._ask_patterns(current=self.ctx.get_config("authority_patterns", default=[]))
+                if raw is not None and self._apply("authority_patterns", json.dumps([raw])):
+                    self.say(f"✓ Now gating: {self._patterns_label()}.")
+            elif choice == "3":
+                self.step_lanes(allow_keep=True)
+            elif choice == "4":
+                self.say("List your own chat accounts as platform:user_id, e.g. telegram:123456789.")
+                self.say("Calls from these count as you ('owner' lane). Type 'none' to clear the list.")
+                raw = self.ask("Your accounts, comma-separated (Enter to keep): ")
+                if raw:
+                    self._apply("owner_senders", "[]" if raw.lower() == "none" else raw)
+            elif choice == "5":
+                state = transport.hermes_selection()
+                if state.get("selected") is None:
+                    self.say("This Hermes can't be configured from here. See README: 'Approving once, not twice'.")
+                elif state.get("selected") and state.get("transport_fallback") == "builtin":
+                    if self.confirm("Go back to Hermes asking again after your passkey?", default=False):
+                        self._set_cover(False)
+                else:
+                    self._set_cover(True)
+            else:
+                self.say("Type a number from 1 to 5, or press Enter.")
 
     # ------------------------------------------------------------ run
     def run(self):
@@ -383,7 +551,10 @@ class Wizard:
             new = self.step_register()
             if not self.step_confirm(new):
                 return "setup stopped before pinning a key — run 'hermes passkey-gate setup' again"
-            self.step_enforce()
+            if new is None:
+                self.step_settings()  # existing install: change whatever's needed
+            else:
+                self.step_enforce()
         except _Quit:
             return "setup stopped. Run 'hermes passkey-gate setup' again any time; finished steps are skipped."
         except KeyboardInterrupt:

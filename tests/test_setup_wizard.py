@@ -200,11 +200,103 @@ def test_wizard_ignores_passkeys_that_existed_before_the_qr(world, tmp_path):
 def test_wizard_rerun_skips_finished_steps(world, tmp_path):
     _, _, ctx = _run(world, ["", world["phone"]["code"], "n"])
     minted = world["minted"]
-    out, s, _ = _run(world, ["n"], ctx)          # same config, as a real re-run
+    out, s, _ = _run(world, [""], ctx)          # same config, as a real re-run
     assert "gate is running as a background service" in s.text
     assert "already pinned" in s.text and world["phone"]["code"] in s.text
     assert world["minted"] == minted  # no new registration link
+    assert "── Settings" in s.text  # an existing install gets the settings menu
     assert "Setup complete" in out
+
+
+# ------------------------------------------------------------ re-run: change settings
+def _installed(world, enforce=True):
+    """A finished install (enforcement on with the defaults, or left off)."""
+    answers = ["", world["phone"]["code"]] + (["y", "", ""] if enforce else ["n"])
+    _, _, ctx = _run(world, answers)
+    return ctx
+
+
+def _passkey_signs(monkeypatch, decision="approved"):
+    """The phone answers the inline approval; `set --approve` still runs its
+    own verification, faked here as passing for an approved challenge."""
+    seen = {}
+    monkeypatch.setattr(gate_core, "challenge_state", lambda cid: seen.setdefault("cid", cid) and decision)
+    monkeypatch.setattr(cli, "_verify_weakening_approval",
+                        lambda cid, phrase: seen.update(phrase=phrase) or ([] if decision == "approved" else ["no"]))
+    monkeypatch.setattr(gate_core, "consume_approval", lambda cid, sha: True)
+    return seen
+
+
+def test_rerun_can_turn_enforcement_on(world):
+    ctx = _installed(world, enforce=False)
+    out, s, _ = _run(world, ["1", "2", "", ""], ctx)
+    assert ctx.store["require_passkey"] is True
+    assert ctx.store["authority_patterns"] == [setup_wizard.STRICT_PATTERN]
+    assert "enforcement on" in out
+
+
+def test_rerun_turning_enforcement_off_needs_the_passkey(world, monkeypatch):
+    ctx = _installed(world)
+    seen = _passkey_signs(monkeypatch)
+    out, s, _ = _run(world, ["1", "y", ""], ctx)
+    assert ctx.store["require_passkey"] is False
+    assert "needs your passkey" in s.text and "/a/" + seen["cid"] in s.text
+    assert "turns enforcement OFF" in seen["phrase"]
+    assert "Approved with your passkey and saved" in s.text
+
+
+def test_rerun_denied_approval_changes_nothing(world, monkeypatch):
+    ctx = _installed(world)
+    _passkey_signs(monkeypatch, decision="denied")
+    _run(world, ["1", "y", ""], ctx)
+    assert ctx.store["require_passkey"] is True
+
+
+def test_rerun_never_applies_a_weakening_change_set_does_not_verify(world, monkeypatch):
+    """The wizard only relays: `set --approve` is what decides."""
+    ctx = _installed(world)
+    _passkey_signs(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_weakening_approval", lambda cid, phrase: ["bad signature"])
+    _, s, _ = _run(world, ["1", "y", ""], ctx)
+    assert ctx.store["require_passkey"] is True
+    assert "bad signature" in s.text
+
+
+def test_rerun_widening_lanes_is_free_and_narrowing_asks(world, monkeypatch):
+    ctx = _installed(world)
+    seen = _passkey_signs(monkeypatch)
+    _run(world, ["3", "3", ""], ctx)  # narrow to bots + agents
+    assert ctx.store["gated_lanes"] == ["bots", "agents"]
+    assert "stops requiring a passkey" in seen["phrase"]
+    monkeypatch.setattr(gate_core, "challenge_state", lambda cid: pytest.fail("no approval needed"))
+    _run(world, ["3", "1", ""], ctx)  # back to all: strengthening
+    assert ctx.store["gated_lanes"] == ["local", "owner", "others", "bots", "agents"]
+
+
+def test_rerun_keeps_settings_on_enter(world):
+    ctx = _installed(world)
+    before = dict(ctx.store)
+    _run(world, ["2", "", "3", "", "4", "", ""], ctx)
+    assert {k: ctx.store[k] for k in ("authority_patterns", "gated_lanes", "require_passkey")} == \
+        {k: before[k] for k in ("authority_patterns", "gated_lanes", "require_passkey")}
+
+
+def test_cover_question_and_menu_toggle(world, monkeypatch):
+    from passkey_gate import transport
+    hermes = {"selected": False, "transport_fallback": "deny"}
+    monkeypatch.setattr(transport, "hermes_selection", lambda: dict(hermes))
+
+    def set_cover(on):
+        hermes.update(selected=on, transport_fallback="builtin")
+        return True, "on" if on else "off"
+    monkeypatch.setattr(transport, "set_hermes_cover", set_cover)
+    _, s, ctx = _run(world, ["", world["phone"]["code"], "y", "", "", ""])  # Enter = yes
+    assert hermes["selected"] is True and "Approve once instead of twice?" in " ".join(s.prompts)
+    _, s, _ = _run(world, ["5", "y", ""], ctx)
+    assert hermes["selected"] is False
+    assert "off (Hermes may ask again" in s.text.split("── Settings")[-1]
+    _run(world, ["5", ""], ctx)
+    assert hermes["selected"] is True
 
 
 def test_wizard_turns_on_enforcement(world):

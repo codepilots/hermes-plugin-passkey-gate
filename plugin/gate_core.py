@@ -823,6 +823,22 @@ def challenge_consumed(cid: str) -> bool:
     return row is not None and row["status"] == "consumed"
 
 
+def challenge_state(cid: str) -> str:
+    """Operator-side progress check for a challenge this process minted (the
+    setup wizard waits on it): pending, approved, consumed, denied, expired,
+    or unknown. Reads only; unlike challenge_status it writes no audit entry,
+    so polling it doesn't flood the log. It is never proof of approval:
+    whatever acts on an approval still verifies it (cmd_set --approve)."""
+    if not isinstance(cid, str) or not ID_RE.match(cid):
+        return "unknown"
+    row = db().execute("select status, expires_at from challenges where id=?", (cid,)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["status"] in ("pending", "approved") and time.time() > row["expires_at"]:
+        return "expired"
+    return row["status"]
+
+
 def pending_for_binding(binding_sha: str) -> sqlite3.Row | None:
     """Approved, unexpired challenge covering this binding — an approval past
     expires_at must not satisfy the enforcement hook: stale signatures never

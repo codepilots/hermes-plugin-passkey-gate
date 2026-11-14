@@ -80,10 +80,19 @@ The wizard takes about three minutes and checks each step before moving on:
    until you approve them. Choose *standard* (dangerous terminal commands and
    any code execution) or *strict* (every terminal command, code run and
    file edit), then which conversations it applies to (see
-   [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey)).
+   [Choosing which chats need a passkey](#choosing-which-chats-need-a-passkey)),
+   and whether your passkey approval also answers Hermes's own prompt
+   (see [Approving once, not twice](#approving-once-not-twice)).
 
-Re-running `setup` is safe; finished steps are skipped. Run it in your own
-terminal, never through an agent: it decides which key is trusted.
+Re-running `setup` is safe; finished steps are skipped. On an existing
+install it ends with a **settings menu** showing what's set now, where you
+can change enforcement, which calls and conversations need a passkey, your
+chat accounts, and the Hermes prompt cover. A change that weakens the gate
+(turning enforcement off, replacing or removing patterns, gating fewer
+conversations, adding accounts) still needs your passkey, as with `set`: the
+wizard shows the approval QR code, waits for your phone, then applies it.
+The owner key and the address aren't changed from the menu. Run `setup` in
+your own terminal, never through an agent: it decides which key is trusted.
 
 **Try it.** With enforcement on, ask your agent to run
 `rm -rf ./some-scratch-dir`. The call is blocked, the agent sends you an
@@ -208,7 +217,9 @@ A command the gate gates, such as `rm -rf`, is often one Hermes also counts
 as dangerous. Then, straight after you sign with your passkey, Hermes asks
 you to approve the same command again with its own prompt. To let the
 passkey approval answer that prompt, select the gate as Hermes's approval
-transport in the Hermes `config.yaml`:
+transport. `hermes passkey-gate setup` offers this (and its settings menu
+switches it on or off on an existing install), or set it yourself in the
+Hermes `config.yaml`:
 
 ```yaml
 security:

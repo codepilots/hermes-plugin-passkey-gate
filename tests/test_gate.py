@@ -2043,3 +2043,23 @@ def test_gate_verify_tells_agent_to_run_the_call_verbatim(monkeypatch, base, aut
     out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
     assert out["verified"] is True
     assert "nothing added or removed" in out["dispatch_note"]
+
+
+def test_challenge_state_tracks_progress_without_auditing(base, autumn, monkeypatch):
+    """The setup wizard polls this while the phone decides: it must follow
+    the challenge and write nothing to the audit log while it does."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    c = new_challenge(base, tool_call=_bound_call("state"), requester="bramble")
+    cid = c["challenge_id"]
+    audited = []
+    real_audit = gate_core.audit
+    monkeypatch.setattr(gate_core, "audit", lambda *a, **k: audited.append(a))
+    assert gate_core.challenge_state(cid) == "pending"
+    assert audited == []
+    monkeypatch.setattr(gate_core, "audit", real_audit)
+    approve(base, autumn, cid)
+    assert gate_core.challenge_state(cid) == "approved"
+    expire_challenge(cid)
+    assert gate_core.challenge_state(cid) == "expired"
+    assert gate_core.challenge_state("nope") == "unknown"
+    assert gate_core.challenge_state("0" * 32) == "unknown"

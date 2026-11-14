@@ -130,6 +130,35 @@ def clear() -> None:
         _credits.clear()
 
 
+def set_hermes_cover(on: bool) -> tuple[bool, str]:
+    """Select (or deselect) this transport in the active Hermes profile's
+    config, through Hermes's own `hermes config set` code path. Turning it
+    on always sets transport_fallback: builtin too, since without it Hermes
+    would deny every prompt the passkey didn't cover."""
+    try:
+        import contextlib
+        import io
+        from hermes_cli.config import set_config_value
+    except Exception:
+        return False, "this Hermes can't be configured from here; edit config.yaml by hand"
+    changes = ([("security.approval.transport_fallback", "builtin"),
+                ("security.approval.transport", TRANSPORT_NAME)] if on else
+               [("security.approval.transport", "builtin")])
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            for key, value in changes:
+                set_config_value(key, value)
+    except SystemExit:
+        return False, "Hermes refused the change: " + (out.getvalue().strip() or "no reason given")
+    except Exception as exc:
+        return False, f"could not write the Hermes config ({type(exc).__name__}: {exc})"
+    state = hermes_selection()
+    if bool(state.get("selected")) != on:
+        return False, "the Hermes config didn't take the change: " + state.get("note", "")
+    return True, state.get("note", "")
+
+
 def hermes_selection() -> dict:
     """What Hermes's config says about approval transports, for `status`."""
     try:

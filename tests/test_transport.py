@@ -166,3 +166,37 @@ def test_register_offers_transport_and_post_tool_call(monkeypatch):
         register_approval_transport = None
 
     passkey_gate.register(OldHermes())  # no transport API: still registers fine
+
+
+def test_set_hermes_cover_writes_through_hermes_config(monkeypatch):
+    import sys
+    import types
+    written, cfg = [], {}
+
+    def set_config_value(key, value):
+        written.append((key, value))
+        cfg[key.rsplit(".", 1)[1]] = value
+    fake = types.ModuleType("hermes_cli.config")
+    fake.set_config_value = set_config_value
+    fake.load_config_readonly = lambda: {"security": {"approval": dict(cfg)}}
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+
+    ok, note = transport.set_hermes_cover(True)
+    assert ok and note.startswith("on")
+    assert written == [("security.approval.transport_fallback", "builtin"),
+                       ("security.approval.transport", "passkey-gate")]
+    ok, note = transport.set_hermes_cover(False)
+    assert ok and cfg["transport"] == "builtin"
+
+    def refuse(key, value):
+        print("✗ managed install")
+        raise SystemExit(1)
+    fake.set_config_value = refuse
+    ok, note = transport.set_hermes_cover(True)
+    assert not ok and "managed install" in note
+
+
+def test_set_hermes_cover_outside_hermes():
+    ok, note = transport.set_hermes_cover(True)
+    assert not ok and "by hand" in note

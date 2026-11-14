@@ -19,6 +19,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discarded when the call finishes (a new `post_tool_call` hook), and are
   never given to a command whose text Hermes redacts. `status` reports the
   setting under `covers_hermes_prompt` and warns if the fallback would deny.
+- **Re-running `setup` lets you change your settings.** On an existing
+  install the wizard used to skip every finished step and stop. It now ends
+  with a settings menu showing the current values: enforcement on/off,
+  which calls (standard, strict or your own regex), which conversations,
+  your chat accounts, and the Hermes prompt cover. Changes that weaken the
+  gate still need your passkey: the wizard shows the approval QR code,
+  waits for your phone (new `gate_core.challenge_state`, which reads
+  without writing audit entries), then re-runs the change with `--approve`,
+  so `set` verifies the signature exactly as before. First-time setup also
+  asks about the Hermes prompt cover once enforcement is on.
 
 ## [0.8.1] - 2026-11-10
 
