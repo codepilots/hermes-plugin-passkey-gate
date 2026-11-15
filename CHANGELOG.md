@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-15
+
 ### Added
 
 - **`gate_cancel`: an agent can withdraw a request it no longer needs.** In a
@@ -798,8 +800,9 @@ These are architectural, deliberate, and documented in
   action text and cryptographic evidence are still readable by anyone holding
   the high-entropy URL inputs.
 
-[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.9.0...HEAD
-[0.9.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.1...v0.9.0
+[Unreleased]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/1e37f03...v0.10.0
+[0.9.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.1...1e37f03
 [0.8.1]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/codepilots/hermes-plugin-passkey-gate/compare/v0.7.1...v0.7.2
