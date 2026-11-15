@@ -2321,7 +2321,9 @@ def test_any_exception_in_the_hook_blocks(monkeypatch):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(_cli, "apply_config_safe", boom)
     v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"}, "t")
-    assert v is not None and v["action"] == "block" and "unexpected" in v["message"]
+    assert v is not None and v["action"] == "block" and "RuntimeError" in v["message"]
+    # the exception's text can carry paths or settings: it stays in the log
+    assert "unexpected" not in v["message"]
     # a future Hermes that stops passing task_id must not turn into 'allow' either
     v = passkey_gate._on_pre_tool_call("terminal", {"command": "ls"})
     assert v is not None and v["action"] == "block"
@@ -2678,6 +2680,7 @@ def test_agents_cannot_mint_or_spend_hermes_prompt_requests(base, autumn, hermes
     approve(base, autumn, post.cid)
     sha = gate_core.sha256_hex(text)
     assert not gate_core.consume_approval(post.cid, sha)  # settings kind by default
+    assert not gate_core.consume_approval(post.cid, sha, kind="no-such-kind")  # never another kind's authority
     assert gate_core.consume_approval(post.cid, sha, kind=gate_core.HERMES_KIND)
     assert not gate_core.withdraw_challenge(c["challenge_id"], "not ours")  # only Hermes-kind rows
 

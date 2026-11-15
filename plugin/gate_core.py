@@ -874,6 +874,8 @@ def consume_approval(cid: str, action_sha: str, kind: str = SETTINGS_KIND,
     THIS change can be spent on it; a stale approval past expires_at can
     never be claimed (finding 4).
     """
+    if kind not in GATE_KINDS:
+        return False  # never fall back to another kind's authority
     now = time.time()
     sha = (action_sha or "").strip().lower()
     cur = db().execute(
@@ -882,7 +884,7 @@ def consume_approval(cid: str, action_sha: str, kind: str = SETTINGS_KIND,
         # v0.7 review M1: only a text-only challenge the gate minted for a
         # settings change can authorise one — not an agent's tool-call approval
         "and kind=? and binding_sha256 is null and tool_call is null",
-        (now, cid, sha, now, kind if kind in GATE_KINDS else SETTINGS_KIND))
+        (now, cid, sha, now, kind))
     if cur.rowcount == 1:
         audit("challenge_consumed", challenge_id=cid, action_sha256=sha,
               consumed_by=consumed_by)

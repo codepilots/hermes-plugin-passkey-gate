@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 
 from . import childenv, gate_core, local_verify, netfetch, schemas, transport
 
@@ -526,7 +527,8 @@ def hashlib_sha256(text: str) -> str:
 
 
 def _fetch_verify(base: str, cid: str, sha: str):
-    url = f"{base}/verify/{cid}?action_sha256={sha}"
+    # the id comes from the agent: keep it one path segment whatever it holds
+    url = f"{base}/verify/{urllib.parse.quote(cid, safe='')}?action_sha256={sha}"
     try:
         with netfetch.open_no_redirect(url, timeout=10) as r:
             raw = netfetch.read_capped(r)
@@ -739,12 +741,27 @@ def _string_values(value, depth=0):
     return []
 
 
+def unusable_patterns(patterns) -> list[int]:
+    """Rule numbers of authority patterns that are unusable (not a string,
+    or not a regex that compiles). The hook blocks every gated call while
+    there is one, and `status` names it."""
+    bad = []
+    for i, pat in enumerate(patterns if isinstance(patterns, (list, tuple)) else []):
+        try:
+            re.compile(pat)
+        except (re.error, TypeError):
+            bad.append(i)
+    return bad
+
+
 def authority_matches(patterns, tool_name: str, args) -> tuple[int, str] | None:
     """First authority pattern matching this exact call, as (rule_index,
     pattern) — the index is the stable rule ID the block message shows.
     Finding 22: a pattern that reached config without cmd_set's set-time
-    validation (an out-of-band edit) must neither crash the hook nor turn
-    into an opaque block: it is skipped as non-matching and logged."""
+    validation (an out-of-band edit) must not crash a caller, so here it is
+    skipped as non-matching and logged. The pre_tool_call hook never relies
+    on that skip: it blocks every gated call, naming the rule, while any
+    pattern is unusable (unusable_patterns)."""
     subject = tool_name + " " + canonical_for_hook(tool_name, args)
     # v0.7 review M2: patterns also run over the DECODED argument values
     # (real newlines and tabs, unescaped quotes and non-ASCII), so `\b`,

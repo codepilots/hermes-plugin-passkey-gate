@@ -116,6 +116,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The approval transport no longer imports a private Hermes function.**
+  `hermes plugins validate` warned that `transport.py` imported
+  `agent.redact.redact_approval_display`, which is not in Hermes's published
+  plugin API (catalog rule 9) and could move in any release. The transport
+  now calls `agent.redact.redact_sensitive_text`, which is published. The
+  private function also escaped hidden characters and collapsed padding;
+  rather than copy that, the approve-once cover is now given only to
+  commands made of plain printable ASCII (plus tab and newline) that
+  redaction leaves unchanged. A command with accented or other non-ASCII
+  characters therefore keeps Hermes's second prompt, where before it could
+  be covered. One narrower case: an unanswered request for a command
+  containing hidden characters or long padding is now reported to the agent
+  in Hermes's own "User denied" wording, not the corrected one.
+- **Fixes from a static security scan of 15 November 2026** (0 critical or
+  high, 2 medium, 8 low; nothing was executed by the scan):
+  - An empty or whitespace-only `config-canary` file was read as "the gate
+    was never configured", which turned the lost-settings check off. It now
+    fails closed like an unreadable file, and the message says how to arm
+    the check again. A missing file still means "never configured".
+  - `owner_senders` set to something other than a list (a hand edit such as
+    `owner_senders: telegram:123`) was read as an empty list, so with only
+    the owner lane gated nothing was gated. Every conversation is now gated
+    until it is fixed, and `status` says why.
+  - An authority pattern that isn't a usable regex (possible only through
+    a hand edit; `set` refuses one) used to be skipped with a log line, so
+    the calls it was meant to catch ran ungated. The hook now blocks every
+    gated call, naming the rule, until it is fixed or removed, and `status`
+    names it too.
+  - CI pins `actions/checkout` and `actions/setup-python` to full commit
+    SHAs instead of version tags.
+  - The message an agent gets when the enforcement hook fails no longer
+    contains the exception's text, only its type. The detail stays in the
+    Hermes log.
+  - `gate_verify` percent-encodes the `challenge_id` it puts in the verify
+    URL, so an id containing `/`, `?` or `#` can't change the path or query.
+  - `audit-verify` refuses a notary file larger than 1 MiB without reading it.
+  - `consume_approval` refuses an unrecognised kind; it used to treat it as
+    a settings approval. No caller passed one.
 - Tool handlers return structured diagnostic JSON instead of raising when
   arguments are not objects or local pin, database or audit access fails;
   internal exception details stay in operator logs rather than tool output.

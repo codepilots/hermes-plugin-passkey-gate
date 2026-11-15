@@ -45,9 +45,9 @@ def _on_pre_tool_call(tool_name: str, args: dict = None, task_id: str = "", **kw
     except Exception as exc:
         logger.exception("passkey-gate: pre_tool_call failed; blocking")
         return {"action": "block", "message": (
-            f"Passkey gate: an internal error stopped the safety check ({type(exc).__name__}: "
-            f"{exc}) — failing closed, this call is blocked. Tell the human; "
-            "'hermes passkey-gate status' shows what the gate sees.")}
+            f"Passkey gate: an internal error stopped the safety check ({type(exc).__name__}) "
+            "— failing closed, this call is blocked. Tell the human; the details are in the "
+            "Hermes log, and 'hermes passkey-gate status' shows what the gate sees.")}
 
 
 def _session_surface() -> str:
@@ -82,6 +82,20 @@ def _pre_tool_call_verdict(tool_name, args, task_id="", session_id=""):
     applies, lane_words = lanes.gate_decision(gated, turn)
     if not applies:
         return None
+    broken = tools.unusable_patterns(cfg["patterns"])
+    if broken:
+        # A rule that can't be read can't say which calls it was meant to
+        # catch, so no call here can be judged low-authority. Block, and
+        # name the rule, rather than quietly enforce less than was asked.
+        rules = ", ".join(str(i) for i in broken)
+        return {"action": "block", "message": (
+            f"Passkey gate: authority pattern rule {rules} is not a usable regular expression, "
+            "so the gate can't tell which calls it was meant to catch — failing closed, this "
+            "call is blocked. No approval will unblock it. Tell the human to fix or remove that "
+            "pattern ('hermes passkey-gate status' names it; 'hermes passkey-gate set "
+            "authority_patterns ...' replaces the list). The gate reloads its settings "
+            "automatically, and this call can then be retried."
+            + (f" (Gated lane: {lane_words}.)" if lane_words else ""))}
     verdict = tools.hook_verdict(tool_name, args, cfg["patterns"], True)
     if isinstance(verdict, dict) and verdict.get("action") == "block" and lane_words:
         verdict["message"] += f" (Gated lane: {lane_words}.)"

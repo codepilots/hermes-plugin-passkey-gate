@@ -158,12 +158,20 @@ def apply_config(ctx):
                         challenge_ttl=int(ttl),
                         parent_allowlist=allow)
     owners = ctx.get_config("owner_senders", default=[]) or []
-    return {"require_passkey": bool(ctx.get_config("require_passkey", default=False)),
-            "patterns": ctx.get_config("authority_patterns", default=[]) or [],
-            # normalize_lanes fails closed on a malformed value (all lanes)
-            "gated_lanes": ctx.get_config("gated_lanes", default=list(lanes.LANES)),
-            "owner_senders": owners if isinstance(owners, list) else [],
-            "passkey_hermes_prompts": bool(ctx.get_config("passkey_hermes_prompts", default=False))}
+    out = {"require_passkey": bool(ctx.get_config("require_passkey", default=False)),
+           "patterns": ctx.get_config("authority_patterns", default=[]) or [],
+           # normalize_lanes fails closed on a malformed value (all lanes)
+           "gated_lanes": ctx.get_config("gated_lanes", default=list(lanes.LANES)),
+           "owner_senders": owners,
+           "passkey_hermes_prompts": bool(ctx.get_config("passkey_hermes_prompts", default=False))}
+    if not isinstance(owners, list):
+        # An owner list that can't be read matches nobody, which would move
+        # the owner's chats into "others" and could leave them ungated. Fail
+        # closed the way a malformed gated_lanes does: gate every lane.
+        out.update(owner_senders=[], gated_lanes=list(lanes.LANES),
+                   owner_senders_problem="owner_senders must be a list of '<platform>:<user id>' "
+                                         f"entries, not a {type(owners).__name__}")
+    return out
 
 
 def os_default_rp_id(origin: str = ""):
@@ -233,11 +241,15 @@ def _canary_file() -> Path:
 
 def _expected_canary():
     """The check value this gate expects in its config, or None if the gate
-    was never configured. An unreadable copy raises (the caller fails closed)."""
+    was never configured (no file). An unreadable or EMPTY copy raises (the
+    caller fails closed): a truncated file is damage, not "never armed"."""
     try:
-        return _canary_file().read_text().strip() or None
+        value = _canary_file().read_text().strip()
     except FileNotFoundError:
         return None
+    if not value:
+        raise ValueError("it is empty")
+    return value
 
 
 def config_canary_problem(ctx):
@@ -249,7 +261,8 @@ def config_canary_problem(ctx):
         expected = _expected_canary()
     except Exception as exc:  # unreadable OR undecodable: fail closed (A4)
         return (f"the gate's config check file {_canary_file()} can't be read "
-                f"({type(exc).__name__}: {exc})")
+                f"({type(exc).__name__}: {exc}). If the gate's settings are intact, delete "
+                "that file and run 'hermes passkey-gate setup' to arm the check again.")
     if expected is None:
         return None
     try:
@@ -1104,6 +1117,7 @@ def status_data(ctx):
         every_prompt=bool(apply_config_safe().get("passkey_hermes_prompts")),
         request_ttl=gate_core.challenge_ttl())
     out["enforcement"] = {**apply_config_safe(),
+                          "unusable_patterns": tools.unusable_patterns(apply_config_safe().get("patterns")),
                           "note": "patterns are regexes matched against tool_name + canonical args JSON"}
     return out
 
@@ -1159,6 +1173,16 @@ def status_text(out) -> str:
         conv = ", ".join(lanes.normalize_lanes_ordered(enf.get("gated_lanes", list(lanes.LANES)))) or "none"
         row(ok, "Enforcement", f"on · {_patterns_words(enf.get('patterns'))} · conversations: {conv}")
         gated = lanes.normalize_lanes(enf.get("gated_lanes", list(lanes.LANES)))
+        if enf.get("owner_senders_problem"):
+            row(warn, "Owner list", f"{enf['owner_senders_problem']}; every conversation is gated "
+                                    "until it is fixed")
+            todo.append("fix owner_senders: hermes passkey-gate set owner_senders "
+                        "<platform>:<your user id>")
+        if enf.get("unusable_patterns"):
+            rules = ", ".join(str(i) for i in enf["unusable_patterns"])
+            row(bad, "Patterns", f"rule {rules} is not a usable regex: every gated call is "
+                                 "blocked until it is fixed or removed")
+            todo.append("fix or remove the broken pattern: hermes passkey-gate set authority_patterns ...")
         if not enf.get("owner_senders") and ("owner" in gated) != ("others" in gated):
             # with no account listed, nothing is ever in the owner lane: the
             # operator's own chats are judged by the "others" setting instead
@@ -1232,11 +1256,17 @@ def _notary_file(ctx, override):
     return None
 
 
+NOTARY_MAX_BYTES = 1024 * 1024  # about ten thousand notarizations
+
+
 def _read_notary(p):
     """Parse the operator's notary file: lines of '<ISO timestamp> <head
     hash>' as written by audit-notarize (or pasted by hand from its output).
     Returns (records, problem); records is [(ts, head), ...]."""
     records = []
+    if p.stat().st_size > NOTARY_MAX_BYTES:
+        return None, (f"notary file is larger than {NOTARY_MAX_BYTES // 1024} KiB; that is not a "
+                      "notary file (each line is a timestamp and a 64-character hash)")
     for i, line in enumerate(p.read_text().splitlines()):
         line = line.strip()
         if not line:

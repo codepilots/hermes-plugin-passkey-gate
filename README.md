@@ -252,8 +252,10 @@ approval for a call, Hermes's prompt for exactly that command (or
 back to Hermes's normal one. Each cover is single use, lasts at most 30
 seconds and ends when that tool call finishes. A command containing
 something Hermes redacts (a token, a password) keeps its second prompt,
-because Hermes only shows the transport the redacted text. Hermes's
-hardline blocks and deny rules still run first.
+because Hermes only shows the transport the redacted text. So does a
+command with anything other than plain printable ASCII in it, because
+Hermes rewrites hidden characters before showing them. Hermes's hardline
+blocks and deny rules still run first.
 
 `transport_fallback: builtin` matters: without it Hermes *denies* every
 prompt the passkey didn't cover. `hermes passkey-gate status` shows the

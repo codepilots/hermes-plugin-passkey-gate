@@ -547,3 +547,77 @@ def test_status_command_defaults_to_text():
     out = _cli(FakeCtx(), "status")
     assert out.startswith("passkey-gate status") and "Owner key" in out
     json.loads(_cli(FakeCtx(), "status --json"))
+
+
+# ------------------------------------------------ static scan of 15 Nov 2026
+@pytest.mark.parametrize("content", ["", "  \n"])
+def test_empty_canary_file_fails_closed(content):
+    """A truncated check file is damage, not 'never configured'."""
+    ctx = FakeCtx()
+    ctx.store["config_canary"] = "abc"
+    cli._canary_file().write_text(content)
+    problem = cli.config_canary_problem(ctx)
+    assert problem and "can't be read" in problem and "empty" in problem
+    cli._canary_file().unlink()
+    assert cli.config_canary_problem(ctx) is None   # no file is still 'never configured'
+
+
+def test_malformed_owner_senders_gates_every_lane():
+    """A string where a list belongs matches nobody; that must not un-gate
+    the owner's chats when only the owner lane is gated."""
+    from passkey_gate import lanes
+    ctx = FakeCtx()
+    ctx.store.update(require_passkey=True, gated_lanes=["owner"], owner_senders="telegram:123")
+    cfg = cli.apply_config(ctx)
+    assert cfg["owner_senders"] == []
+    assert lanes.normalize_lanes(cfg["gated_lanes"]) == lanes.normalize_lanes(list(lanes.LANES))
+    assert "str" in cfg["owner_senders_problem"]
+    text = cli.status_text({"enforcement": cfg})
+    assert "Owner list" in text and "every conversation is gated" in text
+    ctx.store["owner_senders"] = ["telegram:123"]
+    cfg = cli.apply_config(ctx)
+    assert cfg["gated_lanes"] == ["owner"] and "owner_senders_problem" not in cfg
+
+
+def test_status_names_a_pattern_the_hook_would_skip():
+    from passkey_gate import tools
+    assert tools.unusable_patterns(["^terminal ", "rm -rf (", 7]) == [1, 2]
+    assert tools.unusable_patterns(None) == []
+    text = cli.status_text({"enforcement": {"require_passkey": True, "patterns": ["rm -rf ("],
+                                            "unusable_patterns": [0]}})
+    assert "rule 0 is not a usable regex" in text and "✗ Patterns" in text
+    assert "every gated call is blocked" in text
+
+
+def test_hook_blocks_every_gated_call_while_a_pattern_is_unusable(monkeypatch):
+    """A broken rule can't say what it was meant to catch: enforcing the
+    rest and allowing everything else would quietly gate less than asked."""
+    import passkey_gate
+    cfg = {"require_passkey": True, "patterns": ["^terminal .*rm -rf", "rm -rf ("]}
+    monkeypatch.setattr(cli, "apply_config_safe", lambda: cfg)
+    v = passkey_gate._on_pre_tool_call("read_file", {"path": "/etc/hostname"}, "t")
+    assert v["action"] == "block" and "rule 1" in v["message"] and "No approval" in v["message"]
+    cfg["patterns"] = ["^terminal .*rm -rf"]
+    assert passkey_gate._on_pre_tool_call("read_file", {"path": "/etc/hostname"}, "t") is None
+    cfg.update(require_passkey=False, patterns=["rm -rf ("])      # enforcement off: nothing blocks
+    assert passkey_gate._on_pre_tool_call("read_file", {"path": "/etc/hostname"}, "t") is None
+
+
+def test_oversized_notary_file_is_refused_unread(tmp_path, monkeypatch):
+    big = tmp_path / "notary.log"
+    big.write_text("x" * (cli.NOTARY_MAX_BYTES + 1))
+    monkeypatch.setattr(type(big), "read_text", lambda *a, **k: pytest.fail("read the whole file"))
+    records, problem = cli._read_notary(big)
+    assert records is None and "larger than" in problem
+
+
+def test_verify_url_keeps_the_challenge_id_in_one_path_segment(monkeypatch):
+    from passkey_gate import netfetch, tools
+    seen = []
+
+    def fake_open(url, timeout=10):
+        seen.append(url)
+        raise OSError("stop here")
+    monkeypatch.setattr(netfetch, "open_no_redirect", fake_open)
+    tools._fetch_verify("https://gate.example", "x/../y?action_sha256=0#", "f" * 64)
+    assert seen == ["https://gate.example/verify/x%2F..%2Fy%3Faction_sha256%3D0%23?action_sha256=" + "f" * 64]

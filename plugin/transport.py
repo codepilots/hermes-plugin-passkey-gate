@@ -20,8 +20,10 @@ one case, and passes everything else back to Hermes's normal prompt:
 Credits are single use, expire after a few seconds, and are thrown away when
 the tool call that earned them finishes (``discard``, from post_tool_call),
 so an unused credit can't cover a later call. Hermes's prompt only ever
-receives redacted text, so a credit is only recorded when redaction leaves
-the command unchanged: two different commands can never share one credit.
+receives display text (secrets masked, hidden characters and padding made
+visible), so a credit is only recorded for a command that display leaves
+alone: plain printable ASCII that Hermes's redaction doesn't change. Any
+other command keeps Hermes's own prompt.
 Hermes still owns hardline blocks, deny rules and the rest of its guards;
 those run before any transport is asked.
 
@@ -101,21 +103,30 @@ class NotCovered(Exception):
     """No passkey approval covers this prompt; Hermes's own prompt decides."""
 
 
+# Hermes's display pass also escapes hidden characters and collapses padding,
+# with markers that are never plain ASCII. Its secret redaction is public
+# API (agent.redact:redact_sensitive_text); that second pass is not, so the
+# cover is limited to text the pass can't have produced from something else.
+_PLAIN = re.compile(r"[\x20-\x7e\t\n]*")
+
+
 def _redact(text: str) -> str | None:
+    """Hermes's secret redaction of this text; None when it isn't available."""
     try:
-        from agent.redact import redact_approval_display
+        from agent.redact import redact_sensitive_text
     except Exception:
         return None
     try:
-        return redact_approval_display(text, force=True)
+        return redact_sensitive_text(text, force=True)
     except Exception:
         return None
 
 
 def prompt_text(tool_name: str, args) -> str | None:
     """The text Hermes's approval prompt carries for this call, or None when
-    the call can't be matched safely (unknown tool, or redaction would alter
-    the text, which could make two different commands look identical)."""
+    the call can't be matched safely (unknown tool, text that isn't plain
+    printable ASCII, or redaction would alter it, which could make two
+    different commands look identical)."""
     if not isinstance(args, dict):
         return None
     if tool_name == "terminal" and isinstance(args.get("command"), str):
@@ -124,7 +135,7 @@ def prompt_text(tool_name: str, args) -> str | None:
         raw = f"execute_code <<'PY'\n{args['code']}\nPY"
     else:
         return None
-    if not raw.strip() or _redact(raw) != raw:
+    if not raw.strip() or not _PLAIN.fullmatch(raw) or _redact(raw) != raw:
         return None
     return raw
 

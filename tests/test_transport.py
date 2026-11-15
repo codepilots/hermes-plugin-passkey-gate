@@ -88,6 +88,38 @@ def test_command_that_redaction_alters_gets_no_cover():
             transport.present(FakeRequest(shown))
 
 
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /srv/data/old\u200b-backups",      # zero-width character
+    "rm -rf /srv/data/caf\u00e9",              # ordinary non-ASCII
+    "rm -rf /srv/data/old-backups\x1b[2K",     # terminal escape
+    "rm -rf a \u27e8+3 blank lines\u27e9 b",   # Hermes's own display marker
+])
+def test_command_that_is_not_plain_ascii_gets_no_cover(cmd):
+    """Hermes escapes hidden characters and collapses padding before a
+    transport sees the text, so only plain printable ASCII is matched."""
+    transport.note_covered("terminal", {"command": cmd})
+    assert transport._credits == {}
+    with pytest.raises(transport.NotCovered):
+        transport.present(FakeRequest(cmd))
+
+
+def test_redaction_uses_only_hermes_public_api(monkeypatch):
+    """agent.redact:redact_sensitive_text is in Hermes's published plugin
+    API; the display helper built on it is not (catalog rule 9)."""
+    import sys
+    import types
+    monkeypatch.undo()  # the real _redact, not the fixture's stand-in
+    transport.clear()
+    fake = types.ModuleType("agent.redact")
+    fake.redact_sensitive_text = lambda text, force=False: (
+        text.replace("hunter2", "***") if force else text)
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.redact", fake)
+    assert transport._redact("mysql -phunter2") == "mysql -p***"
+    assert transport.prompt_text("terminal", {"command": CMD}) == CMD
+    assert transport.prompt_text("terminal", {"command": "mysql -phunter2"}) is None
+
+
 def test_no_cover_when_hermes_redaction_is_unavailable(monkeypatch):
     monkeypatch.setattr(transport, "_redact", lambda text: None)
     transport.note_covered("terminal", {"command": CMD})

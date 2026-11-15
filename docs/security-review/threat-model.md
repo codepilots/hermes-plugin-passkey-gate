@@ -355,9 +355,11 @@ transport answers `once`.
   that tool call finishes (`post_tool_call`). It is never answered with
   `session` or `always`.
 - Hermes hands a transport only redacted text, so two commands differing
-  only in a redacted secret would look identical. A cover is therefore
-  recorded only when redaction leaves the command unchanged; a command
-  carrying a secret keeps Hermes's own prompt.
+  only in a redacted secret would look identical. Hermes also escapes
+  hidden characters and collapses padding in that text. A cover is
+  therefore recorded only when the command is plain printable ASCII and
+  redaction leaves it unchanged; a command carrying a secret, or any other
+  character, keeps Hermes's own prompt.
 - What it removes is a second, unsigned confirmation of a call the pinned
   passkey has just signed. Hermes's hardline blocks and deny rules run
   before any transport is asked.
