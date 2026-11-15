@@ -2,6 +2,25 @@
 
 15 November 2026 · Autumn Thomson (review by Claude)
 
+## Status on 15 November 2026, after the release
+
+Items 1 to 5 are done. v0.10.0 is released at `fa737f7` (tagged and pushed), the catalog entry is re-pinned to it,
+and `catalog-entry/PR.md` is rewritten as an update to the entry already in the catalog. Checked against the pin on
+Hermes v0.23.1: 493 tests in a fresh clone, `hermes plugins validate --install-deps` with no warnings, a pinned
+install identical to the tag, `scripts/e2e_hermes.py` 53 of 53, CI green, and Hermes's
+`scripts/validate_plugin_catalog.py` accepts the entry.
+
+Still open:
+- **The catalog PR has not been opened.** The entry and PR text are ready in `catalog-entry/`.
+- Item 6: no independent adversarial review of the transport code. The PR text says so and cites the static scan.
+- Item 7: no live run of a phone deny, the no-answer timeout, the TUI or the Desktop app. The PR text lists these.
+- Item 8: only run on Hermes v0.23.1; the PR text says "tested on v0.23.1" with the 0.23.0 source check.
+- From the scan: the 13 unconfirmed candidates, unhashed dependencies, and the unpinned install in the e2e script.
+- One of about ten full test runs printed a stray "Exception occurred during processing of request" line from a
+  local test server while still passing. Not reproduced, cause unknown.
+
+The rest of this document is the review as written before the release, with notes added under items 1, 6 and 8.
+
 ## Summary
 
 A whole-project review before resubmitting to the Hermes plugin catalog. The code is in good shape; the catalog
