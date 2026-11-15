@@ -101,6 +101,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tool_cal` used to be dropped, minting a text-only request that could
   never authorise the call the agent meant to bind. This applies to the
   three agent tools; the HTTP `POST /challenge` body is unchanged.
+- **A `tool_call` with the right keys but a wrong value names that value.**
+  `{"tool": "terminal", "args": "ls"}` used to be reported as "got keys:
+  args, tool", which blamed the keys; it now says `"args"` must be an
+  object, not text (and likewise for a non-text `tool`).
 - **Clearer mint errors.** A too-short `action_text` says what the text must
   contain; a malformed `parent_approval` names the field and its format; a
   parent gate that isn't on `parent_gate_allowlist` returns a `parent_note`

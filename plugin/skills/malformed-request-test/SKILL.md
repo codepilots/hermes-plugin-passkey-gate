@@ -1,7 +1,7 @@
 ---
 name: malformed-request-test
 description: Probe gate errors with malformed requests and grade them.
-version: 0.4.0
+version: 0.5.0
 author: Autumn Thomson (codepilots), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -55,7 +55,7 @@ every case Yes.
    were not, and when they expire).
 3. Don't run the gated command any other way after a block. A block is the result being measured.
 4. Make one call per case and don't loop retries. Each minted request is an audit record, and the gate allows
-   only 10 open requests per requester. This run opens 5. If a mint answers `challenge_limit`, an earlier run
+   only 10 open requests per requester. This run opens 6 (cases 4, 7, 10, 17, 19 and 20). If a mint answers `challenge_limit`, an earlier run
    left requests behind: the answer lists them under `open_requests`. Withdraw them with `gate_cancel` (they
    were minted with TEXT or TEXT2, which is why those texts are fixed), then carry on. Don't wait them out.
 
@@ -75,7 +75,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 1 | no `action_text` | Hermes's schema check rejects it and names the missing argument |
 | 2 | `action_text: "delete stuff"` | `invalid_request`: at least 40 characters, "and say what is granted or changed, to whom, on which system, and until when" |
 | 3 | `requester_owner` set, no `why` | `why_required`; the next step says what to add and "Nothing was minted". It must not call the owner a stranger |
-| 4 | `tool_call` as a string | Hermes's schema check: not an object. (If it reaches the gate: `invalid_tool_call`) |
+| 4 | `tool_call` as a JSON-encoded string of case 7's binding | Hermes parses a JSON string into an object before the plugin sees it (`tools/arg_coercion.py`), so this **mints the same binding as case 7**: check that `binding_sha256` equals case 7's. A string that is not valid JSON never parses, and reaches the gate as `invalid_tool_call` ("not a string or list"). Either is a Yes; a binding that differs from case 7's is a finding. Withdraw it afterwards |
 | 5 | `tool_call: {"tool": "terminal"}` (no `args`) | `invalid_tool_call`: exactly the keys "tool" and "args", "got keys: tool"; "nothing was minted" |
 | 6 | `requester` over the schema maximum | `invalid_request`: "requester must be 1-64 chars" |
 | 7 | TEXT, `tool_call: {"tool": "terminal", "args": {"command": "ls <scratch dir>"}}` (control) | minted, with no `text_only_note`. Record its `challenge_id` and `binding_sha256` |
@@ -84,7 +84,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 10 | TEXT2, well-formed `parent_approval` (with an `owner`) whose `base` isn't on `parent_gate_allowlist` | minted, with a `parent_note` saying the page will show the parent approval as an unverified claim. Record its `challenge_id` |
 | 19 | TEXT, no `tool_call` | minted, with a `text_only_note` saying it authorises no tool call |
 | 20 | `tool_call: {"tool": "gate_status", "args": {}}` | minted: an empty `args` is a valid binding for a tool that takes no arguments |
-| 21 | `tool_call: {"tool": "terminal", "args": "ls"}` | `invalid_tool_call`: `args` must be an object; nothing minted |
+| 21 | `tool_call: {"tool": "terminal", "args": "ls"}` | `invalid_tool_call`: `"args" must be an object holding the call's arguments ... not text`. It must not say "got keys" (the keys are right); nothing minted |
 | 24 | TEXT, and the binding from case 7 under the misspelled name `tool_cal` | `unknown_arguments`: "tool_cal (did you mean tool_call?)", the list of arguments the tool takes, and "nothing was minted". It must not mint a text-only request |
 
 **gate_verify**
@@ -110,7 +110,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 29 | case 19's id, TEXT, again | `not_open`: already withdrawn, nothing to do |
 | 30 | `gate_verify` on case 19's id, TEXT | `status: denied`, `denied_reason: refused`; the next step says it was refused or withdrawn |
 
-Then withdraw the rest (cases 7, 10, 17 and 20) with `gate_cancel`, each with its own text. Every one should
+Then withdraw the rest (cases 4, 7, 10, 17 and 20) with `gate_cancel`, each with its own text. Every one should
 answer `withdrawn: true`.
 
 **gate_status**
@@ -161,6 +161,8 @@ The run is done when all 30 cases have a raw response and a grade, and every tes
 ## Pitfalls
 - **Some cases never reach the gate.** Hermes's own schema check rejects cases 1, 4 and 16, and perhaps 23, before
   the plugin sees them. Grade them anyway: the agent experiences the bridge and the gate as one.
+- **Case 17 is one call.** Run `rm -rf P` once, verbatim, after minting its request. Adding arguments to
+  probe further is case 18, and it needs its own call.
 - **Case 9's extra key goes inside the binding**, next to `tool` and `args`. An extra key at the top level of the
   call is a different mistake, which cases 24 and 25 cover: the gate refuses any argument a tool doesn't take.
 - **A mis-quoted `calls` string fails in the bridge, not the gate.** `tool_call 'calls' is not valid JSON` comes

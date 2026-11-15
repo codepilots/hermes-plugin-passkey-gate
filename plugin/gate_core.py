@@ -559,13 +559,24 @@ def tool_call_problem(tool_call) -> str | None:
     if not isinstance(tool_call, dict):
         return 'tool_call must be an object shaped {"tool": <name>, "args": {...}}, not a string or list'
     keys = set(tool_call)
-    if (keys != {"tool", "args"} or not isinstance(tool_call["tool"], str) or not tool_call["tool"].strip()
-            or not isinstance(tool_call["args"], dict)):
+    if keys != {"tool", "args"}:
         got = ", ".join(sorted(str(k) for k in keys)) or "none"
         return ('tool_call must be an object with exactly the keys "tool" (the tool\'s name) and "args" '
                 f"(an object); got keys: {got}. Pass every argument you will run with inside args, "
                 "and {} for a tool that takes none")
+    # the keys are right: say which value is not
+    if not isinstance(tool_call["tool"], str) or not tool_call["tool"].strip():
+        return (f'tool_call "tool" must be the tool\'s name as non-empty text, not '
+                f"{_type_name(tool_call['tool'])}")
+    if not isinstance(tool_call["args"], dict):
+        return (f'tool_call "args" must be an object holding the call\'s arguments (use {{}} for a tool '
+                f"that takes none), not {_type_name(tool_call['args'])}")
     return None
+
+
+def _type_name(value) -> str:
+    return {str: "text", list: "a list", bool: "true/false", int: "a number", float: "a number",
+            type(None): "null"}.get(type(value), type(value).__name__)
 
 
 def specificity_problem(text):

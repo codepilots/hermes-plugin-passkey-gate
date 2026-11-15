@@ -547,8 +547,10 @@ def test_gate_verify_waits_up_to_five_minutes():
 @pytest.mark.parametrize("bad, named", [
     ({"tool": "terminal"}, "got keys: tool."),                                  # no args
     ({"tool": "terminal", "args": {"command": "ls"}, "extra": 1}, "args, extra, tool"),
-    ({"tool": "terminal", "args": "ls"}, "an object"),
-    ({"tool": "", "args": {}}, "the tool's name"),
+    ({"tool": "terminal", "args": "ls"}, '"args" must be an object holding the call\'s arguments'),
+    ({"tool": "terminal", "args": ["ls"]}, "not a list"),
+    ({"tool": "", "args": {}}, '"tool" must be the tool\'s name'),
+    ({"tool": 5, "args": {}}, "not a number"),
     ({}, "got keys: none"),
 ])
 def test_a_binding_no_real_call_could_match_is_refused_at_mint(base, bad, named):
@@ -558,6 +560,7 @@ def test_a_binding_no_real_call_could_match_is_refused_at_mint(base, bad, named)
     out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent", "tool_call": bad}))
     assert out["ok"] is False and out["error_code"] == "invalid_tool_call", out
     assert named in out["error"] and "nothing was minted" in out["next_step"]
+    assert "got keys" not in out["error"] or set(bad) != {"tool", "args"}   # right keys are never blamed
     s, r = call(base, "/challenge", {"action_text": ACTION, "requester": "agent", "tool_call": bad})
     assert s == 422 and r["error_code"] == "invalid_tool_call"
 

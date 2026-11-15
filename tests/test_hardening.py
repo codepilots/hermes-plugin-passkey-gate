@@ -105,7 +105,8 @@ def test_page_puts_the_bound_command_before_the_agents_prose(data):
 # ------------------------------------------------------- A30
 @pytest.mark.parametrize("bad", ["rm -rf /", ["terminal"], {"tool": 5}, {"tool": "t", "args": "x"}])
 def test_tool_call_must_be_an_object(data, bad):
-    with pytest.raises(ValueError, match="tool_call must be an object"):
+    # wrong shape: say so; right keys with a wrong value: name that value
+    with pytest.raises(ValueError, match=r'tool_call (must be an object|"args" must be|"tool" must be)'):
         gate_core.create_challenge(ACTION, "bramble", bad)
 
 
