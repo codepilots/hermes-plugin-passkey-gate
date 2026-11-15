@@ -547,14 +547,37 @@ def terminal_safe(text) -> str:
     return "".join(out)
 
 
+class ToolCallError(ValueError):
+    """The tool_call offered for binding is not shaped like a real call."""
+
+
+def tool_call_problem(tool_call) -> str | None:
+    """v0.7 review A30: the page shows the binding as "the exact command",
+    and the hook hashes {"tool", "args"} and nothing else. A binding with a
+    missing ``args`` or any extra key gets a hash no real call can ever
+    have: it would mint, be signed, and then authorise nothing."""
+    if not isinstance(tool_call, dict):
+        return 'tool_call must be an object shaped {"tool": <name>, "args": {...}}, not a string or list'
+    keys = set(tool_call)
+    if (keys != {"tool", "args"} or not isinstance(tool_call["tool"], str) or not tool_call["tool"].strip()
+            or not isinstance(tool_call["args"], dict)):
+        got = ", ".join(sorted(str(k) for k in keys)) or "none"
+        return ('tool_call must be an object with exactly the keys "tool" (the tool\'s name) and "args" '
+                f"(an object); got keys: {got}. Pass every argument you will run with inside args, "
+                "and {} for a tool that takes none")
+    return None
+
+
 def specificity_problem(text):
     """Floor against vague approvals: an approval on 'grant Sorrel access' can be stretched."""
     if len(text) < MIN_ACTION_CHARS:
-        return f"action_text must be at least {MIN_ACTION_CHARS} characters"
+        return (f"action_text must be at least {MIN_ACTION_CHARS} characters, and say what is granted "
+                "or changed, to whom, on which system, and until when")
     if len(text) > MAX_ACTION_CHARS:
         return f"action_text must be at most {MAX_ACTION_CHARS} characters"
     if len(text.split()) < MIN_ACTION_WORDS:
-        return f"action_text must be at least {MIN_ACTION_WORDS} words"
+        return (f"action_text must be at least {MIN_ACTION_WORDS} words, and say what is granted "
+                "or changed, to whom, on which system, and until when")
     return None
 
 
@@ -626,12 +649,10 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
                          "requests; use your own agent name")
     if _kind in GATE_KINDS and tool_call is not None:
         raise ValueError("a challenge the gate creates itself is text-only")
-    if tool_call is not None and not (isinstance(tool_call, dict)
-                                      and isinstance(tool_call.get("tool"), str)
-                                      and isinstance(tool_call.get("args", {}), dict)):
-        # v0.7 review A30: anything else would be shown as "the exact command"
-        # but could never match a real call
-        raise ValueError("tool_call must be an object shaped {\"tool\": <name>, \"args\": {...}}")
+    if tool_call is not None:
+        prob = tool_call_problem(tool_call)
+        if prob:
+            raise ToolCallError(prob)
     for field, value, multiline in (("requester", requester, False),
                                     ("requester_owner", requester_owner, False),
                                     ("why", why, False), ("action_text", action_text, True)):
@@ -663,8 +684,12 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
             prob = text_problem("parent_approval.owner", parent["owner"])
             if prob:
                 raise ValueError(prob)
-            if not ID_RE.match(parent["challenge_id"]) or not SHA_RE.match(parent["action_sha256"]):
-                raise ValueError("challenge_id/action_sha256 malformed")
+            if not ID_RE.match(parent["challenge_id"]):
+                raise ValueError("parent_approval.challenge_id is malformed: it is the id the other "
+                                 "gate returned, 32 URL-safe characters")
+            if not SHA_RE.match(parent["action_sha256"]):
+                raise ValueError("parent_approval.action_sha256 is malformed: it is the 64 hex "
+                                 "characters the other gate returned")
             # finding 23: parse the base — the old https:// prefix check let
             # credential-carrying and hostless URLs through to a fetch
             netfetch.parse_gate_origin(parent["base"])
@@ -922,6 +947,14 @@ def pending_for_binding(binding_sha: str) -> sqlite3.Row | None:
     return db().execute(
         "select * from challenges where binding_sha256=? and status='approved' "
         "and expires_at>=?", (binding_sha, time.time())).fetchone()
+
+
+def waiting_for_binding(binding_sha: str) -> sqlite3.Row | None:
+    """Newest unsigned, unexpired request for exactly this binding, so a
+    block can point at it instead of telling the agent to mint another."""
+    return db().execute(
+        "select id, expires_at from challenges where binding_sha256=? and status='pending' "
+        "and expires_at>=? order by created_at desc", (binding_sha, time.time())).fetchone()
 
 
 def challenge_covers_binding(challenge: bytes, binding_sha: str) -> bool:
@@ -1704,6 +1737,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._failure(
                 429, str(exc), "challenge_limit",
                 "Do not keep retrying. Resolve or let an existing request expire before minting another.")
+        except ToolCallError as exc:
+            self._audit_error(p, type(exc).__name__)
+            return self._failure(422, str(exc), "invalid_tool_call",
+                                 "Fix tool_call and mint again; nothing was minted.")
         except ValueError as exc:  # input problems the caller can fix (422, not 400)
             self._audit_error(p, type(exc).__name__)
             return self._failure(

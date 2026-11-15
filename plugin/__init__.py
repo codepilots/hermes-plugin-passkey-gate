@@ -28,6 +28,7 @@ The full first-hand scenario behind this plugin: docs/scenario.md.
 """
 import argparse
 import logging
+from pathlib import Path
 
 from . import cli, gate_core, lanes, schemas, tools, transport
 
@@ -240,6 +241,18 @@ def register(ctx):
                       schema=schemas.GATE_VERIFY, handler=tools.gate_verify)
     ctx.register_tool(name="gate_status", toolset="passkey-gate",
                       schema=schemas.GATE_STATUS, handler=tools.gate_status)
+
+    # Bundled skill(s): read-only, loaded as 'passkey-gate:<name>'. Older Hermes
+    # has no register_skill; a failure here must not touch tools or the hook.
+    register_skill = getattr(ctx, "register_skill", None)
+    if callable(register_skill):
+        for skill_md in sorted((Path(__file__).resolve().parent / "skills").glob("*/SKILL.md")):
+            try:
+                desc = next((ln.split(":", 1)[1].strip() for ln in skill_md.read_text().splitlines()
+                             if ln.startswith("description:")), "")
+                register_skill(skill_md.parent.name, skill_md, description=desc)
+            except Exception:
+                logger.exception("passkey-gate: could not register skill %s", skill_md.parent.name)
 
     try:
         # Hermes API: register_cli_command(name, help, setup_fn(subparser),

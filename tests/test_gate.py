@@ -211,6 +211,10 @@ def test_enforcement_blocking_and_consumption(base, autumn):
     allow exactly once when an approved bound challenge exists, fail closed after."""
     pin_once(gate_core.data_dir(), autumn.pem)
     patterns = [r"ssh git@100"]  # the subject is: tool_name + canonical args JSON
+    # earlier tests leave unsigned requests for this same call; with one
+    # waiting, the block points at it (tested separately) rather than at minting
+    gate_core.db().execute("update challenges set expires_at=0 where status='pending'")
+    gate_core.db().commit()
     # unapproved -> block
     v = tools.hook_verdict("terminal", {"command": "ssh git@100.64.0.10 -p 2222 grant-sorrel"},
                            patterns, require_passkey=True)
@@ -419,9 +423,15 @@ def test_gate_verify_tells_a_wrong_action_text_from_a_refusal(monkeypatch, base,
     # the right text still verifies: the approval was untouched
     assert json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
                                          "action_text": ACTION}))["verified"] is True
-    # an id this gate never issued stays an unexplained denial
+    # an id this gate never issued is named as that, not left to read as a refusal
     out = json.loads(tools.gate_verify({"challenge_id": "A" * 32, "action_text": ACTION}))
-    assert out["status"] == "denied" and "denied_reason" not in out
+    assert out["status"] == "denied" and out["denied_reason"] == "unknown_challenge"
+    assert "Nobody refused" in out["next_step"]
+    # ...while over HTTP the three causes stay indistinguishable, so ids can't be probed
+    sha = hashlib.sha256(ACTION.encode()).hexdigest()
+    assert (call(base, f"/verify/{'A' * 32}?action_sha256={sha}")
+            == call(base, f"/verify/{c['challenge_id']}?action_sha256={'0' * 64}")
+            == (200, {"status": "denied"}))
     # a real refusal says so
     gate_core.db().execute("update challenges set status='denied' where id=?", (c["challenge_id"],))
     gate_core.db().commit()
@@ -452,6 +462,79 @@ def test_gate_verify_waits_up_to_five_minutes():
     from passkey_gate import schemas
     assert tools.MAX_WAIT_SECONDS == 300
     assert "max 300" in schemas.GATE_VERIFY["parameters"]["properties"]["wait_seconds"]["description"]
+
+
+@pytest.mark.parametrize("bad, named", [
+    ({"tool": "terminal"}, "got keys: tool."),                                  # no args
+    ({"tool": "terminal", "args": {"command": "ls"}, "extra": 1}, "args, extra, tool"),
+    ({"tool": "terminal", "args": "ls"}, "an object"),
+    ({"tool": "", "args": {}}, "the tool's name"),
+    ({}, "got keys: none"),
+])
+def test_a_binding_no_real_call_could_match_is_refused_at_mint(base, bad, named):
+    """Found in a live run: {"tool": ...} with no args, or with an extra key,
+    minted fine and produced a binding hash no real call can have, so the
+    human's signature authorised nothing."""
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent", "tool_call": bad}))
+    assert out["ok"] is False and out["error_code"] == "invalid_tool_call", out
+    assert named in out["error"] and "nothing was minted" in out["next_step"]
+    s, r = call(base, "/challenge", {"action_text": ACTION, "requester": "agent", "tool_call": bad})
+    assert s == 422 and r["error_code"] == "invalid_tool_call"
+
+
+def test_a_call_with_no_arguments_still_binds_and_matches_the_hook(base):
+    bound = {"tool": "gate_status", "args": {}}
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent", "tool_call": bound}))
+    assert out["ok"] is True
+    assert out["binding_sha256"] == gate_core.sha256_hex(tools.canonical_for_hook("gate_status", {}))
+
+
+def test_block_points_at_a_request_already_waiting_for_this_call(base):
+    """Found in a live run: with an unsigned request for the identical call
+    outstanding, the block said "Call gate_challenge first" and the agent
+    sent the human a second link."""
+    gate_core.db().execute("update challenges set expires_at=0 where status='pending'")
+    gate_core.db().commit()
+    args = {"command": "rm -rf /srv/waiting-demo"}
+    other = new_challenge(base, tool_call={"tool": "terminal", "args": {"command": "rm -rf /srv/other"}})
+    generic = tools.hook_verdict("terminal", args, [r"rm -rf"], True)["message"]
+    assert "Call gate_challenge first" in generic and other["challenge_id"] not in generic
+    c = new_challenge(base, tool_call={"tool": "terminal", "args": args})
+    waiting = tools.hook_verdict("terminal", args, [r"rm -rf"], True)
+    assert waiting["action"] == "block" and c["challenge_id"] in waiting["message"]
+    assert "Do not mint again" in waiting["message"] and "Call gate_challenge first" not in waiting["message"]
+    assert other["challenge_id"] not in waiting["message"]
+    gate_core.db().execute("update challenges set expires_at=0 where id=?", (c["challenge_id"],))
+    gate_core.db().commit()
+    assert "Call gate_challenge first" in tools.hook_verdict("terminal", args, [r"rm -rf"], True)["message"]
+
+
+def test_mint_and_verify_wording_names_the_field_and_the_fix(monkeypatch, base):
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    short = json.loads(tools.gate_challenge({"action_text": "delete stuff", "requester": "agent"}))
+    assert "at least 40 characters" in short["error"] and "until when" in short["error"]
+    parent = {"base": "https://peer.example.ts.net", "owner": "Sorrel",
+              "challenge_id": "A" * 32, "action_sha256": "0" * 64}
+    bad_id = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                              "parent_approval": {**parent, "challenge_id": "nope"}}))
+    assert "parent_approval.challenge_id is malformed" in bad_id["error"] and "32" in bad_id["error"]
+    bad_sha = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                               "parent_approval": {**parent, "action_sha256": "xyz"}}))
+    assert "parent_approval.action_sha256 is malformed" in bad_sha["error"] and "64 hex" in bad_sha["error"]
+    # a parent gate that isn't on the allowlist mints, but says it will show as unverified
+    ok = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                          "parent_approval": parent}))
+    assert ok["ok"] is True and "not on the operator's parent_gate_allowlist" in ok["parent_note"]
+    monkeypatch.setattr(gate_core, "parent_allowlist", lambda: ["https://peer.example.ts.net"])
+    monkeypatch.setattr(local_verify, "verify_parent_approval", lambda *a, **k: None)
+    listed = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                              "parent_approval": parent}))
+    assert listed["ok"] is True and "parent_note" not in listed
+    # a wait longer than the cap is reported, not silently shortened
+    monkeypatch.setattr(tools, "MAX_WAIT_SECONDS", 0)
+    out = json.loads(tools.gate_verify({"challenge_id": ok["challenge_id"], "action_text": ACTION,
+                                        "wait_seconds": 500}))
+    assert out["status"] == "pending" and out["wait_seconds_clamped_to"] == 0
 
 
 def test_schema_and_block_message_tell_the_agent_how_to_pass_tool_call():
@@ -1901,7 +1984,7 @@ def test_http_minting_rejects_empty_tool_call_instead_of_dropping_it(base):
     s, r = _raw_post(base, "/challenge", body, {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + gate_core.mint_api_token()})
-    assert s == 422 and r["ok"] is False and r["error_code"] == "invalid_request"
+    assert s == 422 and r["ok"] is False and r["error_code"] == "invalid_tool_call"
     assert "tool_call must be an object" in r["error"]
 
     body = json.dumps({"action_text": ACTION, "requester": "bad-parent",
@@ -2087,8 +2170,8 @@ def test_tool_handlers_return_json_when_local_state_access_fails(monkeypatch):
 def test_gate_challenge_reports_empty_tool_call_and_internal_failure(monkeypatch):
     out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
                                            "tool_call": {}}))
-    assert out["ok"] is False and out["error_code"] == "invalid_request"
-    assert "tool_call must be an object" in out["error"] and "Correct" in out["next_step"]
+    assert out["ok"] is False and out["error_code"] == "invalid_tool_call"
+    assert "tool_call must be an object" in out["error"] and "nothing was minted" in out["next_step"]
 
     def fail(*a, **k):
         raise RuntimeError("sensitive database detail")

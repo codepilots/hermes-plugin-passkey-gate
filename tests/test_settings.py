@@ -501,6 +501,22 @@ def test_status_text_when_everything_is_fine():
     assert text.rstrip().endswith("hermes passkey-gate status --json")
 
 
+def test_status_text_says_when_your_own_chats_fall_in_the_others_lane():
+    """Seen in a live run: the operator's own Discord DM was gated as 'others'
+    because owner_senders was empty. Harmless while both lanes are treated
+    alike, so status only speaks up when they aren't."""
+    from passkey_gate import cli
+    out = _status()
+    assert "owner_senders" not in cli.status_text(out)          # both gated: no difference
+    out["enforcement"]["gated_lanes"] = ["local", "others", "bots", "agents"]
+    text = cli.status_text(out)
+    assert "owner_senders is empty" in text and "count as 'others' (gated)" in text
+    out["enforcement"]["gated_lanes"] = ["local", "owner"]
+    assert "count as 'others' (NOT gated)" in cli.status_text(out)
+    out["enforcement"]["owner_senders"] = ["discord:123"]
+    assert "owner_senders" not in cli.status_text(out)
+
+
 def test_status_text_says_what_to_do_about_problems():
     from passkey_gate import cli
     text = cli.status_text(_status(

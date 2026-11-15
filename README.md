@@ -364,6 +364,11 @@ hermes passkey-gate set gated_lanes owner,others,bots,agents  # everything excep
 hermes passkey-gate set owner_senders telegram:123456789    # so your own chats are "owner", not "others"
 ```
 
+Until you list an account, nothing is ever in the `owner` lane: your own
+chat messages are treated as `others`. That makes no difference while both
+lanes are gated (the default). If you gate one and not the other, `status`
+tells you which rule your own chats are actually getting.
+
 Narrowing `gated_lanes` or adding to `owner_senders` weakens the gate, so
 once enforcement is on, both need your passkey (see
 [Changing settings safely](#changing-settings-safely)). `setup` can set them
@@ -617,7 +622,8 @@ tool response.
 | `why_required` | `requester_owner` is set and `why` is missing. |
 | `tool_call_required` | Enforcement is on, the text matches a pattern, and no `tool_call` was bound. |
 | `invalid_parent_approval` | `parent_approval` isn't an object, or has no `owner`. |
-| `invalid_request` | The gate rejected a field (text too short or vague, a malformed `tool_call`, and so on); the message names it. |
+| `invalid_tool_call` | `tool_call` isn't exactly `{tool, args}`: `args` is missing or not an object, or there are extra keys. Such a binding could never match a real call, so nothing is minted. |
+| `invalid_request` | The gate rejected a field (text too short or vague, a malformed `parent_approval` id, and so on); the message names the field and what it expects. |
 | `challenge_limit` | Too many open requests. |
 | `invalid_wait_seconds`, `invalid_max_age` | Not a whole number of seconds. |
 | `origin_not_configured`, `config_error` | The gate isn't set up, or its settings didn't load. |
@@ -634,6 +640,20 @@ call, so your signature on it would be wasted. A text-only mint says so in
 `text_only_note`, and verifying one against a tool call answers "approval
 has no bound tool call" with a `next_step` to mint again properly.
 
+A binding must be exactly `{"tool": <name>, "args": {...}}`, with every
+argument the call will run with inside `args` (use `{}` for a tool that takes
+none). The hook hashes those two keys and nothing else, so a binding with no
+`args`, or with any other key, is refused at mint time with
+`invalid_tool_call`.
+
+If the agent retries a gated call while its request is still unsigned, the
+block names that request (its `challenge_id` and how long it has left) and
+tells the agent not to mint another, so you don't get a second link for the
+same thing.
+
+A `parent_approval` whose gate isn't on `parent_gate_allowlist` still mints,
+with a `parent_note` saying the page will show it as an unverified claim.
+
 For `gate_verify`, `ok: true` with `verified: false` means the check completed
 but the approval cannot authorize the action. The response distinguishes
 `pending`, `denied`, `expired`, `consumed`, transport errors and local
@@ -643,14 +663,20 @@ seconds.
 
 `denied` has three causes that look the same over HTTP, so that request ids
 can't be probed: the human refused, the `action_text` isn't exactly what was
-minted, or there is no such request. For requests this gate issued, the tool
-reads its own records and adds `denied_reason`: `action_text_mismatch`
-(nobody refused; send the minted text again, character for character, and
-don't mint a new request) or `refused`. It never returns the minted text or
-its hash. A request from another gate stays a plain `denied`.
+minted, or there is no such request. The tool reads its own gate's records
+and adds `denied_reason` to say which:
 
-`wait_seconds` polls for up to 300 seconds. If the human hasn't answered by
-then the status is `pending` and the agent calls `gate_verify` again.
+| `denied_reason` | Meaning |
+|---|---|
+| `refused` | The human denied the request, or it was withdrawn. |
+| `action_text_mismatch` | Nobody refused. The text sent isn't what that `challenge_id` was minted with (or the id belongs to a different request). Send the id and text from the same `gate_challenge` call; don't mint again. |
+| `unknown_challenge` | Nobody refused. This gate has no request with that id: a typo, an id from another gate, or an old database. |
+
+It never returns the minted text or its hash.
+
+`wait_seconds` polls for up to 300 seconds. A longer value is shortened and
+the reply says so (`wait_seconds_clamped_to`). If the human hasn't answered
+by then the status is `pending` and the agent calls `gate_verify` again.
 
 `gate_status` treats a health endpoint as reachable only when its JSON object
 contains `status: "ok"` and `service: "passkey-gate"`; an HTML error page,
@@ -769,8 +795,22 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest ruff
 in a throwaway Hermes home: the CLI ceremony, plugin loading, the hook
 blocking a call, an approval from a software authenticator standing in for
 your phone, local verification, one allowed execution, the replay blocked,
-and the audit check. Its docstring has the commands. Changes are listed in
-[CHANGELOG.md](CHANGELOG.md).
+and the audit check. Its docstring has the commands.
+
+`scripts/failure_paths.py` shows what the gate says when things go wrong:
+it runs each failure path an agent can hit (a mis-quoted call, a text-only
+approval, reworded text at verify, a denial, an unanswered request, a bad
+remote mint and so on) against a throwaway gate in a temporary folder, and
+prints what was sent and what the agent or the chat gets back. It needs no
+phone or network and never touches your Hermes profile.
+
+```bash
+.venv/bin/python scripts/failure_paths.py            # every path
+.venv/bin/python scripts/failure_paths.py --list     # their names
+.venv/bin/python scripts/failure_paths.py verify     # only names containing "verify"
+```
+
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

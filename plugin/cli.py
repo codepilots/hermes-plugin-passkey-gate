@@ -1158,6 +1158,14 @@ def status_text(out) -> str:
     elif enf.get("require_passkey"):
         conv = ", ".join(lanes.normalize_lanes_ordered(enf.get("gated_lanes", list(lanes.LANES)))) or "none"
         row(ok, "Enforcement", f"on · {_patterns_words(enf.get('patterns'))} · conversations: {conv}")
+        gated = lanes.normalize_lanes(enf.get("gated_lanes", list(lanes.LANES)))
+        if not enf.get("owner_senders") and ("owner" in gated) != ("others" in gated):
+            # with no account listed, nothing is ever in the owner lane: the
+            # operator's own chats are judged by the "others" setting instead
+            todo.append("owner_senders is empty, so your own chat messages count as 'others' ("
+                        + ("gated" if "others" in gated else "NOT gated")
+                        + "), not 'owner'. Add your account: hermes passkey-gate set "
+                        "owner_senders <platform>:<your user id>")
     else:
         row(off, "Enforcement", "off: nothing is blocked (hermes passkey-gate setup to turn it on)")
 

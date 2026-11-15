@@ -172,6 +172,8 @@ def gate_challenge(args: dict, **kwargs) -> str:
         return json.dumps({
             "ok": False, "error": str(exc), "error_code": "challenge_limit",
             "next_step": "Do not keep retrying. Resolve or let an existing request expire before minting another."})
+    except gate_core.ToolCallError as exc:
+        return _fail(str(exc), "invalid_tool_call", "Fix tool_call and mint again; nothing was minted.")
     except ValueError as exc:
         return json.dumps({
             "ok": False, "error": str(exc), "error_code": "invalid_request",
@@ -197,6 +199,11 @@ def gate_challenge(args: dict, **kwargs) -> str:
             "They see the full action text on the page before signing. Then "
             "gate_verify with challenge_id and the same action_text before acting."
         )
+    if parent and not netfetch.origin_allowed(parent.get("base"), gate_core.parent_allowlist()):
+        out["parent_note"] = (
+            "This parent gate is not on the operator's parent_gate_allowlist, so it is never "
+            "contacted and the approval page shows the parent approval as an unverified claim. "
+            "Tell the signer that, or ask the operator to add the gate to the allowlist.")
     if tool_call is None:
         out["text_only_note"] = (
             "This approval is text-only: it authorises no tool call, and gate_verify "
@@ -227,7 +234,8 @@ def gate_verify(args: dict, **kwargs) -> str:
     # the same bytes — a trailing newline must not fail a genuine approval
     text = text.strip()
     try:
-        wait_s = min(max(int(args.get("wait_seconds") or 0), 0), MAX_WAIT_SECONDS)
+        asked_wait = int(args.get("wait_seconds") or 0)
+        wait_s = min(max(asked_wait, 0), MAX_WAIT_SECONDS)
     except (TypeError, ValueError):
         return _fail(f"wait_seconds must be an integer (0-{MAX_WAIT_SECONDS})", "invalid_wait_seconds",
                      "Omit wait_seconds for a one-shot check, or pass a whole number of seconds.")
@@ -351,9 +359,13 @@ def gate_verify(args: dict, **kwargs) -> str:
                 "Do not perform the action. Resolve the listed problems first (for example, pin the "
                 "owner key or use the exact approved call). If the approval itself is unusable, mint "
                 "a fresh one with gate_challenge; do not keep retrying this signature.")
+        if asked_wait > MAX_WAIT_SECONDS:
+            out["wait_seconds_clamped_to"] = MAX_WAIT_SECONDS
         return json.dumps(out)
     out = {"ok": True, "verified": False, "status": last.get("status", "error"),
            "challenge_id": cid}
+    if asked_wait > MAX_WAIT_SECONDS:
+        out["wait_seconds_clamped_to"] = MAX_WAIT_SECONDS
     # Transport and response-format failures are actionable agent errors, not
     # merely a bare status. Keep verification false and preserve the gate's
     # diagnostic and next step instead of discarding them here.
@@ -370,9 +382,16 @@ def gate_verify(args: dict, **kwargs) -> str:
             out["denied_reason"] = cause
             out["next_step"] = (
                 "Nobody refused this. The action_text you sent is not exactly the text this "
-                "request was minted with, so it cannot be checked. Call gate_verify again with "
-                "the action_text from your gate_challenge call, character for character. Do not "
+                "request was minted with, or this is not the challenge_id you minted with that "
+                "text, so it cannot be checked. Call gate_verify again with the challenge_id and "
+                "action_text from the same gate_challenge call, character for character. Do not "
                 "mint a new request: the existing one is untouched.")
+        elif cause == "unknown_challenge":
+            out["denied_reason"] = cause
+            out["next_step"] = (
+                "Nobody refused anything. No request with this challenge_id exists on this gate "
+                "(a typo, an id from another gate, or an old database). Check the challenge_id "
+                "that gate_challenge returned; if you no longer have it, mint a new request.")
         elif cause == "refused":
             out["denied_reason"] = cause
             out["next_step"] = (
@@ -395,14 +414,15 @@ def gate_verify(args: dict, **kwargs) -> str:
 
 def _local_denial_cause(cid: str, sha: str) -> str | None:
     """Why this gate answered 'denied', when the request is one of its own:
-    'action_text_mismatch', 'refused', or None (not ours, or not readable)."""
+    'action_text_mismatch', 'refused', 'unknown_challenge', or None (records
+    not readable, or the gate being asked is not this one)."""
     try:
         row = gate_core.db().execute(
             "select action_sha256, status from challenges where id=?", (cid,)).fetchone()
     except Exception:
         return None
     if row is None:
-        return None
+        return "unknown_challenge"
     if row["action_sha256"] != sha:
         return "action_text_mismatch"
     return "refused" if row["status"] == "denied" else None
@@ -757,6 +777,14 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
         binding = gate_core.sha256_hex(canonical_for_hook(tool_name, args))
         row = gate_core.pending_for_binding(binding)
         if row is None:
+            waiting = gate_core.waiting_for_binding(binding)
+            if waiting is not None:
+                minutes = max(1, round((waiting["expires_at"] - time.time()) / 60))
+                return {"action": "block", "message": (
+                    "Passkey gate: a request covering this exact call is already waiting for the "
+                    f"human (challenge_id {waiting['id']}, expires in about {minutes} min). Do not "
+                    "mint again. Make sure the human has the link, wait for their signature "
+                    "(gate_verify with wait_seconds can poll), then retry this identical tool call.")}
             hint = near_miss_hint(tool_name, args)
             if hint:
                 return {"action": "block", "message": hint}

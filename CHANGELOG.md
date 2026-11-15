@@ -6,6 +6,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Bundled skill `passkey-gate:approval-layers-test`.** This skill runs a live check of all three
+  command-approval layers: Hermes's hardline blocklist, the passkey gate and Hermes's smart approval. Every
+  destructive command it runs targets a decoy created in the same run, and nothing is ever bypassed. It also
+  reports a coverage gap: `rm -r` without `-f` is not matched by the default `rm -rf` pattern. On Hermes
+  versions that have `register_skill`, the plugin registers every `plugin/skills/*/SKILL.md`. Older Hermes
+  versions, or a failed registration, leave the tools and the enforcement hook untouched.
+- **Bundled skill `passkey-gate:malformed-request-test`.** This skill sends 23 malformed or mismatched requests to
+  `gate_challenge`, `gate_verify`, `gate_status` and the enforcement hook. It checks each answer against the one
+  documented in the skill, and grades each error on whether an agent could fix its own mistake from it. It never
+  signs or executes anything. The first run's findings (F1 to F9) are in
+  `docs/proposals/2026-11-15-malformed-request-errors.md`; the skill now expects the fixed behaviour and maps
+  each finding to the case that proves it, so a rerun confirms the fixes.
+
 ### Changed
 
 - **Remote minting is more interoperable and reports useful errors.** JSON
@@ -59,7 +74,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It says `why` is needed whenever `requester_owner` is set, and that nothing
   was minted.
 - **`gate_verify` can wait up to 300 seconds** (was 120). Signing on a phone
-  took 95 to 103 seconds in real use.
+  took 95 to 103 seconds in real use. A longer `wait_seconds` is shortened
+  and the reply says so (`wait_seconds_clamped_to`).
+- **An unknown `challenge_id` is no longer read as a refusal.**
+  `gate_verify` answers `denied_reason: unknown_challenge` when its gate has
+  no such request. The HTTP `/verify` answer is unchanged.
+- **A block points at a request that is already waiting.** When an unsigned
+  request for the identical call exists, the hook names it and says not to
+  mint again, instead of "Call gate_challenge first", which had agents
+  sending the human duplicate links.
+- **Clearer mint errors.** A too-short `action_text` says what the text must
+  contain; a malformed `parent_approval` names the field and its format; a
+  parent gate that isn't on `parent_gate_allowlist` returns a `parent_note`
+  saying the page will show it as unverified.
+- **`status` says when your own chats fall in the `others` lane**: with
+  `owner_senders` empty and the `owner` and `others` lanes gated differently.
+- `scripts/failure_paths.py` runs every failure path against a throwaway
+  gate and prints what the agent or the chat gets back.
 
 ### Fixed
 
@@ -74,6 +105,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are logged for the operator.
 - Invalid `max_age` values are reported directly as validation errors rather
   than surfacing later as a malformed approval record.
+- **A `tool_call` that no real call could match is refused at mint**
+  (`invalid_tool_call`). A binding with no `args`, or with any key besides
+  `tool` and `args`, used to mint with a hash the hook can never derive, so
+  the human's signature authorised nothing. `{"tool": <name>, "args": {}}`
+  remains valid for a tool that takes no arguments. Remote clients sending
+  such bindings now get HTTP 422.
 
 ## [0.9.0] - 2026-11-14
 
