@@ -479,6 +479,65 @@ def test_an_argument_the_tool_does_not_take_is_refused_not_dropped(monkeypatch, 
     assert ok["ok"] is True, ok
 
 
+def _audit_events():
+    return [json.loads(line) for line in (Path(TMP) / "audit.jsonl").read_text().splitlines() if line.strip()]
+
+
+def test_requester_can_withdraw_requests_it_no_longer_needs(monkeypatch, base, autumn):
+    """Found in a live run: test requests left to expire filled the
+    requester's ten open slots and stopped the next mint."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    # a call no other test binds, so nothing left over elsewhere can cover it
+    bound = {"tool": "terminal", "args": {"command": "ssh git@100.64.0.10 -p 2222 withdraw-test"}}
+    mint = lambda **kw: json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "tidy", **kw}))
+    cancel = lambda **kw: json.loads(tools.gate_cancel(kw))
+    c = mint(tool_call=bound)
+    # it has to be the minter: the id alone, or the wrong text, withdraws nothing
+    assert cancel(challenge_id=c["challenge_id"])["error_code"] == "missing_arguments"
+    wrong = cancel(challenge_id=c["challenge_id"], action_text=ACTION + " more")
+    assert wrong["error_code"] == "action_text_mismatch" and "Nothing was withdrawn" in wrong["next_step"]
+    assert cancel(challenge_id="A" * 32, action_text=ACTION)["error_code"] == "unknown_challenge"
+    assert gate_core.challenge_state(c["challenge_id"]) == "pending"
+    out = cancel(challenge_id=c["challenge_id"], action_text=ACTION)
+    assert out == {"ok": True, "withdrawn": True, "challenge_id": c["challenge_id"], "note": out["note"]}
+    # it can no longer be signed, verified or used, and a second withdrawal says so
+    assert call(base, f"/a/{c['challenge_id']}/options", {}) == (409, {"error": "not pending", "status": "denied"})
+    assert json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))["status"] == "denied"
+    assert tools.hook_verdict("terminal", bound["args"], [r"ssh git@100"], True)["action"] == "block"
+    assert cancel(challenge_id=c["challenge_id"], action_text=ACTION)["error_code"] == "not_open"
+    assert any(e["event"] == "challenge_withdrawn" and e["challenge_id"] == c["challenge_id"]
+               and e["was"] == "pending" for e in _audit_events())
+    # a signed approval that hasn't been used can be withdrawn too: it then authorises nothing
+    signed = mint(tool_call=bound)
+    approve(base, autumn, signed["challenge_id"])
+    assert cancel(challenge_id=signed["challenge_id"], action_text=ACTION)["withdrawn"] is True
+    assert tools.hook_verdict("terminal", bound["args"], [r"ssh git@100"], True)["action"] == "block"
+
+
+def test_withdrawing_frees_the_quota_and_the_limit_error_lists_what_is_open(monkeypatch, base):
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    monkeypatch.setattr(gate_core, "MAX_PENDING_CHALLENGES_PER_REQUESTER", 2)
+    mint = lambda: json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "quota-test"}))
+    a, b = mint(), mint()
+    full = mint()
+    assert full["error_code"] == "challenge_limit" and "gate_cancel" in full["next_step"]
+    assert {r["challenge_id"] for r in full["open_requests"]} == {a["challenge_id"], b["challenge_id"]}
+    assert all(r["expires_in_seconds"] >= 0 for r in full["open_requests"])
+    assert json.loads(tools.gate_cancel({"challenge_id": a["challenge_id"], "action_text": ACTION}))["withdrawn"]
+    assert mint()["ok"] is True
+
+
+def test_an_agent_cannot_withdraw_the_gates_own_requests(base):
+    c = gate_core.create_challenge("Run this command, which Hermes flagged as: recursive delete\n\nrm -rf /srv/x",
+                                   gate_core.HERMES_REQUESTER, _kind=gate_core.HERMES_KIND)
+    out = json.loads(tools.gate_cancel({"challenge_id": c["challenge_id"],
+                                        "action_text": "Run this command, which Hermes flagged as: "
+                                                       "recursive delete\n\nrm -rf /srv/x"}))
+    assert out["error_code"] == "unknown_challenge"
+    assert gate_core.challenge_state(c["challenge_id"]) == "pending"
+
+
 def test_gate_verify_waits_up_to_five_minutes():
     from passkey_gate import schemas
     assert tools.MAX_WAIT_SECONDS == 300

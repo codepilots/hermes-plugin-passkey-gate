@@ -734,8 +734,8 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
             raise ChallengeLimitError(
                 f"challenge limit reached for requester {requester!r}: {mine} pending "
                 f"challenges are already open (max {MAX_PENDING_CHALLENGES_PER_REQUESTER}). "
-                "The human must approve or deny one, or it must expire, before "
-                "another can be minted.")
+                "The human must approve or deny one, the requester must withdraw one, "
+                "or one must expire, before another can be minted.")
         total = c.execute("select count(*) from challenges where status='pending'"
                           " and expires_at>=?", (now,)).fetchone()[0]
         # v0.7 review L2: agents filling the global cap must not lock the
@@ -1122,6 +1122,46 @@ def deny(cid: str):
     audit("challenge_denied", challenge_id=cid, action_sha256=row["action_sha256"],
           requester=row["requester"], outcome="denied")
     return {"status": "denied"}
+
+
+def cancel_request(cid: str, sha: str) -> str:
+    """The requester withdraws a request it no longer needs, proving it is
+    the one that minted it by presenting the exact action text's hash (the
+    same proof `challenge_status` asks for). Only ever removes authority: an
+    unsigned request can no longer be signed, and a signed one that hasn't
+    been used can no longer be spent. Frees the requester's quota slot.
+
+    Returns 'withdrawn', 'unknown', 'text_mismatch' or 'not_open' (already
+    used, denied, withdrawn or expired). The gate's own requests (settings
+    changes, Hermes prompts) are never an agent's to withdraw."""
+    if not isinstance(cid, str) or not ID_RE.match(cid) or not isinstance(sha, str) or not SHA_RE.match(sha):
+        return "unknown"
+    row = db().execute("select action_sha256, status, kind, requester, expires_at from challenges "
+                       "where id=?", (cid,)).fetchone()
+    if row is None or row["kind"] is not None:
+        return "unknown"
+    if not hmac.compare_digest(row["action_sha256"], sha.lower()):
+        return "text_mismatch"
+    if row["status"] not in ("pending", "approved") or time.time() > row["expires_at"]:
+        return "not_open"
+    was = row["status"]
+    cur = db().execute("update challenges set status='denied', decided_at=? "
+                       "where id=? and kind is null and status=?", (time.time(), cid, was))
+    if cur.rowcount != 1:
+        return "not_open"
+    audit("challenge_withdrawn", challenge_id=cid, action_sha256=row["action_sha256"],
+          requester=row["requester"], reason="withdrawn by the requester", was=was)
+    return "withdrawn"
+
+
+def open_requests(requester: str) -> list:
+    """This requester's unsigned, unexpired requests, soonest to expire
+    first: what is filling its quota."""
+    now = time.time()
+    return [{"challenge_id": r["id"], "expires_in_seconds": max(0, int(r["expires_at"] - now))}
+            for r in db().execute(
+                "select id, expires_at from challenges where requester=? and status='pending' "
+                "and expires_at>=? order by expires_at", (requester, now))]
 
 
 def credential_count() -> int:

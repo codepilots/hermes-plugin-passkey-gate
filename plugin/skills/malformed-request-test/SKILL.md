@@ -1,7 +1,7 @@
 ---
 name: malformed-request-test
 description: Probe gate errors with malformed requests and grade them.
-version: 0.3.0
+version: 0.4.0
 author: Autumn Thomson (codepilots), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -37,20 +37,27 @@ every case Yes.
 - Read the live tool schemas first with `tool_describe` (`gate_challenge`, `gate_verify`, `gate_status`). Use the
   limits stated *there* (field lengths, `wait_seconds` maximum) in your expectations, not numbers from memory.
 - **Check which build you are talking to before you start.** The plugin version number does not change between
-  builds, so use behaviour. The fixed build shows both of these:
+  builds, so use behaviour. The fixed build shows all of these:
   - the `gate_verify` schema says `wait_seconds` has a maximum of 300;
   - the `gate_challenge` schema's `tool_call` description says "never a JSON-encoded string".
 
-  If either is missing, your session still has the old tools. Tools reload only in a new session, after the plugin
+  - a `gate_cancel` tool exists.
+
+  If any is missing, your session still has the old tools. Tools reload only in a new session, after the plugin
   is reinstalled. Say so and stop; a run against the old build only repeats the earlier findings.
 
 ## Safety rules
 1. **Never send a test request's URL to the human, and never ask them to sign one.** Start every test
    `action_text` with "Test only, never to be signed:" so a link that leaks is obviously harmless.
-2. Tell the human, at the start and the end, that unsigned test requests exist and will expire by themselves.
+2. **Withdraw every test request you mint.** Keep a list of each `challenge_id` with the exact `action_text` it
+   was minted with. When the cases are done, call `gate_cancel` for every one still open. Tell the human at the
+   start that unsigned test requests will exist during the run, and at the end that all were withdrawn (or which
+   were not, and when they expire).
 3. Don't run the gated command any other way after a block. A block is the result being measured.
 4. Make one call per case and don't loop retries. Each minted request is an audit record, and the gate allows
-   only 10 open requests per requester. This run opens 5.
+   only 10 open requests per requester. This run opens 5. If a mint answers `challenge_limit`, an earlier run
+   left requests behind: the answer lists them under `open_requests`. Withdraw them with `gate_cancel` (they
+   were minted with TEXT or TEXT2, which is why those texts are fixed), then carry on. Don't wait them out.
 
 ## Procedure
 Use one fixed, valid `action_text` (call it TEXT), for example: "Test only, never to be signed: allow <agent> to
@@ -93,6 +100,19 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 25 | case 7's id, TEXT, plus an argument the tool doesn't take, `wait: 5` | `unknown_arguments`: "wait (did you mean wait_seconds?)"; nothing was verified |
 | 23 | case 7's id, TEXT, `wait_seconds: "soon"` | `invalid_wait_seconds`, or Hermes's schema check: not an integer |
 
+**gate_cancel** (run these after cases 1 to 25)
+
+| # | Send | Expected answer |
+|---|---|---|
+| 26 | case 19's id, TEXT with one word changed | `action_text_mismatch`; "Nothing was withdrawn" |
+| 27 | the made-up id from case 11, TEXT | `unknown_challenge`; nothing was withdrawn |
+| 28 | case 19's id, TEXT | `withdrawn: true`, with a note that it can no longer be signed or used |
+| 29 | case 19's id, TEXT, again | `not_open`: already withdrawn, nothing to do |
+| 30 | `gate_verify` on case 19's id, TEXT | `status: denied`, `denied_reason: refused`; the next step says it was refused or withdrawn |
+
+Then withdraw the rest (cases 7, 10, 17 and 20) with `gate_cancel`, each with its own text. Every one should
+answer `withdrawn: true`.
+
 **gate_status**
 
 | # | Send | Expected answer |
@@ -114,7 +134,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 
 Any case that grades below Yes, or whose answer differs from the table, is a finding. Quote the raw response.
 
-The run is done when all 25 cases have a raw response and a grade.
+The run is done when all 30 cases have a raw response and a grade, and every test request is withdrawn.
 
 ## Reporting
 1. Give the human a table: case, response (shortened), grade, and the reason for any grade below Yes.
@@ -161,8 +181,9 @@ The run is done when all 25 cases have a raw response and a grade.
   when the `owner` and `others` lanes are gated differently.
 
 ## Verification
-- 25 cases recorded, each with a raw response and a grade.
+- 30 cases recorded, each with a raw response and a grade.
+- Every test request minted in the run was withdrawn with `gate_cancel`; none is left open.
 - Each earlier finding is marked fixed, unchanged or new.
 - No test link was sent to the human, and nothing was signed or executed.
-- The human was told the test requests exist and will expire.
+- The human was told the test requests existed and were withdrawn.
 - Every finding has a code pointer, checked by reading the source.

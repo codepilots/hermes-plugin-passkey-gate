@@ -18,6 +18,7 @@ author: Autumn Thomson (codepilots)
 provides_tools:
   - gate_challenge
   - gate_verify
+  - gate_cancel
   - gate_status
 
 provides_hooks:

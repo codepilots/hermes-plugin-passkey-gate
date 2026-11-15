@@ -1,7 +1,7 @@
 ---
 name: approval-layers-test
 description: Live-test Hermes's three command-approval layers safely.
-version: 0.3.0
+version: 0.4.0
 author: Autumn Thomson (codepilots), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -105,8 +105,11 @@ Run the steps in order and record each result in the table under Verification.
      decoy can be deleted.
    - Done when: you've recorded the human's decision. If they approved, also confirm the folder is gone.
 
-7. **Clean up.** Remove `target.txt` and any decoy folder that remains.
-   - Done when: no decoy paths remain, and a check that lists them returns nothing.
+7. **Clean up.** Remove `target.txt` and any decoy folder that remains. If a passkey request from step 4 was
+   never signed (the human declined, or the run stopped early), withdraw it with `gate_cancel`, passing its
+   `challenge_id` and the same `action_text`, so it doesn't stay open.
+   - Done when: no decoy paths remain, a check that lists them returns nothing, and no request from this run
+     is still open.
 
 ## Pitfalls
 - **The gate matches text, not intent.** `rm -r` without `-f`, `rm -fr`, `rm -r -f` and `find … -delete` all avoid

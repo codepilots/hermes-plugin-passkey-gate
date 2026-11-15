@@ -142,6 +142,32 @@ GATE_VERIFY = {
     },
 }
 
+GATE_CANCEL = {
+    "name": "gate_cancel",
+    "description": (
+        "Withdraw an approval request you minted and no longer need: a duplicate, one "
+        "minted with a mistake, or one the plan no longer calls for. It can then no longer "
+        "be signed or used, and it stops counting towards your limit of open requests "
+        "(gate_challenge answers challenge_limit when too many are open). This only ever "
+        "removes authority, so it needs no approval. If you already sent the human the "
+        "link, tell them to ignore it. Requests left alone expire by themselves."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "challenge_id": {
+                "type": "string",
+                "description": "Challenge id returned by gate_challenge.",
+            },
+            "action_text": {
+                "type": "string",
+                "description": "The EXACT action_text the request was minted with: this is what shows the request is yours.",
+            },
+        },
+        "required": ["challenge_id", "action_text"],
+    },
+}
+
 GATE_STATUS = {
     "name": "gate_status",
     "description": (

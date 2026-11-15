@@ -197,6 +197,27 @@ def bad_arguments(base, phone):
                "has an error_code and a next_step")
 
 
+@path("too-many-open", "The agent hits its limit of open requests, then withdraws ones it doesn't need")
+def too_many_open(base, phone):
+    limit, gate_core.MAX_PENDING_CHALLENGES_PER_REQUESTER = gate_core.MAX_PENDING_CHALLENGES_PER_REQUESTER, 2
+    try:
+        mint = lambda: json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "tidy-agent"}))
+        first, _ = mint(), mint()
+        full = mint()
+        show("gate_challenge with 2 requests already open (limit lowered to 2 for the demo)",
+             reply(full, keep=("ok", "error", "error_code", "open_requests", "next_step")))
+        expect(full.get("error_code") == "challenge_limit" and len(full.get("open_requests", [])) == 2,
+               "says which requests are open and to withdraw with gate_cancel")
+        out = tools.gate_cancel({"challenge_id": first["challenge_id"], "action_text": ACTION})
+        show("gate_cancel on the first one", reply(out, keep=("ok", "withdrawn", "note")))
+        again = tools.gate_cancel({"challenge_id": first["challenge_id"], "action_text": ACTION})
+        show("gate_cancel on it again", reply(again))
+        expect(json.loads(out).get("withdrawn") is True and mint().get("ok") is True,
+               "withdrawn, and the next mint goes through")
+    finally:
+        gate_core.MAX_PENDING_CHALLENGES_PER_REQUESTER = limit
+
+
 @path("hook-block", "The agent runs a command your patterns gate, with no approval")
 def hook_block(base, phone):
     verdict = tools.hook_verdict("terminal", {"command": CMD}, [r"^terminal .*rm -rf"], True)

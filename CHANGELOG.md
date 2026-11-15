@@ -8,6 +8,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`gate_cancel`: an agent can withdraw a request it no longer needs.** In a
+  live run, test requests left to expire filled the requester's ten open
+  slots and stopped the next mint for ten minutes. The new tool takes the
+  `challenge_id` and the exact `action_text` the request was minted with
+  (that is what shows it is the agent's own), and withdraws an unsigned
+  request or a signed one that hasn't been used. It only ever removes
+  authority, so it needs no approval; the audit log records
+  `challenge_withdrawn`. The gate's own requests can't be withdrawn this way.
+  A `challenge_limit` refusal now lists the requester's `open_requests` and
+  points to `gate_cancel`.
+
 - **Bundled skill `passkey-gate:approval-layers-test`.** This skill runs a live check of all three
   command-approval layers: Hermes's hardline blocklist, the passkey gate and Hermes's smart approval. Every
   destructive command it runs targets a decoy created in the same run under the session scratch directory, the
@@ -15,12 +26,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reports a coverage gap: `rm -r` without `-f` is not matched by the default `rm -rf` pattern. On Hermes
   versions that have `register_skill`, the plugin registers every `plugin/skills/*/SKILL.md`. Older Hermes
   versions, or a failed registration, leave the tools and the enforcement hook untouched.
-- **Bundled skill `passkey-gate:malformed-request-test`.** This skill sends 25 malformed or mismatched requests to
+- **Bundled skill `passkey-gate:malformed-request-test`.** This skill sends 30 malformed or mismatched requests to
   `gate_challenge`, `gate_verify`, `gate_status` and the enforcement hook. It checks each answer against the one
   documented in the skill, and grades each error on whether an agent could fix its own mistake from it. It never
   signs or executes anything. The first run's findings (F1 to F9) are in
   `docs/proposals/2026-11-15-malformed-request-errors.md`; the skill now expects the fixed behaviour and maps
-  each finding to the case that proves it, so a rerun confirms the fixes.
+  each finding to the case that proves it, so a rerun confirms the fixes. It withdraws every test request it
+  mints with `gate_cancel`.
 
 ### Changed
 

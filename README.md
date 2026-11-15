@@ -607,6 +607,7 @@ that check (see [Changing settings safely](#changing-settings-safely)).
 |---|---|
 | `gate_challenge` | Create an approval request and return its link. Takes `action_text` (40–4000 characters, written so a human can judge it), `requester`, and optionally `tool_call`, `requester_owner`, `why` and `parent_approval`. |
 | `gate_verify` | Wait for the human (optional `wait_seconds`, up to 300), then verify locally. Optional `max_age` rejects stale approvals. |
+| `gate_cancel` | Withdraw a request the agent minted and no longer needs. Takes the `challenge_id` and the exact `action_text` it was minted with. |
 | `gate_status` | Is the gate reachable? Is an owner key pinned? Is the audit chain consistent? (`hermes passkey-gate status` also lists pinned peer keys.) |
 
 Tool calls return JSON on ordinary failures, including local pin, database and
@@ -625,7 +626,8 @@ tool response.
 | `invalid_parent_approval` | `parent_approval` isn't an object, or has no `owner`. |
 | `invalid_tool_call` | `tool_call` isn't exactly `{tool, args}`: `args` is missing or not an object, or there are extra keys. Such a binding could never match a real call, so nothing is minted. |
 | `invalid_request` | The gate rejected a field (text too short or vague, a malformed `parent_approval` id, and so on); the message names the field and what it expects. |
-| `challenge_limit` | Too many open requests. |
+| `challenge_limit` | Too many open requests (10 per requester). The reply lists them under `open_requests`; withdraw the ones no longer needed with `gate_cancel`. |
+| `not_open` | `gate_cancel` on a request that was already used, denied, withdrawn or has expired. |
 | `invalid_wait_seconds`, `invalid_max_age` | Not a whole number of seconds. |
 | `origin_not_configured`, `config_error` | The gate isn't set up, or its settings didn't load. |
 | `challenge_creation_failed`, `tool_internal_error` | Something failed inside the gate; the operator's logs have the detail. |
@@ -651,6 +653,17 @@ If the agent retries a gated call while its request is still unsigned, the
 block names that request (its `challenge_id` and how long it has left) and
 tells the agent not to mint another, so you don't get a second link for the
 same thing.
+
+**Withdrawing a request.** An agent can hold at most 10 unsigned requests at
+a time; duplicates and requests minted by mistake count until they expire.
+`gate_cancel` withdraws one straight away. The agent must present the
+request's id and the exact text it was minted with, which is what shows the
+request is its own. Withdrawing only ever removes authority, so it needs no
+approval: an unsigned request can no longer be signed, and a signed one that
+hasn't been used can no longer be spent. The approval page then shows the
+request as denied and can't be signed, and the audit log records
+`challenge_withdrawn`. An agent can't withdraw requests the gate made itself
+(settings changes, commands Hermes flagged).
 
 A `parent_approval` whose gate isn't on `parent_gate_allowlist` still mints,
 with a `parent_note` saying the page will show it as an unverified claim.
@@ -800,8 +813,8 @@ and the audit check. Its docstring has the commands.
 
 `scripts/failure_paths.py` shows what the gate says when things go wrong:
 it runs each failure path an agent can hit (a mis-quoted call, a text-only
-approval, reworded text at verify, a denial, an unanswered request, a bad
-remote mint and so on) against a throwaway gate in a temporary folder, and
+approval, reworded text at verify, a denial, an unanswered request, too many
+open requests, a bad remote mint and so on) against a throwaway gate in a temporary folder, and
 prints what was sent and what the agent or the chat gets back. It needs no
 phone or network and never touches your Hermes profile.
 

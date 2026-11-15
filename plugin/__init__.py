@@ -239,6 +239,8 @@ def register(ctx):
                       schema=schemas.GATE_CHALLENGE, handler=tools.gate_challenge)
     ctx.register_tool(name="gate_verify", toolset="passkey-gate",
                       schema=schemas.GATE_VERIFY, handler=tools.gate_verify)
+    ctx.register_tool(name="gate_cancel", toolset="passkey-gate",
+                      schema=schemas.GATE_CANCEL, handler=tools.gate_cancel)
     ctx.register_tool(name="gate_status", toolset="passkey-gate",
                       schema=schemas.GATE_STATUS, handler=tools.gate_status)
 

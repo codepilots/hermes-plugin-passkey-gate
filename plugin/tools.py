@@ -68,7 +68,8 @@ def _fail(error: str, code: str, next_step: str) -> str:
 
 
 _KNOWN_ARGUMENTS = {s["name"]: frozenset(s["parameters"]["properties"])
-                    for s in (schemas.GATE_CHALLENGE, schemas.GATE_VERIFY, schemas.GATE_STATUS)}
+                    for s in (schemas.GATE_CHALLENGE, schemas.GATE_VERIFY, schemas.GATE_CANCEL,
+                              schemas.GATE_STATUS)}
 
 
 def _nearest_argument(name: str, known) -> str | None:
@@ -195,9 +196,17 @@ def gate_challenge(args: dict, **kwargs) -> str:
                                        requester_owner=owner, why=why,
                                        parent_approval=parent)
     except gate_core.ChallengeLimitError as exc:
-        return json.dumps({
-            "ok": False, "error": str(exc), "error_code": "challenge_limit",
-            "next_step": "Do not keep retrying. Resolve or let an existing request expire before minting another."})
+        out = {"ok": False, "error": str(exc), "error_code": "challenge_limit",
+               "next_step": "Do not keep retrying. Withdraw requests you no longer need with gate_cancel "
+                            "(challenge_id plus the action_text you minted it with), or wait for one to "
+                            "be answered or to expire, then mint again."}
+        try:
+            mine = gate_core.open_requests(requester.strip())
+        except Exception:
+            mine = []
+        if mine:
+            out["open_requests"] = mine
+        return json.dumps(out)
     except gate_core.ToolCallError as exc:
         return _fail(str(exc), "invalid_tool_call", "Fix tool_call and mint again; nothing was minted.")
     except ValueError as exc:
@@ -452,6 +461,40 @@ def _local_denial_cause(cid: str, sha: str) -> str | None:
     if row["action_sha256"] != sha:
         return "action_text_mismatch"
     return "refused" if row["status"] == "denied" else None
+
+
+@_agent_tool
+def gate_cancel(args: dict, **kwargs) -> str:
+    cid = args.get("challenge_id") or ""
+    text = args.get("action_text") or ""
+    if not isinstance(cid, str) or not isinstance(text, str):
+        return _fail("challenge_id and action_text must be strings", "invalid_arguments",
+                     "Pass the challenge_id and the action_text from your gate_challenge call as plain text.")
+    cid, text = cid.strip(), text.strip()
+    if not cid or not text:
+        return _fail("challenge_id and action_text required", "missing_arguments",
+                     "Pass the challenge_id that gate_challenge returned and the exact action_text "
+                     "you minted it with.")
+    outcome = gate_core.cancel_request(cid, hashlib_sha256(text))
+    if outcome == "withdrawn":
+        return json.dumps({"ok": True, "withdrawn": True, "challenge_id": cid,
+                           "note": "This request can no longer be signed or used, and no longer counts "
+                                   "towards your open requests. If you already sent the human its link, "
+                                   "tell them to ignore it."})
+    error, next_step = {
+        "text_mismatch": (
+            "the action_text is not exactly the text this request was minted with",
+            "Send the challenge_id and action_text from the same gate_challenge call, character for "
+            "character. Nothing was withdrawn."),
+        "not_open": (
+            "this request is not open: it was already used, denied, withdrawn or has expired",
+            "Nothing to do: it no longer counts towards your open requests."),
+    }.get(outcome, (
+        "no request with this challenge_id can be withdrawn here",
+        "Check the challenge_id that gate_challenge returned. Requests the gate made itself "
+        "(settings changes, Hermes prompts) are not yours to withdraw. Nothing was withdrawn."))
+    return _fail(error, {"text_mismatch": "action_text_mismatch", "not_open": "not_open"}.get(
+        outcome, "unknown_challenge"), next_step)
 
 
 @_agent_tool
