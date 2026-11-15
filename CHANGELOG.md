@@ -10,7 +10,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Bundled skill `passkey-gate:approval-layers-test`.** This skill runs a live check of all three
   command-approval layers: Hermes's hardline blocklist, the passkey gate and Hermes's smart approval. Every
-  destructive command it runs targets a decoy created in the same run, and nothing is ever bypassed. It also
+  destructive command it runs targets a decoy created in the same run under the session scratch directory, the
+  hardline probe is a write to a block-device name that doesn't exist, and nothing is ever bypassed. It also
   reports a coverage gap: `rm -r` without `-f` is not matched by the default `rm -rf` pattern. On Hermes
   versions that have `register_skill`, the plugin registers every `plugin/skills/*/SKILL.md`. Older Hermes
   versions, or a failed registration, leave the tools and the enforcement hook untouched.
