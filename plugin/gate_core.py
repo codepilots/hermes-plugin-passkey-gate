@@ -55,6 +55,8 @@ from webauthn.helpers.structs import (AuthenticatorSelectionCriteria,
                                       UserVerificationRequirement)
 from cryptography.hazmat.primitives import serialization
 
+logger = logging.getLogger(__name__)
+
 _plugin_data_dir = None
 
 
@@ -649,6 +651,8 @@ def create_challenge(action_text: str, requester: str, tool_call: dict | None = 
         raise ValueError("why must be at most 400 characters (one clear sentence)")
     parent = None
     if parent_approval is not None:
+        if not isinstance(parent_approval, dict):
+            raise ValueError("parent_approval must be an object with base, challenge_id, action_sha256 and owner")
         try:
             parent = {
                 "base": str(parent_approval["base"]).strip().rstrip("/"),
@@ -1176,14 +1180,19 @@ def mint_api_token() -> str:
 
 
 def mint_token_ok(header) -> bool:
-    if not isinstance(header, str) or not header.startswith("Bearer "):
+    # HTTP authentication scheme names are case-insensitive and RFC 9110
+    # permits arbitrary whitespace between the scheme and credentials.
+    parts = header.strip().split(None, 1) if isinstance(header, str) else []
+    if len(parts) != 2 or parts[0].lower() != "bearer":
         return False
     path = data_dir() / MINT_TOKEN_NAME
     try:
         expected = _read_nofollow(path).strip()
-    except OSError:
+    except (OSError, UnicodeError):
         return False
-    return bool(expected) and hmac.compare_digest(header[7:].strip().encode(), expected.encode())
+    presented = parts[1].strip()
+    return (bool(expected) and bool(presented)
+            and hmac.compare_digest(presented.encode(), expected.encode()))
 
 
 # ---------------------------------------------------------------- registration (bootstrap)
@@ -1522,12 +1531,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _failure(self, status, error, error_code, next_step=None):
+        """Consistent, actionable errors for browser and agent callers."""
+        body = {"ok": False, "error": error, "error_code": error_code}
+        if next_step:
+            body["next_step"] = next_step
+        return self._send(status, body)
+
     def _json(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n < 0 or n > 64 * 1024:
             # negative lengths would make rfile.read() wait for EOF
             raise ValueError("bad body length")
-        return json.loads(self.rfile.read(n) or b"{}")
+        body = json.loads(self.rfile.read(n) or b"{}")
+        if not isinstance(body, dict):
+            raise TypeError("request body must be a JSON object")
+        return body
 
     def _budget_kind(self, p: str) -> str:
         if p == "/register":
@@ -1587,7 +1606,12 @@ class Handler(BaseHTTPRequestHandler):
         for anonymous junk, which would bury the real events."""
         m = re.fullmatch(r"/a/([A-Za-z0-9_-]+)/\w+", p)
         if p == "/challenge" or (m and _challenge_exists(m.group(1))):
-            audit("error", path=p.split("/")[1] if "/" in p else p, error=error)
+            try:
+                audit("error", path=p.split("/")[1] if "/" in p else p, error=error)
+            except Exception:
+                # The original refusal must still reach the caller when the
+                # same disk/permission problem also prevents the audit write.
+                logger.exception("passkey-gate: could not audit a request error")
 
     # ---- POST
     def do_POST(self):
@@ -1596,32 +1620,53 @@ class Handler(BaseHTTPRequestHandler):
         if not self._admit(p):
             return
         # JSON only: a cross-site <form> can send text/plain or urlencoded
-        # bodies without a CORS preflight, never application/json — so this
-        # stops CSRF against /a/<id>/deny and the other POST endpoints.
-        if self.headers.get_content_type() != "application/json":
-            return self._send(415, {"error": "Content-Type must be application/json"})
+        # bodies without a CORS preflight, never application/json or an
+        # application/*+json type — so this stops CSRF against /a/<id>/deny
+        # and the other POST endpoints. get_content_type() ignores parameters
+        # such as charset and normalizes the type's case.
+        content_type = self.headers.get_content_type()
+        if content_type != "application/json" and not (
+                content_type.startswith("application/") and content_type.endswith("+json")):
+            return self._failure(
+                415, "Content-Type must be application/json", "unsupported_content_type",
+                "Send one JSON object with Content-Type: application/json; form and text bodies are not accepted.")
         if p == "/challenge" and not mint_token_ok(self.headers.get("Authorization")):
             # Minting over HTTP needs the gate's mint token: the exposed
             # origin is reachable by more than this host's agents, and an
             # anonymous minter could post phishing pages on the trusted
             # origin or fill the pending-challenge cap. Local agents mint
             # in-process through gate_challenge and never need it.
-            return self._send(401, {"error": "minting over HTTP needs the gate mint token "
-                                    "(Authorization: Bearer <token>; see "
-                                    "'hermes passkey-gate mint-token')"})
+            return self._failure(
+                401, "minting over HTTP needs a valid gate mint token", "invalid_mint_token",
+                "Ask the operator to run 'hermes passkey-gate mint-token', then send "
+                "Authorization: Bearer <token>. Do not put the token in the JSON body.")
         try:
             body = self._json()
+        except json.JSONDecodeError as exc:
+            return self._failure(
+                400, f"invalid JSON request body at line {exc.lineno}, column {exc.colno}: {exc.msg}",
+                "invalid_json", "Send exactly one JSON object; remove any prose or Markdown around it.")
+        except UnicodeDecodeError:
+            return self._failure(
+                400, "request body is not valid Unicode JSON text", "invalid_json_encoding",
+                "Encode the JSON request body as UTF-8.")
+        except TypeError as exc:
+            return self._failure(
+                400, str(exc), "invalid_json_shape",
+                "Send a JSON object such as {\"action_text\": \"...\", \"requester\": \"...\"}, not an array or scalar.")
+        except ValueError as exc:
+            return self._failure(400, str(exc), "invalid_request_body")
         except Exception:
-            return self._send(400, {"error": "invalid JSON"})
+            return self._failure(400, "could not read the JSON request body", "invalid_json")
         try:
             if p == "/challenge":
                 c = create_challenge(body.get("action_text"), body.get("requester"),
-                                     body.get("tool_call") or None,
+                                     body.get("tool_call"),
                                      requester_owner=body.get("requester_owner"),
                                      why=body.get("why"),
                                      parent_approval=body.get("parent_approval"),
                                      _source=HTTP_SOURCE)
-                return self._send(201, dict(c))
+                return self._send(201, {"ok": True, **dict(c)})
             if p == "/register/options":
                 out = registration_options(body.get("token"))
                 if out is None:
@@ -1656,14 +1701,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(409 if r.get("error") else 200, r)
         except ChallengeLimitError as exc:  # finding 11: throttled, same error shape, 429
             self._audit_error(p, "ChallengeLimitError")
-            return self._send(429, {"error": str(exc)})
+            return self._failure(
+                429, str(exc), "challenge_limit",
+                "Do not keep retrying. Resolve or let an existing request expire before minting another.")
         except ValueError as exc:  # input problems the caller can fix (422, not 400)
             self._audit_error(p, type(exc).__name__)
-            return self._send(422, {"error": str(exc)})
+            return self._failure(
+                422, str(exc), "invalid_request",
+                "Correct the named request field and mint a new request; nothing was approved or executed.")
         except Exception as exc:  # fail closed, no stack traces to the client
+            logger.exception("passkey-gate: request processing failed (%s)", type(exc).__name__)
             self._audit_error(p, type(exc).__name__)
-            return self._send(400, {"error": "rejected", "reason": type(exc).__name__})
-        return self._send(404, {"error": "not found"})
+            return self._failure(
+                400, f"the gate could not process the request ({type(exc).__name__})", "request_failed",
+                "Do not retry the same request unchanged. Ask the operator to check "
+                "'hermes passkey-gate status' and the service logs.")
+        return self._failure(404, "not found", "not_found")
 
 
 # Set by `hermes passkey-gate serve`: re-applies plugin settings when the

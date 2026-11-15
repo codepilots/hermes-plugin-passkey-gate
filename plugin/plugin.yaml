@@ -25,6 +25,7 @@ provides_hooks:
   - pre_llm_call
   - post_gateway_admission
   - post_tool_call
+  - transform_tool_result
   - pre_approval_request
   - post_approval_response
 

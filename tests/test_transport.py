@@ -202,6 +202,72 @@ def test_set_hermes_cover_outside_hermes():
     assert not ok and "by hand" in note
 
 
+def test_wait_distinguishes_consumed_approval_from_bad_signature(monkeypatch):
+    from passkey_gate import gate_core
+    ask = transport._Ask("c1", "sha", "text", CMD, None, ".")
+    monkeypatch.setattr(gate_core, "challenge_state", lambda cid: "approved")
+    monkeypatch.setattr(transport, "_verify", lambda ask: [])
+    monkeypatch.setattr(gate_core, "consume_approval", lambda *a, **k: False)
+    monkeypatch.setattr(gate_core, "withdraw_challenge", lambda *a, **k: None)
+    assert transport._decide(ask, 10) is False
+    assert "already used or expired" in ask.line
+    assert "didn't verify" not in ask.line
+
+
+def test_wait_internal_error_has_a_visible_diagnostic(monkeypatch):
+    from passkey_gate import gate_core
+    ask = transport._Ask("c1", "sha", "text", CMD, None, ".")
+
+    def fail(cid):
+        raise RuntimeError("private database detail")
+    monkeypatch.setattr(gate_core, "challenge_state", fail)
+    monkeypatch.setattr(gate_core, "withdraw_challenge", lambda *a, **k: None)
+    assert transport._decide(ask, 10) is False
+    assert "internal error (RuntimeError)" in ask.line
+    assert "status and logs" in ask.line and "private database detail" not in ask.line
+
+
+HERMES_DENIED = json.dumps({"output": "", "exit_code": -1, "error": (
+    "BLOCKED: User denied this command through the selected approval transport. The user "
+    "has NOT consented to this action. Do NOT retry or attempt the same outcome through "
+    "another route."), "status": "blocked"})
+
+
+def test_no_answer_in_time_is_not_reported_to_the_agent_as_a_refusal(monkeypatch):
+    """Hermes words every transport refusal as "User denied". After a
+    timeout the gate still answers deny, but corrects that wording."""
+    import passkey_gate
+    from passkey_gate import gate_core
+    ask = transport._Ask("c1", "sha", "text", CMD, None, ".")
+    monkeypatch.setattr(gate_core, "challenge_state", lambda cid: "pending")
+    monkeypatch.setattr(gate_core, "withdraw_challenge", lambda *a, **k: None)
+    monkeypatch.setattr(transport, "ASK_POLL_SECONDS", 0.01)
+    assert transport._decide(ask, transport.ASK_MARGIN_SECONDS + 0.05) is False
+    out = passkey_gate._on_transform_tool_result(
+        tool_name="terminal", args={"command": CMD}, result=HERMES_DENIED)
+    error = json.loads(out)["error"]                      # still valid JSON, still blocked
+    assert error.startswith("BLOCKED: The user did NOT deny this: no passkey approval arrived in time")
+    assert "has NOT consented" in error and json.loads(out)["status"] == "blocked"
+    # the note is spent: a later, genuine refusal of the same command is left alone
+    assert passkey_gate._on_transform_tool_result(
+        tool_name="terminal", args={"command": CMD}, result=HERMES_DENIED) is None
+
+
+def test_a_real_denial_and_other_results_are_never_reworded(monkeypatch):
+    from passkey_gate import gate_core
+    ask = transport._Ask("c1", "sha", "text", CMD, None, ".")
+    monkeypatch.setattr(gate_core, "challenge_state", lambda cid: "denied")
+    assert transport._decide(ask, 10) is False             # the human tapped Deny
+    assert transport.reword_silence("terminal", {"command": CMD}, HERMES_DENIED) is None
+    transport._note_unanswered(ask, "no passkey approval arrived in time")
+    ran = json.dumps({"output": "done", "exit_code": 0})
+    assert transport.reword_silence("terminal", {"command": CMD}, ran) is None   # not a refusal
+    transport._note_unanswered(ask, "no passkey approval arrived in time")
+    assert transport.reword_silence("terminal", {"command": "ls"}, HERMES_DENIED) is None
+    assert transport.reword_silence("read_file", {"command": CMD}, HERMES_DENIED) is None
+    assert transport.reword_silence("terminal", None, HERMES_DENIED) is None
+
+
 # ------------------------------------------------ pre_approval_request hook
 @pytest.fixture
 def approval_hook(monkeypatch):
@@ -211,11 +277,12 @@ def approval_hook(monkeypatch):
     from passkey_gate import cli, lanes
     cfg = {"require_passkey": True, "passkey_hermes_prompts": True, "patterns": [],
            "gated_lanes": list(lanes.LANES), "owner_senders": []}
-    state = {"surface": "discord"}
+    state = {"surface": "discord", "posts": []}
     asked = []
     monkeypatch.setattr(cli, "apply_config_safe", lambda: cfg)
     monkeypatch.setattr(passkey_gate, "_session_surface", lambda: state["surface"])
-    monkeypatch.setattr(cli, "_ctx_ref", type("Ctx", (), {"post_message": staticmethod(lambda t: None)})())
+    monkeypatch.setattr(cli, "_ctx_ref", type(
+        "Ctx", (), {"post_message": staticmethod(lambda t: state["posts"].append(t))})())
     monkeypatch.setattr(transport, "begin_ask", lambda rid, cmd, why, post: asked.append((rid, cmd)) or "asked")
     lanes.reset()
 
@@ -257,6 +324,36 @@ def test_hook_leaves_the_classic_terminal_and_ungated_lanes_to_hermes(approval_h
     state["surface"] = "discord"                  # unknown origin counts as gated
     fire()
     assert asked == [("r1", CMD)]
+
+
+@pytest.mark.parametrize("outcome, expected", [
+    ("not asked: no owner key is pinned", "no owner key is pinned"),
+    ("not asked: the gate has no address (origin) yet", "no HTTPS address"),
+    ("not asked: the link could not be posted (None)", "could not be posted"),
+    ("not asked: RuntimeError: boom", "check its status and logs"),
+])
+def test_hook_reports_setup_failure_before_hermes_fallback(approval_hook, monkeypatch, outcome, expected):
+    fire, asked, cfg, state = approval_hook
+    monkeypatch.setattr(transport, "begin_ask", lambda *a: outcome)
+    monkeypatch.setattr(transport, "hermes_selection", lambda: {"transport_fallback": "builtin"})
+    assert fire() is None
+    assert len(state["posts"]) == 1
+    assert expected in state["posts"][0] and "boom" not in state["posts"][0]
+    assert "show its own approval prompt" in state["posts"][0]
+    assert "No passkey approval was created" in state["posts"][0]
+
+
+@pytest.mark.parametrize("selection, expected", [
+    ({"transport_fallback": "deny"}, "refuse the command"),
+    ({"selected": None, "note": "Hermes config not readable from here"}, "setting decides"),
+])
+def test_hook_failure_message_does_not_promise_a_prompt_hermes_wont_show(
+        approval_hook, monkeypatch, selection, expected):
+    fire, asked, cfg, state = approval_hook
+    monkeypatch.setattr(transport, "begin_ask", lambda *a: "not asked: no owner key is pinned")
+    monkeypatch.setattr(transport, "hermes_selection", lambda: selection)
+    fire()
+    assert expected in state["posts"][0] and "own approval prompt" not in state["posts"][0]
 
 
 def test_hook_never_raises(approval_hook, monkeypatch):

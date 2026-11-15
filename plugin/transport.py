@@ -67,6 +67,7 @@ address; text the approval page refuses), nothing is recorded and
 decides, ``builtin`` meaning its ordinary prompt and anything else a denial.
 """
 import logging
+import re
 import threading
 import time
 
@@ -84,6 +85,16 @@ DISPLAY_CHARS = 600
 _lock = threading.Lock()
 _credits: dict[str, list[float]] = {}  # prompt text -> expiry times, one per credit
 _asks: dict = {}  # Hermes request id -> _Ask
+# Hermes has one refusal for a transport: "User denied this command". It has
+# no answer meaning "nobody replied", and raising instead would hand the
+# command to Hermes's ordinary prompt under transport_fallback: builtin,
+# which no passkey protects. So the gate still answers "deny", remembers
+# here that the human never actually refused, and corrects the wording of
+# the blocked result the agent reads (reword_silence, transform_tool_result).
+SILENCE_TTL_SECONDS = 30.0
+_unanswered: dict[str, tuple[float, str]] = {}  # prompt text -> (expiry, what happened)
+_HERMES_DENIED = re.compile(
+    r"User denied (?:this command|execute_code) through the selected approval transport\.")
 
 
 class NotCovered(Exception):
@@ -260,6 +271,36 @@ def _verify(ask) -> list:
     return gate_core.own_request_problems(ask.cid, ask.sha, ask.text, gate_core.HERMES_KIND)
 
 
+def _note_unanswered(ask, what: str) -> None:
+    now = time.monotonic()
+    with _lock:
+        for key in [k for k, (exp, _) in _unanswered.items() if exp <= now]:
+            del _unanswered[key]
+        _unanswered[ask.command] = (now + SILENCE_TTL_SECONDS, what)
+
+
+def reword_silence(tool_name: str, args, result):
+    """transform_tool_result: when Hermes reports "User denied" for a request
+    the human never answered, say what really happened. Only ever rewrites
+    the wording of a result that is already blocked; returns None otherwise."""
+    if not isinstance(result, str) or not isinstance(args, dict):
+        return None
+    raw = args.get("command") if tool_name == "terminal" else (
+        f"execute_code <<'PY'\n{args.get('code')}\nPY" if tool_name == "execute_code" else None)
+    if not isinstance(raw, str):
+        return None
+    now = time.monotonic()
+    with _lock:
+        note = _unanswered.pop(raw, None) or _unanswered.pop(_redact(raw) or raw, None)
+    if note is None or note[0] <= now:
+        return None
+    reworded, n = _HERMES_DENIED.subn(
+        f"The user did NOT deny this: {note[1]} (passkey-gate). Not run. Silence is neither "
+        "consent nor a refusal; tell the user it went unanswered and ask before trying again.",
+        result, count=1)
+    return reworded if n else None
+
+
 def _finish(ask, line: str) -> None:
     """Record the outcome line; end_ask writes it to the chat."""
     ask.line = line
@@ -291,20 +332,27 @@ def _decide(ask, timeout_seconds: float) -> bool:
                     consumed_by="hermes approval transport"):
                 _finish(ask, "✓ Approved with your passkey. Running it once:")
                 return True
+            consumed = not problems
             logger.warning("passkey-gate: approval for a Hermes prompt did not verify: %s",
-                           "; ".join(problems) or "already used")
+                           "; ".join(problems) or "already used or expired")
             gate_core.withdraw_challenge(ask.cid, "approval did not verify")
-            _finish(ask, "✗ That approval didn't verify against your pinned passkey. Not run:")
+            _finish(ask, "✗ That approval was already used or expired. Not run:" if consumed else
+                         "✗ That approval didn't verify against your pinned passkey. Not run:")
             return False
         if state == "denied":
             _finish(ask, "✗ Denied. Not run:")
             return False
         gate_core.withdraw_challenge(
             ask.cid, "Hermes stopped waiting" if ask.cancelled.is_set() else "no answer in time")
+        if not ask.cancelled.is_set():
+            _note_unanswered(ask, "no passkey approval arrived in time")
         _finish(ask, "⌛ No passkey approval in time. Not run:")
         return False
-    except Exception:
+    except Exception as exc:
         logger.exception("passkey-gate: waiting for a passkey approval failed; refusing")
+        _finish(ask, f"✗ Passkey-gate hit an internal error ({type(exc).__name__}). Not run; "
+                     "ask the operator to check the gate status and logs:")
+        _note_unanswered(ask, "the gate hit an internal error before the user could answer")
         try:
             gate_core.withdraw_challenge(ask.cid, "wait failed")
         except Exception:

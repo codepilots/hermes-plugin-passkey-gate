@@ -88,6 +88,7 @@ def test_mint_past_the_per_requester_limit_is_refused(gate_env):
         assert mint("flood-agent")["ok"] is True
     out = mint("flood-agent")
     assert out["ok"] is False
+    assert out["error_code"] == "challenge_limit" and "Do not keep retrying" in out["next_step"]
     assert "challenge limit" in out["error"], out["error"]
     assert "flood-agent" in out["error"], out["error"]
     assert pending_count("flood-agent") == cap  # nothing snuck into the DB

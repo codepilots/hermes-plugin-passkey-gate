@@ -6,6 +6,75 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Remote minting is more interoperable and reports useful errors.** JSON
+  request bodies may use arbitrary valid whitespace and formatting,
+  `application/json` media-type parameters and case variations, and standard
+  `application/*+json` types. Bearer authentication accepts the HTTP scheme's
+  standard case and whitespace variations. Successful `POST /challenge`
+  responses now include `ok: true`; failures include `ok: false`, a stable
+  `error_code`, a readable `error`, and, where useful, a `next_step`.
+  Malformed JSON reports its line and column. Tokens still belong only in the
+  `Authorization` header, never the JSON body.
+- **Agent-facing failures explain what to do.** `gate_verify` preserves
+  transport and response-format diagnostics and distinguishes waiting,
+  denial, expiry, prior consumption and local verification problems with
+  specific recovery guidance. HTTP authentication, missing endpoints, rate
+  limits, server failures and oversized responses no longer all receive the
+  same wrong-origin advice. `gate_status` accepts a health response only from
+  a service that explicitly identifies itself as a healthy `passkey-gate`.
+- **Approval-transport failures are visible.** If an approval cannot be set
+  up or its link posted, the conversation explains the safe reason and says
+  what Hermes will do next: show its own prompt with `transport_fallback:
+  builtin`, refuse the command otherwise. Internal wait failures report an
+  internal error, and an already-consumed or expired approval is no longer
+  misdescribed as a bad passkey signature.
+- **Agents are told how to pass `tool_call`, and that text-only approvals
+  cannot run one.** In real use an agent sent its bound mint through Hermes's
+  `tool_call` bridge with the `calls` list as a JSON string, mis-escaped the
+  command's quotes, and after several parse errors minted a text-only
+  approval instead; the human signed it and it could not authorise the call.
+  The `gate_challenge` schema and the hook's block message now say to pass
+  objects and arrays, not JSON strings, and to keep `tool_call`. A text-only
+  mint returns a `text_only_note`, and `gate_verify` answers "approval has no
+  bound tool call" with a specific `next_step`.
+- **A wrong `action_text` is no longer reported as a refusal.** Over HTTP,
+  "refused", "wrong text" and "no such id" still share one `denied` answer so
+  ids can't be probed. `gate_verify`, which can read its own gate's records,
+  now adds `denied_reason` (`action_text_mismatch` or `refused`) and a
+  matching `next_step` for requests that gate issued. It never returns the
+  minted text or its hash.
+- **No answer in time is not reported to the agent as "User denied".**
+  Hermes has a single refusal for an approval transport and words it that
+  way. The gate still answers deny (raising instead would hand the command
+  to Hermes's ordinary prompt under `transport_fallback: builtin`), and a
+  new `transform_tool_result` hook corrects the wording of that one blocked
+  result: the user did not answer, nothing ran, ask before trying again. A
+  real denial, and any result that isn't that refusal, is left alone.
+- **Every tool refusal carries `error_code` and `next_step`**, including the
+  older ones (missing or non-text arguments, `wait_seconds`, an unconfigured
+  origin, a missing `why`, a missing `tool_call` under enforcement).
+- **The missing-`why` refusal no longer calls your own human a stranger.**
+  It says `why` is needed whenever `requester_owner` is set, and that nothing
+  was minted.
+- **`gate_verify` can wait up to 300 seconds** (was 120). Signing on a phone
+  took 95 to 103 seconds in real use.
+
+### Fixed
+
+- Tool handlers return structured diagnostic JSON instead of raising when
+  arguments are not objects or local pin, database or audit access fails;
+  internal exception details stay in operator logs rather than tool output.
+- A string or array in `parent_approval`, and an empty or otherwise malformed
+  `tool_call`, are rejected explicitly instead of being silently dropped and
+  minting a request with different meaning.
+- An audit-write failure while handling an HTTP error no longer suppresses
+  the client's JSON error response. The original failure and audit failure
+  are logged for the operator.
+- Invalid `max_age` values are reported directly as validation errors rather
+  than surfacing later as a malformed approval record.
+
 ## [0.9.0] - 2026-11-14
 
 ### Added

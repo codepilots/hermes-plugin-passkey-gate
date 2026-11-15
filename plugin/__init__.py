@@ -97,6 +97,16 @@ def _on_post_tool_call(tool_name: str = "", args: dict = None, **kwargs):
     return None
 
 
+def _on_transform_tool_result(tool_name: str = "", args: dict = None, result=None, **kwargs):
+    # Hermes words every transport refusal as "User denied"; when the human
+    # simply never answered, correct that for the agent (transport.py).
+    try:
+        return transport.reword_silence(tool_name, args, result)
+    except Exception:
+        logger.exception("passkey-gate: could not reword an unanswered approval")
+        return None
+
+
 def _on_pre_approval_request(**kwargs):
     """Hermes is about to ask its approval transport about a flagged command.
     With passkey_hermes_prompts on, post a passkey approval link into this
@@ -123,6 +133,34 @@ def _on_pre_approval_request(**kwargs):
             outcome = transport.begin_ask(kwargs.get("request_id"), kwargs.get("command"),
                                           kwargs.get("description"), cli._ctx_ref.post_message)
         logger.info("passkey-gate: Hermes prompt on %s: %s", surface or "unknown surface", outcome)
+        if outcome.startswith("not asked") and surface != "cli":
+            # Otherwise a fallback=deny configuration hides the actual setup
+            # failure behind a generic transport refusal. Keep raw exception
+            # details in operator logs, but make the safe recovery visible.
+            if "no owner key" in outcome:
+                reason = "no owner key is pinned; the operator needs to run 'hermes passkey-gate setup'"
+            elif "no address" in outcome:
+                reason = "the gate has no HTTPS address; the operator needs to run 'hermes passkey-gate setup'"
+            elif "link could not be posted" in outcome:
+                reason = "the approval link could not be posted to this conversation"
+            else:
+                reason = "the gate could not set up the approval; the operator should check its status and logs"
+            # What Hermes does next is its transport_fallback setting, not
+            # ours: only 'builtin' shows its own prompt; anything else denies.
+            fallback = transport.hermes_selection().get("transport_fallback")
+            if fallback == "builtin":
+                what_next = "Hermes will show its own approval prompt instead."
+            elif fallback:
+                what_next = ("Hermes will refuse the command, because its transport_fallback "
+                             "setting is not 'builtin'.")
+            else:
+                what_next = "Hermes's transport_fallback setting decides what happens to the command."
+            try:
+                cli._ctx_ref.post_message(
+                    f"🔐 Passkey approval unavailable: {reason}.\n"
+                    f"{what_next} No passkey approval was created.")
+            except Exception:
+                logger.exception("passkey-gate: could not report approval setup failure")
     except Exception:
         logger.exception("passkey-gate: could not ask for a passkey approval of a Hermes prompt")
     return None
@@ -172,6 +210,7 @@ def register(ctx):
     for name, fn in (("pre_llm_call", _on_pre_llm_call),
                      ("post_gateway_admission", _on_post_gateway_admission),
                      ("post_tool_call", _on_post_tool_call),
+                     ("transform_tool_result", _on_transform_tool_result),
                      ("pre_approval_request", _on_pre_approval_request),
                      ("post_approval_response", _on_post_approval_response)):
         try:

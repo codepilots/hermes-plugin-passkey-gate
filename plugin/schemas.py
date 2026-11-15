@@ -85,7 +85,15 @@ GATE_CHALLENGE = {
                     "added or dropped later makes it a different call. When "
                     "enforcement is on, the pre_tool_call hook re-derives this "
                     "binding and only lets the call through if it matches an "
-                    "approved, unconsumed challenge."
+                    "approved, unconsumed challenge. Pass a JSON object, never a "
+                    "JSON-encoded string. If you call this through a bridge tool "
+                    "that takes a `calls` list, pass that list as a real array "
+                    "too: a string there needs every nested quote escaped twice "
+                    "and usually fails to parse. Prefer single quotes inside a "
+                    "bound shell command. If a call fails to parse, fix the "
+                    "quoting and resend; do not drop tool_call, because a "
+                    "text-only approval can never authorise a tool call and "
+                    "the human's signature would be wasted."
                 ),
             },
         },
@@ -117,7 +125,7 @@ GATE_VERIFY = {
             },
             "wait_seconds": {
                 "type": "integer",
-                "description": "Poll until this many seconds elapse waiting for the human to sign (max 120). Omit for an instant one-shot check.",
+                "description": "Poll until this many seconds elapse waiting for the human to sign (max 300). Omit for an instant one-shot check.",
             },
             "tool_call": {
                 "type": "object",

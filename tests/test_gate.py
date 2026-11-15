@@ -385,6 +385,83 @@ def test_gate_verify_reports_bound_tool_call(monkeypatch, base, autumn):
     }
 
 
+def test_text_only_approval_says_so_at_mint_and_at_verify(monkeypatch, base, autumn):
+    """Seen in real use: after its bound mint failed to parse, an agent minted
+    a text-only approval, the human signed it, and it could not authorise the
+    call. Both ends now say so, before and after the signature."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    minted = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent"}))
+    assert minted["ok"] is True and "text-only" in minted["text_only_note"]
+    bound = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                             "tool_call": TOOL_CALL}))
+    assert bound["ok"] is True and "text_only_note" not in bound
+    approve(base, autumn, minted["challenge_id"])
+    out = json.loads(tools.gate_verify({"challenge_id": minted["challenge_id"],
+                                        "action_text": ACTION, "tool_call": TOOL_CALL}))
+    assert out["verified"] is False and out["problems"] == ["approval has no bound tool call"]
+    assert "text-only" in out["next_step"] and "tool_call" in out["next_step"]
+
+
+def test_gate_verify_tells_a_wrong_action_text_from_a_refusal(monkeypatch, base, autumn):
+    """Over HTTP both answer 'denied' so ids can't be probed; the tool, which
+    can read its own gate's records, says which it was."""
+    pin_once(gate_core.data_dir(), autumn.pem)
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    c = new_challenge(base)
+    approve(base, autumn, c["challenge_id"])
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
+                                        "action_text": ACTION + " (reworded)"}))
+    assert out["verified"] is False and out["status"] == "denied"
+    assert out["denied_reason"] == "action_text_mismatch"
+    assert "Nobody refused" in out["next_step"] and "Do not mint" in out["next_step"]
+    assert c["action_sha256"] not in json.dumps(out) and ACTION not in json.dumps(out)
+    # the right text still verifies: the approval was untouched
+    assert json.loads(tools.gate_verify({"challenge_id": c["challenge_id"],
+                                         "action_text": ACTION}))["verified"] is True
+    # an id this gate never issued stays an unexplained denial
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 32, "action_text": ACTION}))
+    assert out["status"] == "denied" and "denied_reason" not in out
+    # a real refusal says so
+    gate_core.db().execute("update challenges set status='denied' where id=?", (c["challenge_id"],))
+    gate_core.db().commit()
+    out = json.loads(tools.gate_verify({"challenge_id": c["challenge_id"], "action_text": ACTION}))
+    assert out["denied_reason"] == "refused" and "refused" in out["next_step"]
+
+
+def test_every_tool_refusal_has_a_code_and_a_next_step(monkeypatch):
+    monkeypatch.setattr(tools, "_base_url", lambda: "")
+    refusals = [
+        tools.gate_challenge({"action_text": 5, "requester": "agent"}),
+        tools.gate_challenge({"action_text": ACTION, "requester": "agent", "requester_owner": "Autumn"}),
+        tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                              "parent_approval": {"base": "https://x.example"}}),
+        tools.gate_verify({}),
+        tools.gate_verify({"challenge_id": 1, "action_text": ACTION}),
+        tools.gate_verify({"challenge_id": "c", "action_text": ACTION, "wait_seconds": "soon"}),
+        tools.gate_verify({"challenge_id": "c", "action_text": ACTION}),
+    ]
+    for raw in refusals:
+        out = json.loads(raw)
+        assert out["ok"] is False and out["error"] and out["error_code"] and out["next_step"], out
+    why = json.loads(refusals[1])
+    assert why["error_code"] == "why_required" and "stranger" not in why["error"]
+
+
+def test_gate_verify_waits_up_to_five_minutes():
+    from passkey_gate import schemas
+    assert tools.MAX_WAIT_SECONDS == 300
+    assert "max 300" in schemas.GATE_VERIFY["parameters"]["properties"]["wait_seconds"]["description"]
+
+
+def test_schema_and_block_message_tell_the_agent_how_to_pass_tool_call():
+    from passkey_gate import schemas
+    text = schemas.GATE_CHALLENGE["parameters"]["properties"]["tool_call"]["description"]
+    assert "never a JSON-encoded string" in text and "real array" in text
+    verdict = tools.hook_verdict("terminal", {"command": "rm -rf /srv/data"}, [r"rm -rf"], True)
+    assert verdict["action"] == "block" and "not a string" in verdict["message"]
+
+
 def test_gate_verify_refuses_different_requested_tool_call(monkeypatch, base, autumn):
     """A caller cannot turn a verified approval into authorization for another call."""
     pin_once(gate_core.data_dir(), autumn.pem)
@@ -398,6 +475,8 @@ def test_gate_verify_refuses_different_requested_tool_call(monkeypatch, base, au
     }))
     assert out["ok"] is True and out["verified"] is False
     assert any("does not match the approved tool call" in p for p in out["problems"])
+    assert "Do not perform the action" in out["next_step"]
+    assert "exact approved call" in out["next_step"]
 
 
 def test_hook_refuses_row_with_inconsistent_bound_tool_call(monkeypatch):
@@ -569,6 +648,7 @@ def test_gate_verify_rejects_stale_approval(monkeypatch, base, autumn):
                                         "action_text": ACTION}))
     assert out["ok"] is True and out["verified"] is False
     assert out["status"] == "expired"
+    assert "Mint a fresh approval" in out["next_step"]
 
 
 def test_hook_fails_closed_on_error(base, autumn, monkeypatch):
@@ -662,6 +742,7 @@ def test_gate_verify_surfaces_consumed_at(monkeypatch, base, autumn):
                                         "action_text": ACTION}))
     assert out["ok"] is True and out["verified"] is False
     assert out["status"] == "consumed"
+    assert "already used" in out["next_step"] and "fresh approval" in out["next_step"]
     assert out["approved_at"] is not None
     assert out["consumed_at"] is not None and out["consumed_at"] >= out["approved_at"]
 
@@ -1750,9 +1831,11 @@ def test_http_challenge_requires_mint_token(base):
     body = json.dumps({"action_text": ACTION, "requester": "stranger"}).encode()
     s, r = _raw_post(base, "/challenge", body, {"Content-Type": "application/json"})
     assert s == 401 and "mint token" in r["error"]
+    assert r["ok"] is False and r["error_code"] == "invalid_mint_token"
+    assert "Authorization: Bearer <token>" in r["next_step"]
     s, r = _raw_post(base, "/challenge", body, {"Content-Type": "application/json",
                                                  "Authorization": "Bearer wrong-token"})
-    assert s == 401
+    assert s == 401 and r["error_code"] == "invalid_mint_token"
     s, r = _raw_post(base, "/challenge", body, {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + gate_core.mint_api_token()})
@@ -1764,6 +1847,92 @@ def test_mint_token_is_stable_and_private(base):
     assert t1 == t2 and len(t1) >= 40
     mode = (gate_core.data_dir() / gate_core.MINT_TOKEN_NAME).stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_mint_token_accepts_standard_authorization_formatting(base):
+    """HTTP auth schemes are case-insensitive and allow whitespace before credentials."""
+    token = gate_core.mint_api_token()
+    for header in (f"Bearer {token}", f"bearer {token}", f"BEARER    {token}",
+                   f"Bearer\t{token}", f"  Bearer {token}  "):
+        assert gate_core.mint_token_ok(header), header
+    for header in (None, "", "Bearer", "Basic " + token, token):
+        assert not gate_core.mint_token_ok(header), header
+
+
+@pytest.mark.parametrize("content_type", [
+    "application/json; charset=utf-8",
+    "Application/JSON; Charset=UTF-8",
+    "application/vnd.passkey-gate+json; charset=utf-8",
+])
+def test_http_request_json_formatting(base, content_type):
+    """Insignificant JSON whitespace, media-type case/parameters and standard
+    application/*+json types are all equivalent request encodings."""
+    body = ("\r\n" + json.dumps({"requester": "json-formatting",
+                                 "action_text": ACTION}, indent=2) + "\n\t").encode()
+    s, r = _raw_post(base, "/challenge", body, {
+        "Content-Type": content_type,
+        "Authorization": "Bearer " + gate_core.mint_api_token()})
+    assert s == 201 and r["ok"] is True
+    assert r["action_sha256"] == gate_core.sha256_hex(ACTION)
+
+
+@pytest.mark.parametrize("body", [b"[]", b'"request"', b"null", b"1"])
+def test_http_request_json_must_be_an_object(base, body):
+    """Valid JSON of another shape gets a useful error, not an AttributeError."""
+    s, r = _raw_post(base, "/a/x/deny", body, {"Content-Type": "application/json"})
+    assert s == 400 and r["ok"] is False
+    assert r["error"] == "request body must be a JSON object"
+    assert r["error_code"] == "invalid_json_shape" and "JSON object" in r["next_step"]
+
+
+def test_http_minting_reports_json_error_location_and_recovery(base):
+    """An agent can fix malformed input without opaque server-side diagnostics."""
+    s, r = _raw_post(base, "/challenge", b'{\n  "action_text": "unterminated\n}', {
+        "Content-Type": "application/json",
+        "Authorization": "bearer    " + gate_core.mint_api_token()})
+    assert s == 400 and r["ok"] is False
+    assert r["error_code"] == "invalid_json"
+    assert "line 2, column" in r["error"] and "one JSON object" in r["next_step"]
+
+
+def test_http_minting_rejects_empty_tool_call_instead_of_dropping_it(base):
+    body = json.dumps({"action_text": ACTION, "requester": "empty-binding",
+                       "tool_call": {}}).encode()
+    s, r = _raw_post(base, "/challenge", body, {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + gate_core.mint_api_token()})
+    assert s == 422 and r["ok"] is False and r["error_code"] == "invalid_request"
+    assert "tool_call must be an object" in r["error"]
+
+    body = json.dumps({"action_text": ACTION, "requester": "bad-parent",
+                       "parent_approval": "not an object"}).encode()
+    s, r = _raw_post(base, "/challenge", body, {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + gate_core.mint_api_token()})
+    assert s == 422 and r["error_code"] == "invalid_request"
+    assert "parent_approval must be an object" in r["error"]
+
+
+def test_http_error_survives_audit_failure_and_is_logged(base, monkeypatch, caplog):
+    import logging
+
+    def fail_request(*a, **k):
+        raise RuntimeError("database detail")
+
+    def fail_audit(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(gate_core, "create_challenge", fail_request)
+    monkeypatch.setattr(gate_core, "audit", fail_audit)
+    body = json.dumps({"action_text": ACTION, "requester": "audit-failure"}).encode()
+    with caplog.at_level(logging.ERROR, logger="passkey_gate.gate_core"):
+        s, r = _raw_post(base, "/challenge", body, {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + gate_core.mint_api_token()})
+    assert s == 400 and r["ok"] is False and r["error_code"] == "request_failed"
+    assert "database detail" not in r["error"] and "disk full" not in r["error"]
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("request processing failed (RuntimeError)" in m for m in messages)
+    assert any("could not audit a request error" in m for m in messages)
 
 
 def test_cross_site_form_post_to_deny_is_refused(base):
@@ -1822,6 +1991,54 @@ def test_gate_verify_tolerates_surrounding_whitespace(monkeypatch, base, autumn)
     assert out["verified"] is True, out
 
 
+def test_gate_verify_preserves_gate_failure_diagnostics(monkeypatch, base):
+    """Agents receive the fetch error and recovery step, not just status=error."""
+    import io
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    monkeypatch.setattr(tools.netfetch, "open_no_redirect",
+                        lambda *a, **k: io.BytesIO(b"<html>not JSON</html>"))
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION}))
+    assert out["verified"] is False and out["status"] == "error"
+    assert "invalid JSON" in out["error"] and "origin" in out["next_step"]
+
+    def refused(*a, **k):
+        raise ConnectionRefusedError("no listener")
+    monkeypatch.setattr(tools.netfetch, "open_no_redirect", refused)
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION}))
+    assert out["verified"] is False and out["error_type"] == "ConnectionRefusedError"
+    assert "nothing is listening" in out["error"] and "service start" in out["next_step"]
+
+    def limited(*a, **k):
+        raise urllib.error.HTTPError(base, 429, "rate limited", None, None)
+    monkeypatch.setattr(tools.netfetch, "open_no_redirect", limited)
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION}))
+    assert out["verified"] is False and "rate limited" in out["error"]
+    assert "stop retrying briefly" in out["next_step"]
+
+    def oversized(*a, **k):
+        raise tools.netfetch.ResponseTooLarge("too large")
+    monkeypatch.setattr(tools.netfetch, "open_no_redirect", oversized)
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION}))
+    assert out["verified"] is False and "safety size limit" in out["error"]
+    assert "do not retry" in out["next_step"]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (b"<html>not JSON</html>", "invalid JSON"),
+    (b"[]", "not an object"),
+    (b"{}", "healthy passkey-gate"),
+    (b'{"status":"ok","service":"another-service"}', "healthy passkey-gate"),
+])
+def test_gate_status_reports_bad_gate_json(monkeypatch, base, raw, expected):
+    """A proxy/HTML error page is not misdiagnosed as a malformed origin."""
+    import io
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    monkeypatch.setattr(tools.netfetch, "open_no_redirect", lambda *a, **k: io.BytesIO(raw))
+    out = json.loads(tools.gate_status({"audit_check": False}))
+    assert out["gate"]["status"] == "unreachable"
+    assert expected in out["gate"]["error"] and "origin" in out["gate"]["next_step"]
+
+
 def test_handlers_never_raise_on_bad_types():
     """Hermes handler contract: same JSON shape on error, never an exception."""
     out = json.loads(tools.gate_verify({"challenge_id": "x", "action_text": ACTION,
@@ -1832,6 +2049,54 @@ def test_handlers_never_raise_on_bad_types():
     out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "a",
                                            "requester_owner": 7}))
     assert out["ok"] is False and "requester_owner" in out["error"]
+
+
+@pytest.mark.parametrize("max_age", ["abc", -1, 1.5, True, float("inf")])
+def test_gate_verify_reports_invalid_max_age(max_age):
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION,
+                                        "max_age": max_age}))
+    assert out["ok"] is False and out["error_code"] == "invalid_max_age"
+    assert "non-negative integer" in out["error"] and "verify again" in out["next_step"]
+
+
+@pytest.mark.parametrize("parent", ['{"base":"https://peer.example"}', [], "not JSON"])
+def test_gate_challenge_does_not_silently_drop_bad_parent_approval(parent):
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                           "parent_approval": parent}))
+    assert out["ok"] is False and out["error_code"] == "invalid_parent_approval"
+    assert "JSON object" in out["error"] and "do not silently drop it" in out["next_step"]
+
+
+def test_tool_handlers_return_json_when_local_state_access_fails(monkeypatch):
+    def denied(*a, **k):
+        raise PermissionError("private path")
+    monkeypatch.setattr(local_verify, "pinned", denied)
+    out = json.loads(tools.gate_status({"audit_check": False}))
+    assert out["ok"] is False and out["error_code"] == "tool_internal_error"
+    assert "PermissionError" in out["error"] and "private path" not in out["error"]
+
+    monkeypatch.setattr(tools, "_base_url", lambda: "https://gate.example.ts.net")
+    monkeypatch.setattr(tools, "_fetch_verify", lambda *a: {"status": "approved"})
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 24, "action_text": ACTION}))
+    assert out["ok"] is False and out["error_code"] == "tool_internal_error"
+
+    out = json.loads(tools.gate_status([]))
+    assert out["ok"] is False and out["error_code"] == "invalid_arguments"
+
+
+def test_gate_challenge_reports_empty_tool_call_and_internal_failure(monkeypatch):
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent",
+                                           "tool_call": {}}))
+    assert out["ok"] is False and out["error_code"] == "invalid_request"
+    assert "tool_call must be an object" in out["error"] and "Correct" in out["next_step"]
+
+    def fail(*a, **k):
+        raise RuntimeError("sensitive database detail")
+    monkeypatch.setattr(gate_core, "create_challenge", fail)
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent"}))
+    assert out["ok"] is False and out["error_code"] == "challenge_creation_failed"
+    assert "RuntimeError" in out["error"] and "sensitive database detail" not in out["error"]
+    assert "status" in out["next_step"] and "logs" in out["next_step"]
 
 
 

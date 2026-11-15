@@ -136,8 +136,12 @@ again and it's blocked again: each approval is good for one execution.
   `pre_approval_request` posts one message, the approval link for a
   command Hermes flagged, into the conversation that command came from,
   and later edits that message with the outcome
-  (`post_approval_response` closes the request). It never posts anywhere
-  else, and posts nothing with that setting off.
+  (`post_approval_response` closes the request). If the link can't be
+  created or posted, it posts one line saying why instead. When a request
+  goes unanswered, `transform_tool_result` rewords the one blocked result
+  the agent reads, so silence isn't reported as a refusal; it changes no
+  other tool result. It never posts anywhere else, and posts nothing with
+  that setting off.
 - **Changes two Hermes settings only when you tell it to.** `setup` (and
   its settings menu) can select the gate as Hermes's approval transport
   (`security.approval.transport` and `transport_fallback`), after asking.
@@ -280,6 +284,11 @@ What happens then:
    lets the command run once. The chat message is updated to say what
    happened. Deny on your phone, or don't answer before Hermes's
    `approvals.timeout`, and it doesn't run.
+4. The agent is told which of those it was. Hermes words every refusal
+   from an approval transport as "User denied this command". If you tapped
+   Deny, the agent sees that. If you never answered, the gate rewords the
+   blocked result to say so: nothing ran, you did not refuse, and the agent
+   should ask before trying again.
 
 Things to know:
 
@@ -296,7 +305,15 @@ Things to know:
 - **When the link can't be posted or created** (no conversation, no owner
   key pinned, a command containing escape sequences the approval page
   refuses to show), Hermes's `transport_fallback` decides: `builtin` shows
-  Hermes's ordinary prompt, anything else denies the command.
+  Hermes's ordinary prompt, anything else denies the command. Where it
+  can, the gate posts a line in the chat saying what went wrong (no owner
+  key, no HTTPS address, the link couldn't be posted) and which of those
+  two things Hermes will now do.
+- **No answer is still a refusal to Hermes.** Hermes has no "nobody
+  replied" answer for a transport, so an unanswered request counts as a
+  denial in Hermes's own records even though the agent is told the truth.
+  The gate does not hand an unanswered command to Hermes's ordinary
+  prompt, because no passkey protects that prompt.
 - **Lanes apply.** Only conversations in your gated lanes get the passkey
   request; others keep Hermes's own prompt.
 - **What it covers.** Hermes sends terminal commands and `execute_code`
@@ -441,7 +458,9 @@ may never have met that agent. The ask has to stand on its own:
 - **`requester_owner`** names the agent's human, so the signer can judge
   whose agent this is.
 - **`why`** is one plain sentence for the signer. `gate_challenge` refuses
-  a cross-human ask without one.
+  a request that sets `requester_owner` to anyone but the agent itself
+  without one (`error_code: why_required`), whether the signer turns out
+  to be that owner or someone else: the gate can't tell which.
 - **`parent_approval`** carries an approval the agent's own human already
   gave on their gate. The page re-checks it locally and shows **verified**
   only once the signer has pinned that person's key
@@ -454,6 +473,44 @@ may never have met that agent. The ask has to stand on its own:
   in front of you; it can never approve one. Agents that load this plugin
   in the same Hermes profile as the gate create requests directly and don't
   need it.
+
+A remote request is one JSON object with the token in the authorization
+header, not in the body:
+
+```http
+POST /challenge
+Authorization: Bearer <token>
+Content-Type: application/json; charset=utf-8
+
+{
+  "action_text": "Grant deploy-bot read access to the example repository until midnight.",
+  "requester": "remote-agent"
+}
+```
+
+Valid JSON whitespace and indentation do not matter. Content-type parameters
+and case are accepted, as are standard `application/*+json` types. The Bearer
+scheme is case-insensitive and permits normal HTTP whitespace before the
+token. Form and plain-text posts remain refused.
+
+A successful mint returns HTTP 201 with `ok: true` and the usual challenge
+fields. Failures use this shape (with an appropriate HTTP status):
+
+```json
+{
+  "ok": false,
+  "error": "invalid JSON request body at line 2, column 20: ...",
+  "error_code": "invalid_json",
+  "next_step": "Send exactly one JSON object; remove any prose or Markdown around it."
+}
+```
+
+`error_code` identifies the failure class, such as `invalid_mint_token`,
+`unsupported_content_type`, `invalid_json`, `invalid_json_encoding`,
+`invalid_json_shape`, `invalid_request`, `challenge_limit` or `request_failed`.
+`next_step` is present when there is a useful recovery. Invalid JSON includes
+its line and column; valid JSON arrays and scalars are rejected because the
+request must be an object.
 
 ### Exposure
 
@@ -544,8 +601,60 @@ that check (see [Changing settings safely](#changing-settings-safely)).
 | Tool | Purpose |
 |---|---|
 | `gate_challenge` | Create an approval request and return its link. Takes `action_text` (40–4000 characters, written so a human can judge it), `requester`, and optionally `tool_call`, `requester_owner`, `why` and `parent_approval`. |
-| `gate_verify` | Wait for the human (optional `wait_seconds`, up to 120), then verify locally. Optional `max_age` rejects stale approvals. |
+| `gate_verify` | Wait for the human (optional `wait_seconds`, up to 300), then verify locally. Optional `max_age` rejects stale approvals. |
 | `gate_status` | Is the gate reachable? Is an owner key pinned? Is the audit chain consistent? (`hermes passkey-gate status` also lists pinned peer keys.) |
+
+Tool calls return JSON on ordinary failures, including local pin, database and
+audit access errors. `ok: false` means the tool could not complete the requested
+operation or its arguments were invalid. Every such refusal carries an
+`error_code` for the failure class and a `next_step` saying what to do.
+Internal exception details are written to operator logs, not exposed in the
+tool response.
+
+| `error_code` | Meaning |
+|---|---|
+| `invalid_arguments`, `missing_arguments` | An argument is missing, or isn't the type the tool takes. |
+| `why_required` | `requester_owner` is set and `why` is missing. |
+| `tool_call_required` | Enforcement is on, the text matches a pattern, and no `tool_call` was bound. |
+| `invalid_parent_approval` | `parent_approval` isn't an object, or has no `owner`. |
+| `invalid_request` | The gate rejected a field (text too short or vague, a malformed `tool_call`, and so on); the message names it. |
+| `challenge_limit` | Too many open requests. |
+| `invalid_wait_seconds`, `invalid_max_age` | Not a whole number of seconds. |
+| `origin_not_configured`, `config_error` | The gate isn't set up, or its settings didn't load. |
+| `challenge_creation_failed`, `tool_internal_error` | Something failed inside the gate; the operator's logs have the detail. |
+
+**Passing `tool_call`.** It is an object, `{tool, args}`, not a JSON string.
+An agent that reaches these tools through Hermes's `tool_call` bridge should
+pass that bridge's `calls` list as a real array too: as a string, every quote
+inside the bound command has to be escaped twice, and models get that wrong.
+Single quotes inside a bound shell command avoid most of it. An agent that
+hits a parse error should fix the quoting and resend, not drop `tool_call`:
+a request minted without one is text-only and can never authorise a tool
+call, so your signature on it would be wasted. A text-only mint says so in
+`text_only_note`, and verifying one against a tool call answers "approval
+has no bound tool call" with a `next_step` to mint again properly.
+
+For `gate_verify`, `ok: true` with `verified: false` means the check completed
+but the approval cannot authorize the action. The response distinguishes
+`pending`, `denied`, `expired`, `consumed`, transport errors and local
+verification problems, with a `next_step`. Never act unless `verified` is
+`true`. `max_age`, when supplied, must be a non-negative integer number of
+seconds.
+
+`denied` has three causes that look the same over HTTP, so that request ids
+can't be probed: the human refused, the `action_text` isn't exactly what was
+minted, or there is no such request. For requests this gate issued, the tool
+reads its own records and adds `denied_reason`: `action_text_mismatch`
+(nobody refused; send the minted text again, character for character, and
+don't mint a new request) or `refused`. It never returns the minted text or
+its hash. A request from another gate stays a plain `denied`.
+
+`wait_seconds` polls for up to 300 seconds. If the human hasn't answered by
+then the status is `pending` and the agent calls `gate_verify` again.
+
+`gate_status` treats a health endpoint as reachable only when its JSON object
+contains `status: "ok"` and `service: "passkey-gate"`; an HTML error page,
+another JSON shape, or another service produces an explicit diagnostic.
 
 ## Security model
 
@@ -642,6 +751,9 @@ later independent reviews and the record of every finding and fix are in
 | `status` says nothing is listening | The gate isn't running: `hermes passkey-gate service status`, or start `serve`. |
 | The approval page says the request expired, or "No passkey approval in time" | You answered after the wait ended. See [How long a request waits](#how-long-a-request-waits); `status` warns when the timers are too short. |
 | `passkey_hermes_prompts` is on but Hermes still shows its own prompt | Check `status`: the gate must be Hermes's approval transport, and the conversation must be in a gated lane. In the classic terminal client this is expected. If Hermes doesn't ask at all, `approvals.mode` isn't `manual`. |
+| The agent reports `tool_call 'calls' is not valid JSON`, or that a call needs a `name` | That error is from Hermes's `tool_call` bridge, before the gate is reached: the agent sent the call list as a mis-quoted string. See [Tools the agent gets](#tools-the-agent-gets); it normally recovers by sending a real array. |
+| You signed, but the agent says "approval has no bound tool call" | The agent minted a text-only request and then tried to use it for a tool call. It has to mint again with `tool_call` set, and you sign that one. |
+| The agent says a request was denied, and you didn't deny it | Check `denied_reason` in its `gate_verify` result: `action_text_mismatch` means it sent different text from what it minted, and the approval is still good. For a command Hermes flagged, an unanswered request is reported to the agent as unanswered, not denied. |
 | After the passkey approval, Hermes asks again for the same command | Select the gate as Hermes's approval transport: see [Approving once, not twice](#approving-once-not-twice). |
 | The block message mentions the pinned owner key | No key is pinned, or the wrong one is. Check `hermes passkey-gate credentials`. |
 

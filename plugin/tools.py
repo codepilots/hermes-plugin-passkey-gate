@@ -5,6 +5,7 @@ never raise, same JSON shape on error. The enforcement pieces
 (`authority_matches`, `hook_verdict`) are shared with the pre_tool_call hook
 in __init__.py and tested directly.
 """
+import functools
 import json
 import logging
 import re
@@ -45,6 +46,11 @@ def _pinned_owner_problems(row) -> str | None:
         return f"local verification failed ({type(exc).__name__})"
 
 
+# How long gate_verify will poll for the human. Signing on a phone took
+# 95-103 s in real use, too close to the old 120 s cap.
+MAX_WAIT_SECONDS = 300
+
+
 def _stored_call_matches(row, tool_name, args, binding) -> bool:
     """The row's stored canonical call re-hashes to binding and equals this call."""
     try:
@@ -54,29 +60,69 @@ def _stored_call_matches(row, tool_name, args, binding) -> bool:
     return stored == canonical_for_hook(tool_name, args) and gate_core.sha256_hex(stored) == binding
 
 
+def _fail(error: str, code: str, next_step: str) -> str:
+    """Every tool refusal has the same shape: what went wrong, a stable
+    code, and what to do about it."""
+    return json.dumps({"ok": False, "error": error, "error_code": code, "next_step": next_step})
+
+
+def _agent_tool(fn):
+    """Keep the Hermes never-raise contract even when local state is broken."""
+    @functools.wraps(fn)
+    def wrapped(args: dict, **kwargs):
+        if not isinstance(args, dict):
+            return json.dumps({
+                "ok": False, "error": f"{fn.__name__} arguments must be a JSON object",
+                "error_code": "invalid_arguments",
+                "next_step": "Call the tool again with its named arguments as an object."})
+        try:
+            return fn(args, **kwargs)
+        except Exception as exc:
+            logger.exception("passkey-gate: %s failed; returning a tool error", fn.__name__)
+            return json.dumps({
+                "ok": False,
+                "error": f"{fn.__name__} failed while accessing local gate state ({type(exc).__name__})",
+                "error_code": "tool_internal_error",
+                "next_step": "Do not retry unchanged. Ask the operator to check "
+                             "'hermes passkey-gate status' and the service logs."})
+    return wrapped
+
+
+@_agent_tool
 def gate_challenge(args: dict, **kwargs) -> str:
     text = args.get("action_text")
     requester = args.get("requester") or "unknown"
-    tool_call = args.get("tool_call") or None
+    tool_call = args.get("tool_call")
     owner = args.get("requester_owner")
     why = args.get("why")
     parent = args.get("parent_approval")
     bad = [k for k, v in (("requester", requester), ("requester_owner", owner), ("why", why))
            if v is not None and not isinstance(v, str)]
     if bad:
-        return json.dumps({"ok": False, "error": f"{', '.join(bad)} must be a string"})
+        return _fail(f"{', '.join(bad)} must be a string", "invalid_arguments",
+                     "Pass each of these as plain text and call gate_challenge again.")
     cross_human = bool(owner) and owner.strip().lower() != requester.strip().lower()
-    parent = parent if isinstance(parent, dict) else None
+    if parent is not None and not isinstance(parent, dict):
+        return json.dumps({
+            "ok": False, "error": "parent_approval must be a JSON object, not a string or array",
+            "error_code": "invalid_parent_approval",
+            "next_step": "Pass the parsed parent approval object with base, challenge_id, action_sha256 and owner; do not silently drop it."})
     if parent and not str(parent.get("owner") or "").strip():
-        return json.dumps({"ok": False, "error":
-                           "parent_approval needs an `owner`: which human signed the prior "
-                           "approval — a chain without a name on each link is just a claim"})
+        return _fail("parent_approval needs an `owner`: which human signed the prior "
+                     "approval — a chain without a name on each link is just a claim",
+                     "invalid_parent_approval",
+                     "Add owner (the name of the human who signed on the other gate) and mint again.")
     if cross_human and not why:
-        return json.dumps({"ok": False, "error":
-                           f"you named a different owner ({owner!r}), so the signer may be a "
-                           "stranger to your project: write `why` — one plain sentence for THEM "
-                           "saying what signing enables and why it is safe"})
-    if not tool_call:
+        # The gate has no way to know whether the signer is the named owner
+        # or someone else, so `why` is asked for either way; say that, rather
+        # than telling an agent its own human is a stranger.
+        return _fail(f"`why` is missing. You set requester_owner ({owner!r}), so the approval "
+                     "page names that human and must explain the request in plain words, "
+                     "whether the signer is them or someone who has never seen your project",
+                     "why_required",
+                     "Call gate_challenge again with the same arguments plus `why`: one plain "
+                     "sentence saying what signing enables and why it is safe. Nothing was minted.")
+    if tool_call is None:
         # Approval-confusion fix: with enforcement on, prose that matches an
         # authority pattern must not be signable without the exact call it
         # covers — the human approves the bound tool call, not the prose.
@@ -89,24 +135,26 @@ def gate_challenge(args: dict, **kwargs) -> str:
             # finding 17: with the config unreadable the gate cannot judge
             # pattern matches, so it will not mint a signable prose-only
             # challenge that enforcement cannot evaluate
-            return json.dumps({"ok": False, "error": (
+            return _fail(
                 f"passkey-gate configuration failed to load ({cfg['_config_error']}) — "
                 "the gate cannot tell whether this action matches an authority "
-                "pattern, so it will not mint a prose-only challenge. Tell the "
-                "human to fix the passkey-gate settings; the gate reloads them "
+                "pattern, so it will not mint a prose-only challenge",
+                "config_error",
+                "Tell the human to fix the passkey-gate settings; the gate reloads them "
                 "automatically once they parse. A challenge bound to an exact "
-                "tool_call can still be minted.")})
+                "tool_call can still be minted.")
         if cfg.get("require_passkey"):
             for pat in cfg.get("patterns") or []:
                 try:
                     if re.search(pat, text or ""):
-                        return json.dumps({"ok": False, "error": (
+                        return _fail(
                             f"enforcement is on and this action matches an authority "
-                            f"pattern ({pat!r}), but no tool_call was supplied. Pass the "
-                            "exact tool_call you intend to run, shaped "
-                            "{'tool': <name>, 'args': <the same args object>}: the human "
-                            "approves, and the hook enforces, the bound tool call — "
-                            "not the prose.")})
+                            f"pattern ({pat!r}), but no tool_call was supplied: the human "
+                            "approves, and the hook enforces, the exact bound tool call — "
+                            "not the prose",
+                            "tool_call_required",
+                            "Mint again with tool_call set to the exact call you intend to "
+                            "run, shaped {'tool': <name>, 'args': <the same args object>}.")
                 except (re.error, TypeError):
                     # finding 22: same defense in depth as authority_matches —
                     # a pattern smuggled past cmd_set's validation is skipped
@@ -120,8 +168,19 @@ def gate_challenge(args: dict, **kwargs) -> str:
         c = gate_core.create_challenge(text, requester, tool_call,
                                        requester_owner=owner, why=why,
                                        parent_approval=parent)
+    except gate_core.ChallengeLimitError as exc:
+        return json.dumps({
+            "ok": False, "error": str(exc), "error_code": "challenge_limit",
+            "next_step": "Do not keep retrying. Resolve or let an existing request expire before minting another."})
+    except ValueError as exc:
+        return json.dumps({
+            "ok": False, "error": str(exc), "error_code": "invalid_request",
+            "next_step": "Correct the named field and mint a new request; nothing was approved or executed."})
     except Exception as exc:
-        return json.dumps({"ok": False, "error": str(exc)})
+        return json.dumps({
+            "ok": False, "error": f"could not create the approval request ({type(exc).__name__})",
+            "error_code": "challenge_creation_failed",
+            "next_step": "Do not retry unchanged. Ask the operator to check 'hermes passkey-gate status' and the service logs."})
     out = {"ok": True, **c}
     if cross_human:
         out["instructions"] = (
@@ -138,6 +197,12 @@ def gate_challenge(args: dict, **kwargs) -> str:
             "They see the full action text on the page before signing. Then "
             "gate_verify with challenge_id and the same action_text before acting."
         )
+    if tool_call is None:
+        out["text_only_note"] = (
+            "This approval is text-only: it authorises no tool call, and gate_verify "
+            "with a tool_call will fail against it. If you mean to run one specific "
+            "tool call, mint again with tool_call set BEFORE sending the link, so the "
+            "human does not sign something you cannot use.")
     if c.get("url") is None:
         out["error_hint"] = ("the gate has no HTTPS address yet, so this request has no link — "
                              "ask the human to run 'hermes passkey-gate setup'")
@@ -151,22 +216,40 @@ def _local_audit_head():
         return None
 
 
+@_agent_tool
 def gate_verify(args: dict, **kwargs) -> str:
     cid = args.get("challenge_id") or ""
     text = args.get("action_text") or ""
     if not isinstance(cid, str) or not isinstance(text, str):
-        return json.dumps({"ok": False, "error": "challenge_id and action_text must be strings"})
+        return _fail("challenge_id and action_text must be strings", "invalid_arguments",
+                     "Pass the challenge_id and the action_text from your gate_challenge call as plain text.")
     # the gate signs the STRIPPED text (create_challenge strips it), so verify
     # the same bytes — a trailing newline must not fail a genuine approval
     text = text.strip()
     try:
-        wait_s = min(max(int(args.get("wait_seconds") or 0), 0), 120)
+        wait_s = min(max(int(args.get("wait_seconds") or 0), 0), MAX_WAIT_SECONDS)
     except (TypeError, ValueError):
-        return json.dumps({"ok": False, "error": "wait_seconds must be an integer (0-120)"})
+        return _fail(f"wait_seconds must be an integer (0-{MAX_WAIT_SECONDS})", "invalid_wait_seconds",
+                     "Omit wait_seconds for a one-shot check, or pass a whole number of seconds.")
     max_age = args.get("max_age")
+    if max_age is not None:
+        try:
+            if isinstance(max_age, bool):
+                raise ValueError
+            parsed_age = int(max_age)
+            if (isinstance(max_age, float) and max_age != parsed_age) or parsed_age < 0:
+                raise ValueError
+            max_age = parsed_age
+        except (TypeError, ValueError, OverflowError):
+            return json.dumps({
+                "ok": False, "error": "max_age must be a non-negative integer number of seconds",
+                "error_code": "invalid_max_age",
+                "next_step": "Omit max_age or pass an integer such as 300, then verify again."})
 
     if not cid or not text:
-        return json.dumps({"ok": False, "error": "challenge_id and action_text required"})
+        return _fail("challenge_id and action_text required", "missing_arguments",
+                     "Pass the challenge_id that gate_challenge returned and the exact action_text "
+                     "you minted it with. Both go inside the tool's arguments object.")
     # Claims issue 3 (finding 23's rule): gate URLs are PARSED, never
     # prefix-checked — the same rule cmd_set enforces. The old
     # startswith('http://'/'https://') check let credential-carrying,
@@ -174,10 +257,10 @@ def gate_verify(args: dict, **kwargs) -> str:
     try:
         netfetch.parse_gate_origin(_base_url())
     except ValueError:
-        return json.dumps({"ok": False,
-                           "error": "gate origin is not configured or is not a valid gate origin "
-                           "(https; loopback http tolerated for dev) — set "
-                           "plugins.entries.passkey-gate.settings.origin"})
+        return _fail("gate origin is not configured or is not a valid gate origin "
+                     "(https; loopback http tolerated for dev)", "origin_not_configured",
+                     "Ask the operator to run 'hermes passkey-gate setup' (or set "
+                     "plugins.entries.passkey-gate.settings.origin). Do not act without a verified approval.")
 
     base = _base_url()
     sha = hashlib_sha256(text)
@@ -257,9 +340,51 @@ def gate_verify(args: dict, **kwargs) -> str:
                 "Run approved_tool_call exactly: the same tool and the same args, "
                 "nothing added or removed (not even a timeout or working directory). "
                 "Any difference is a different call, and the gate will block it.")
+        if "approval has no bound tool call" in problems:
+            out["next_step"] = (
+                "Do not perform the action. The human signed a text-only approval, which "
+                "cannot authorise a tool call and cannot be upgraded. Mint a new one with "
+                "gate_challenge, passing tool_call as the exact {tool, args} object you "
+                "will run, and tell the human why they are being asked again.")
+        elif problems:
+            out["next_step"] = (
+                "Do not perform the action. Resolve the listed problems first (for example, pin the "
+                "owner key or use the exact approved call). If the approval itself is unusable, mint "
+                "a fresh one with gate_challenge; do not keep retrying this signature.")
         return json.dumps(out)
     out = {"ok": True, "verified": False, "status": last.get("status", "error"),
            "challenge_id": cid}
+    # Transport and response-format failures are actionable agent errors, not
+    # merely a bare status. Keep verification false and preserve the gate's
+    # diagnostic and next step instead of discarding them here.
+    for key in ("error", "error_type", "next_step"):
+        if last.get(key):
+            out[key] = last[key]
+    status = last.get("status", "error")
+    if status == "denied":
+        # The gate's HTTP answer is the same for "refused", "wrong text" and
+        # "no such id", so ids can't be probed. This process can read its own
+        # gate's records, so tell the agent which it was without weakening that.
+        cause = _local_denial_cause(cid, sha)
+        if cause == "action_text_mismatch":
+            out["denied_reason"] = cause
+            out["next_step"] = (
+                "Nobody refused this. The action_text you sent is not exactly the text this "
+                "request was minted with, so it cannot be checked. Call gate_verify again with "
+                "the action_text from your gate_challenge call, character for character. Do not "
+                "mint a new request: the existing one is untouched.")
+        elif cause == "refused":
+            out["denied_reason"] = cause
+            out["next_step"] = (
+                "The human refused this request (or it was withdrawn). Do not perform the "
+                "action, and do not mint again for the same action unless they ask you to.")
+    if "next_step" not in out:
+        out["next_step"] = {
+            "pending": "Wait for the human, then call gate_verify again with the same challenge_id and action_text; wait_seconds can poll for you.",
+            "denied": "Do not perform the action. Check the challenge_id and exact action_text; if this was a genuine refusal, do not mint again for the same action.",
+            "expired": "Do not perform the action. Mint a fresh approval with gate_challenge if it is still intended.",
+            "consumed": "This approval was already used. Do not perform the action again; mint a fresh approval for any genuinely new execution.",
+        }.get(status, "Do not perform the action; resolve the reported gate error before verifying again.")
     if last.get("status") == "consumed":
         # finding 10: a spent approval reports BOTH stamps — when the human
         # approved it and when the execution consumed it
@@ -268,6 +393,22 @@ def gate_verify(args: dict, **kwargs) -> str:
     return json.dumps(out)
 
 
+def _local_denial_cause(cid: str, sha: str) -> str | None:
+    """Why this gate answered 'denied', when the request is one of its own:
+    'action_text_mismatch', 'refused', or None (not ours, or not readable)."""
+    try:
+        row = gate_core.db().execute(
+            "select action_sha256, status from challenges where id=?", (cid,)).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    if row["action_sha256"] != sha:
+        return "action_text_mismatch"
+    return "refused" if row["status"] == "denied" else None
+
+
+@_agent_tool
 def gate_status(args: dict, **kwargs) -> str:
     out = {"ok": True}
     base = _base_url()
@@ -299,9 +440,21 @@ def _fetch_verify(base: str, cid: str, sha: str):
     url = f"{base}/verify/{cid}?action_sha256={sha}"
     try:
         with netfetch.open_no_redirect(url, timeout=10) as r:
-            return json.loads(netfetch.read_capped(r))
+            raw = netfetch.read_capped(r)
+        try:
+            rec = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return {"status": "error", "error": f"the gate at {base} returned invalid JSON "
+                                                f"({type(exc).__name__})",
+                    "next_step": "check that the configured origin points at this passkey-gate service"}
+        if not isinstance(rec, dict):
+            return {"status": "error", "error": f"the gate at {base} returned JSON that was not an object",
+                    "next_step": "check that the configured origin points at this passkey-gate service"}
+        return rec
     except Exception as exc:
-        return {"status": "error", "error": f"gate not reachable: {type(exc).__name__}"}
+        reason = gate_unreachable_reason(base, exc)
+        reason["error"] = f"gate not reachable ({type(exc).__name__}): {reason['error']}"
+        return {"status": "error", **reason}
 
 
 def gate_unreachable_reason(base: str, exc: Exception | None = None) -> dict:
@@ -326,7 +479,20 @@ def _unreachable_text(base: str, exc) -> dict:
         return {"error": f"the gate at {base} tried to redirect, and redirects are refused",
                 "next_step": "point the origin straight at passkey-gate (no redirecting proxy)"}
     if isinstance(exc, urllib.error.HTTPError):
-        return {"error": f"the gate at {base} answered HTTP {exc.code}",
+        error = f"the gate at {base} answered HTTP {exc.code}"
+        if exc.code == 429:
+            return {"error": error + " (rate limited)",
+                    "next_step": "stop retrying briefly, then retry once; do not tighten the polling loop"}
+        if exc.code in (401, 403):
+            return {"error": error + " (request refused by the gate or its proxy)",
+                    "next_step": "check the origin and any required authorization with the operator"}
+        if exc.code == 404:
+            return {"error": error + " (endpoint not found)",
+                    "next_step": "check that the origin points at a current passkey-gate service, not another app or an old version"}
+        if exc.code >= 500:
+            return {"error": error + " (gate or proxy failure)",
+                    "next_step": "ask the operator to check 'hermes passkey-gate status' and the service logs"}
+        return {"error": error,
                 "next_step": "check that the origin points at passkey-gate, not another service"}
     if isinstance(reason, ConnectionRefusedError):
         return {"error": f"nothing is listening at {base}",
@@ -341,6 +507,12 @@ def _unreachable_text(base: str, exc) -> dict:
     if isinstance(reason, socket.gaierror):
         return {"error": f"cannot resolve the host in {base}",
                 "next_step": "check the origin's hostname (is this machine on the tailnet?)"}
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return {"error": f"the gate at {base} returned invalid JSON",
+                "next_step": "check that the configured origin points at this passkey-gate service"}
+    if isinstance(exc, netfetch.ResponseTooLarge):
+        return {"error": f"the response from {base} exceeded the safety size limit",
+                "next_step": "check that the origin points at a current passkey-gate service; do not retry the same oversized response"}
     if isinstance(exc, ValueError):
         return {"error": f"origin {base!r} is not a valid gate origin ({exc})",
                 "next_step": "set an https origin: 'hermes passkey-gate set origin https://<host>'"}
@@ -351,7 +523,16 @@ def _unreachable_text(base: str, exc) -> dict:
 def _fetch_health(base: str):
     try:
         with netfetch.open_no_redirect(f"{base}/health", timeout=8) as r:
-            return json.loads(netfetch.read_capped(r, 65536))
+            body = json.loads(netfetch.read_capped(r, 65536))
+        if not isinstance(body, dict):
+            return {"status": "unreachable",
+                    "error": f"the gate at {base} returned JSON that was not an object",
+                    "next_step": "check that the configured origin points at this passkey-gate service"}
+        if body.get("status") != "ok" or body.get("service") != "passkey-gate":
+            return {"status": "unreachable",
+                    "error": f"the service at {base} did not identify itself as a healthy passkey-gate",
+                    "next_step": "check that the origin points at this passkey-gate service, not a proxy landing page or another app"}
+        return body
     except Exception as exc:
         return {"status": "unreachable", **gate_unreachable_reason(base, exc)}
 
@@ -584,7 +765,9 @@ def hook_verdict(tool_name: str, args, patterns, require_passkey: bool) -> dict 
                 "approved passkey challenge covers it (matched "
                 f"{render_pattern(matched_pattern, rule_index)}). "
                 "Call gate_challenge first with action_text describing EXACTLY this "
-                f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})}, "
+                f"action and tool_call set to {json.dumps({'tool': tool_name, 'args': args})} "
+                "(as a JSON object, not a string; keep tool_call even if a first attempt "
+                "fails to parse, since a text-only approval will not unlock this call), "
                 "send the human the approval URL, wait for their passkey signature, "
                 "then retry this identical tool call verbatim. Do NOT reach the same "
                 "effect another way (a reworded command, different flags, another tool, "
