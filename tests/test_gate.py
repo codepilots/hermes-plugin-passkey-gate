@@ -458,6 +458,27 @@ def test_every_tool_refusal_has_a_code_and_a_next_step(monkeypatch):
     assert why["error_code"] == "why_required" and "stranger" not in why["error"]
 
 
+def test_an_argument_the_tool_does_not_take_is_refused_not_dropped(monkeypatch, base):
+    """Found in a live run: an extra top-level argument was ignored and the
+    request minted. A misspelled `tool_cal` would mint a text-only request
+    that can never authorise the call the agent meant to bind."""
+    monkeypatch.setattr(tools, "_base_url", lambda: base)
+    before = gate_core.db().execute("select count(*) from challenges").fetchone()[0]
+    out = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent", "tool_cal": TOOL_CALL}))
+    assert out["ok"] is False and out["error_code"] == "unknown_arguments"
+    assert "tool_cal (did you mean tool_call?)" in out["error"]
+    assert "tool_call" in out["next_step"] and "nothing was minted" in out["next_step"]
+    assert gate_core.db().execute("select count(*) from challenges").fetchone()[0] == before
+    out = json.loads(tools.gate_verify({"challenge_id": "A" * 32, "action_text": ACTION, "zzz": 1, "wait": 5}))
+    assert out["error_code"] == "unknown_arguments" and "wait (did you mean" in out["error"] and "zzz" in out["error"]
+    assert json.loads(tools.gate_status({"verbose": True}))["error_code"] == "unknown_arguments"
+    # every documented argument is still accepted
+    assert json.loads(tools.gate_status({"audit_check": False}))["ok"] is True
+    ok = json.loads(tools.gate_challenge({"action_text": ACTION, "requester": "agent", "requester_owner": "agent",
+                                          "why": "A test.", "tool_call": TOOL_CALL, "parent_approval": None}))
+    assert ok["ok"] is True, ok
+
+
 def test_gate_verify_waits_up_to_five_minutes():
     from passkey_gate import schemas
     assert tools.MAX_WAIT_SECONDS == 300

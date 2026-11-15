@@ -15,7 +15,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reports a coverage gap: `rm -r` without `-f` is not matched by the default `rm -rf` pattern. On Hermes
   versions that have `register_skill`, the plugin registers every `plugin/skills/*/SKILL.md`. Older Hermes
   versions, or a failed registration, leave the tools and the enforcement hook untouched.
-- **Bundled skill `passkey-gate:malformed-request-test`.** This skill sends 23 malformed or mismatched requests to
+- **Bundled skill `passkey-gate:malformed-request-test`.** This skill sends 25 malformed or mismatched requests to
   `gate_challenge`, `gate_verify`, `gate_status` and the enforcement hook. It checks each answer against the one
   documented in the skill, and grades each error on whether an agent could fix its own mistake from it. It never
   signs or executes anything. The first run's findings (F1 to F9) are in
@@ -84,6 +84,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request for the identical call exists, the hook names it and says not to
   mint again, instead of "Call gate_challenge first", which had agents
   sending the human duplicate links.
+- **An argument a tool doesn't take is refused, not ignored**
+  (`unknown_arguments`, with a "did you mean" for near misses). A misspelled
+  `tool_cal` used to be dropped, minting a text-only request that could
+  never authorise the call the agent meant to bind. This applies to the
+  three agent tools; the HTTP `POST /challenge` body is unchanged.
 - **Clearer mint errors.** A too-short `action_text` says what the text must
   contain; a malformed `parent_approval` names the field and its format; a
   parent gate that isn't on `parent_gate_allowlist` returns a `parent_note`

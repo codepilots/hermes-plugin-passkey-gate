@@ -619,6 +619,7 @@ tool response.
 | `error_code` | Meaning |
 |---|---|
 | `invalid_arguments`, `missing_arguments` | An argument is missing, or isn't the type the tool takes. |
+| `unknown_arguments` | The call names an argument the tool doesn't take. It is refused, not ignored, with a "did you mean" for near misses: a misspelled `tool_cal` would otherwise mint a text-only request. |
 | `why_required` | `requester_owner` is set and `why` is missing. |
 | `tool_call_required` | Enforcement is on, the text matches a pattern, and no `tool_call` was bound. |
 | `invalid_parent_approval` | `parent_approval` isn't an object, or has no `owner`. |

@@ -127,6 +127,14 @@ def bad_binding(base, phone):
         expect(json.loads(out).get("error_code") == "invalid_tool_call", "refused before anything is minted")
 
 
+@path("misspelled-argument", "The agent misspells an argument name")
+def misspelled_argument(base, phone):
+    out = tools.gate_challenge({"action_text": ACTION, "requester": "bramble", "tool_cal": TOOL_CALL})
+    show("gate_challenge with tool_cal instead of tool_call", reply(out))
+    expect(json.loads(out).get("error_code") == "unknown_arguments" and "did you mean tool_call" in out,
+           "refused with a did-you-mean, instead of minting a text-only request")
+
+
 @path("mint-wording", "The agent's action text is too thin, or its parent approval is malformed or unlisted")
 def mint_wording(base, phone):
     out = tools.gate_challenge({"action_text": "delete stuff", "requester": "bramble"})

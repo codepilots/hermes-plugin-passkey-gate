@@ -5,13 +5,14 @@ never raise, same JSON shape on error. The enforcement pieces
 (`authority_matches`, `hook_verdict`) are shared with the pre_tool_call hook
 in __init__.py and tested directly.
 """
+import difflib
 import functools
 import json
 import logging
 import re
 import time
 
-from . import childenv, gate_core, local_verify, netfetch, transport
+from . import childenv, gate_core, local_verify, netfetch, schemas, transport
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,20 @@ def _fail(error: str, code: str, next_step: str) -> str:
     return json.dumps({"ok": False, "error": error, "error_code": code, "next_step": next_step})
 
 
+_KNOWN_ARGUMENTS = {s["name"]: frozenset(s["parameters"]["properties"])
+                    for s in (schemas.GATE_CHALLENGE, schemas.GATE_VERIFY, schemas.GATE_STATUS)}
+
+
+def _nearest_argument(name: str, known) -> str | None:
+    """The argument a mistyped name most likely meant: a near spelling
+    (`tool_cal`), or a name it is part of (`wait` for `wait_seconds`)."""
+    close = difflib.get_close_matches(name, known, 1, 0.6)
+    if close:
+        return close[0]
+    part = sorted(k for k in known if len(name) >= 3 and (k.startswith(name) or name.startswith(k)))
+    return part[0] if len(part) == 1 else None
+
+
 def _agent_tool(fn):
     """Keep the Hermes never-raise contract even when local state is broken."""
     @functools.wraps(fn)
@@ -75,6 +90,17 @@ def _agent_tool(fn):
                 "ok": False, "error": f"{fn.__name__} arguments must be a JSON object",
                 "error_code": "invalid_arguments",
                 "next_step": "Call the tool again with its named arguments as an object."})
+        # An argument the tool doesn't take is refused, not dropped: a
+        # misspelled `tool_cal` would otherwise mint a text-only request that
+        # can never authorise the call the agent meant to bind.
+        known = _KNOWN_ARGUMENTS.get(fn.__name__)
+        unknown = sorted(str(k) for k in args if k not in known) if known else []
+        if unknown:
+            hints = [f"{u} (did you mean {m}?)" if (m := _nearest_argument(u, known)) else u
+                     for u in unknown]
+            return _fail(f"{fn.__name__} does not take: {', '.join(hints)}", "unknown_arguments",
+                         f"Use only these arguments: {', '.join(sorted(known))}. Fix the name and call "
+                         "again; nothing was minted, verified or changed.")
         try:
             return fn(args, **kwargs)
         except Exception as exc:

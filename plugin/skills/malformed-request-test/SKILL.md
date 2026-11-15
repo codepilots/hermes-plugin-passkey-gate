@@ -1,7 +1,7 @@
 ---
 name: malformed-request-test
 description: Probe gate errors with malformed requests and grade them.
-version: 0.2.0
+version: 0.3.0
 author: Autumn Thomson (codepilots), Hermes Agent
 license: MIT
 platforms: [linux, macos]
@@ -78,6 +78,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 19 | TEXT, no `tool_call` | minted, with a `text_only_note` saying it authorises no tool call |
 | 20 | `tool_call: {"tool": "gate_status", "args": {}}` | minted: an empty `args` is a valid binding for a tool that takes no arguments |
 | 21 | `tool_call: {"tool": "terminal", "args": "ls"}` | `invalid_tool_call`: `args` must be an object; nothing minted |
+| 24 | TEXT, and the binding from case 7 under the misspelled name `tool_cal` | `unknown_arguments`: "tool_cal (did you mean tool_call?)", the list of arguments the tool takes, and "nothing was minted". It must not mint a text-only request |
 
 **gate_verify**
 
@@ -89,6 +90,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 | 14 | the made-up id from case 11, `wait_seconds` above the schema maximum | answers at once, with `wait_seconds_clamped_to` set to the maximum. Use the made-up id: against a real pending request this call would wait the full five minutes |
 | 15 | case 7's id, TEXT, `max_age: -5` | `invalid_max_age`, with a valid example |
 | 22 | case 7's id, TEXT, no other arguments | `status: pending`; the next step says to wait and verify again |
+| 25 | case 7's id, TEXT, plus an argument the tool doesn't take, `wait: 5` | `unknown_arguments`: "wait (did you mean wait_seconds?)"; nothing was verified |
 | 23 | case 7's id, TEXT, `wait_seconds: "soon"` | `invalid_wait_seconds`, or Hermes's schema check: not an integer |
 
 **gate_status**
@@ -112,7 +114,7 @@ whose refusal lacks any of the three is a finding, whatever the table says.
 
 Any case that grades below Yes, or whose answer differs from the table, is a finding. Quote the raw response.
 
-The run is done when all 23 cases have a raw response and a grade.
+The run is done when all 25 cases have a raw response and a grade.
 
 ## Reporting
 1. Give the human a table: case, response (shortened), grade, and the reason for any grade below Yes.
@@ -139,6 +141,8 @@ The run is done when all 23 cases have a raw response and a grade.
 ## Pitfalls
 - **Some cases never reach the gate.** Hermes's own schema check rejects cases 1, 4 and 16, and perhaps 23, before
   the plugin sees them. Grade them anyway: the agent experiences the bridge and the gate as one.
+- **Case 9's extra key goes inside the binding**, next to `tool` and `args`. An extra key at the top level of the
+  call is a different mistake, which cases 24 and 25 cover: the gate refuses any argument a tool doesn't take.
 - **A mis-quoted `calls` string fails in the bridge, not the gate.** `tool_call 'calls' is not valid JSON` comes
   from Hermes. Pass `calls` as an array, and prefer single quotes inside a bound command.
 - **Don't trust remembered limits.** In one run the remembered `wait_seconds` maximum was 120, but the code allows
@@ -157,7 +161,7 @@ The run is done when all 23 cases have a raw response and a grade.
   when the `owner` and `others` lanes are gated differently.
 
 ## Verification
-- 23 cases recorded, each with a raw response and a grade.
+- 25 cases recorded, each with a raw response and a grade.
 - Each earlier finding is marked fixed, unchanged or new.
 - No test link was sent to the human, and nothing was signed or executed.
 - The human was told the test requests exist and will expire.
